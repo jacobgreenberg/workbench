@@ -167,12 +167,14 @@ final class HandButton: NSButton {
     private let stack = NSStackView()
     private let plus = HandButton(title: "+", target: nil, action: nil)
     private let border = NSView()
+    private let strip = NSView()
     private var buttons: [TabButton] = []
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
         border.wantsLayer = true
+        strip.wantsLayer = true
         stack.orientation = .horizontal
         stack.spacing = 0
         stack.alignment = .centerY
@@ -184,12 +186,16 @@ final class HandButton: NSButton {
         plus.action = #selector(newTapped)
         plus.translatesAutoresizingMaskIntoConstraints = false
         plus.widthAnchor.constraint(equalToConstant: 30).isActive = true
-        for v in [stack, border] as [NSView] {
+        for v in [strip, stack, border] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            strip.topAnchor.constraint(equalTo: topAnchor),
+            strip.leadingAnchor.constraint(equalTo: leadingAnchor),
+            strip.trailingAnchor.constraint(equalTo: trailingAnchor),
+            strip.heightAnchor.constraint(equalToConstant: Self.titleStrip),
             stack.heightAnchor.constraint(equalToConstant: Self.tabHeight),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
             stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
@@ -229,6 +235,7 @@ final class HandButton: NSButton {
         }
         layer?.backgroundColor = theme.color("background").cgColor
         border.layer?.backgroundColor = theme.color("border").cgColor
+        strip.layer?.backgroundColor = theme.color("tertiary").cgColor   // same as the sidebar
         plus.attributedTitle = NSAttributedString(string: "+", attributes: [
             .font: NSFont.systemFont(ofSize: 13),
             .foregroundColor: theme.color("mutedForeground"),
