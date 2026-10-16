@@ -111,6 +111,13 @@ final class HandButton: NSButton {
     override var mouseDownCanMoveWindow: Bool { false }
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
 
+    /// The tab takes every click itself: the label and dot are window-draggable, so a double-click landing on them
+    /// reached the title bar (the tab bar sits in it) and minimized the window. The label gets clicks only mid-rename.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let hit = super.hitTest(point) else { return nil }
+        return label.isEditable ? hit : self
+    }
+
     /// Updates in place; buttons are only rebuilt when the tab count changes.
     func apply(item: TabItem, selected: Bool, theme: Theme) {
         if label.stringValue != item.title, !label.isEditable {
