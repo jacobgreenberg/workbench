@@ -15,6 +15,14 @@ if CommandLine.arguments.first.map({ URL(fileURLWithPath: $0).lastPathComponent 
     exit(ControlClient.run(Array(CommandLine.arguments.dropFirst())))
 }
 
+// One instance per state directory: a second copy would steal the socket and race layout.json.
+if ControlClient.isServing(path: Store.directory.appendingPathComponent("pane.sock").path) {
+    let me = ProcessInfo.processInfo.processIdentifier
+    NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
+        .first { $0.processIdentifier != me }?.activate()
+    exit(0)
+}
+
 if let res = Bundle.main.resourceURL?.appendingPathComponent("ghostty").path {
     setenv("GHOSTTY_RESOURCES_DIR", res, 1)
 }

@@ -13,7 +13,8 @@ final class HandButton: NSButton {
     private let dot = NSView()
     private let label = NSTextField(labelWithString: "")
     private let close = NSTextField(labelWithString: "×")
-    private let status: PaneStatus
+    private var status = PaneStatus.idle
+    private var width: NSLayoutConstraint!
     private var selected = false
     private var hovering = false
     private var theme: Theme?
@@ -23,18 +24,16 @@ final class HandButton: NSButton {
         return min(max(ceil(w) + 56, 80), 220)
     }
 
-    init(item: TabItem, height: CGFloat) {
-        status = item.status
-        super.init(frame: NSRect(x: 0, y: 0, width: Self.width(for: item.title), height: height))
+    init(height: CGFloat) {
+        super.init(frame: NSRect(x: 0, y: 0, width: 80, height: height))
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
-        widthAnchor.constraint(equalToConstant: frame.width).isActive = true
+        width = widthAnchor.constraint(equalToConstant: frame.width)
+        width.isActive = true
         heightAnchor.constraint(equalToConstant: height).isActive = true
 
         dot.wantsLayer = true
         dot.layer?.cornerRadius = 3.5
-        dot.isHidden = item.status == .idle
-        label.stringValue = item.title
         label.font = .systemFont(ofSize: 12)
         label.lineBreakMode = .byTruncatingTail
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -65,7 +64,14 @@ final class HandButton: NSButton {
     override var mouseDownCanMoveWindow: Bool { false }
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
 
-    func apply(selected: Bool, theme: Theme) {
+    /// Updates in place; buttons are only rebuilt when the tab count changes.
+    func apply(item: TabItem, selected: Bool, theme: Theme) {
+        if label.stringValue != item.title {
+            label.stringValue = item.title
+            width.constant = Self.width(for: item.title)
+        }
+        status = item.status
+        dot.isHidden = item.status == .idle
         self.selected = selected
         self.theme = theme
         refresh()
@@ -106,7 +112,6 @@ final class HandButton: NSButton {
     private let stack = NSStackView()
     private let plus = HandButton(title: "+", target: nil, action: nil)
     private let border = NSView()
-    private var items: [TabItem] = []
     private var buttons: [TabButton] = []
 
     override init(frame: NSRect) {
@@ -148,12 +153,11 @@ final class HandButton: NSButton {
     @objc private func newTapped() { onNew?() }
 
     func update(items newItems: [TabItem], selected: Int, theme: Theme) {
-        if newItems != items || buttons.count != newItems.count {
-            items = newItems
+        if buttons.count != newItems.count {
             buttons.forEach { $0.removeFromSuperview() }
             plus.removeFromSuperview()
-            buttons = newItems.enumerated().map { i, item in
-                let b = TabButton(item: item, height: max(bounds.height, 34))
+            buttons = newItems.indices.map { i in
+                let b = TabButton(height: max(bounds.height, 34))
                 b.onSelect = { [weak self] in self?.onSelect?(i) }
                 b.onClose = { [weak self] in self?.onClose?(i) }
                 stack.addArrangedSubview(b)
@@ -167,6 +171,6 @@ final class HandButton: NSButton {
             .font: NSFont.systemFont(ofSize: 13),
             .foregroundColor: theme.color("mutedForeground"),
         ])
-        for (i, b) in buttons.enumerated() { b.apply(selected: i == selected, theme: theme) }
+        for (i, b) in buttons.enumerated() { b.apply(item: newItems[i], selected: i == selected, theme: theme) }
     }
 }

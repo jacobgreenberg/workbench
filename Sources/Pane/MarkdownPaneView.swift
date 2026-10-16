@@ -44,7 +44,7 @@ private struct Renderer: Sendable {
         func font(size: CGFloat? = nil) -> NSFont {
             let sizes: [CGFloat] = [14, 26, 22, 18, 16, 14, 14]
             var f = NSFont.systemFont(ofSize: size ?? sizes[heading], weight: heading > 0 || bold ? .bold : .regular)
-            if italic { f = NSFontManager.shared.convert(f, toHaveTrait: .italicFontMask) }
+            if italic { f = NSFont(descriptor: f.fontDescriptor.withSymbolicTraits(.italic), size: 0) ?? f }   // NSFontManager is main-thread only
             return f
         }
 
@@ -140,7 +140,7 @@ private struct Renderer: Sendable {
 
         mutating func visitTable(_ t: Markdown.Table) {
             let mono = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
-            let bold = NSFontManager.shared.convert(mono, toHaveTrait: .boldFontMask)
+            let bold = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .bold)
             func row(_ cells: [String], _ f: NSFont) {
                 var a = attrs()
                 a[.font] = f
@@ -152,7 +152,7 @@ private struct Renderer: Sendable {
     }
 }
 
-@MainActor final class MarkdownPaneView: NSView {
+@MainActor final class MarkdownPaneView: NSView, NSTextViewDelegate {
     let paneID: PaneID
     private let path: String
     private var palette: Palette
@@ -164,6 +164,8 @@ private struct Renderer: Sendable {
     private var fileSource: DispatchSourceFileSystemObject?
     private var fileInode: ino_t = 0
     private var pending: DispatchWorkItem?
+    var onOpenLink: ((URL) -> Void)?
+    private let renderQueue = DispatchQueue(label: "pane.markdown", qos: .userInitiated)   // one render in flight per pane
 
     init(id: PaneID, path: String, theme: Theme) {
         paneID = id
@@ -175,6 +177,7 @@ private struct Renderer: Sendable {
         scrollView.hasVerticalScroller = true
         scrollView.drawsBackground = true
         textView.isEditable = false
+        textView.delegate = self
         textView.isSelectable = true
         textView.isRichText = true
         textView.textContainerInset = NSSize(width: 24, height: 20)
@@ -183,8 +186,9 @@ private struct Renderer: Sendable {
         textView.isVerticallyResizable = true
         scrollView.documentView = textView
         addSubview(scrollView)
+        // The file watcher is owned by rewatchFileIfNeeded (called from every reload); only the directory is watched here.
+        dirSource = makeSource(URL(fileURLWithPath: path).deletingLastPathComponent().path)
         apply(theme: theme)
-        watch()
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -197,6 +201,11 @@ private struct Renderer: Sendable {
         reload()
     }
 
+    func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+        if let url = link as? URL ?? (link as? String).flatMap(URL.init(string:)) { onOpenLink?(url) }
+        return true
+    }
+
     func close() {
         closed = true
         pending?.cancel(); pending = nil
@@ -207,11 +216,13 @@ private struct Renderer: Sendable {
     private func reload() {
         generation += 1
         let gen = generation, path = path, palette = palette
-        DispatchQueue.global(qos: .userInitiated).async {
-            let text = (try? String(contentsOfFile: path, encoding: .utf8)) ?? "Cannot read \(path)"
+        renderQueue.async { [weak self] in
+            let size = (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int) ?? 0
+            let text = size > 10 << 20 ? "File too large to preview (\(size >> 20) MB)"
+                : (try? String(contentsOfFile: path, encoding: .utf8)) ?? "Cannot read \(path)"
             let dir = URL(fileURLWithPath: path).deletingLastPathComponent()
             let result = Renderer(markdown: text, baseDir: dir, palette: palette).render()
-            DispatchQueue.main.async { [weak self] in
+            DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self, gen == self.generation, !self.closed else { return }
                     let clip = self.scrollView.contentView
@@ -242,12 +253,6 @@ private struct Renderer: Sendable {
     private func inode() -> ino_t {
         var st = stat()
         return stat(path, &st) == 0 ? st.st_ino : 0
-    }
-
-    private func watch() {
-        dirSource = makeSource(URL(fileURLWithPath: path).deletingLastPathComponent().path)
-        fileSource = makeSource(path)
-        fileInode = inode()
     }
 
     private func rewatchFileIfNeeded() {

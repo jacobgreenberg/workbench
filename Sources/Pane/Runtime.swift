@@ -176,16 +176,16 @@ enum PaneEvent: Sendable {
     }
 
     private nonisolated static let readClipboard: ghostty_runtime_read_clipboard_cb = { userdata, location, state in
-        guard location == GHOSTTY_CLIPBOARD_STANDARD, let id = boxID(userdata) else { return false }
-        let s = UInt(bitPattern: state)
-        DispatchQueue.main.async {
-            MainActor.assumeIsolated {
-                guard let surface = Runtime.current?.delegate?.surfaceView(for: id)?.surface else { return }
-                let str = NSPasteboard.general.string(forType: .string) ?? ""
-                ghostty_surface_complete_clipboard_request(surface, str, UnsafeMutableRawPointer(bitPattern: s), false)
-            }
+        // Called on main from inside key handling (paste binding). Complete synchronously, as upstream does, so the
+        // paste lands before any later keystroke; return false with no text so a performable paste binding falls through.
+        guard location == GHOSTTY_CLIPBOARD_STANDARD, Thread.isMainThread, let id = boxID(userdata) else { return false }
+        nonisolated(unsafe) let state = state
+        return MainActor.assumeIsolated {
+            guard let surface = Runtime.current?.delegate?.surfaceView(for: id)?.surface,
+                  let str = NSPasteboard.general.string(forType: .string) else { return false }
+            ghostty_surface_complete_clipboard_request(surface, str, state, false)
+            return true
         }
-        return true
     }
 
     private nonisolated static let confirmReadClipboard: ghostty_runtime_confirm_read_clipboard_cb = { userdata, cstr, state, request in
@@ -194,7 +194,7 @@ enum PaneEvent: Sendable {
         if request == GHOSTTY_CLIPBOARD_REQUEST_PASTE {
             complete(id, cstr.map { String(cString: $0) } ?? "", s, true)
         } else {
-            complete(id, "", s, false)
+            complete(id, "", s, true)   // deny an OSC 52 read: empty data, confirmed (upstream's cancel path)
         }
     }
 

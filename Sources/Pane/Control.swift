@@ -74,8 +74,12 @@ final class ControlServer: @unchecked Sendable {
         while !isStopped {
             let c = accept(s, nil, nil)
             if c < 0 {
-                if isStopped || errno != EINTR { if isStopped || errno == EBADF || errno == EINVAL { return } }
-                continue
+                if isStopped { return }
+                switch errno {
+                case EINTR, ECONNABORTED: continue
+                case EMFILE, ENFILE: usleep(100_000); continue   // fd table full: back off instead of spinning
+                default: NSLog("pane: control accept() failed: %d", errno); return
+                }
             }
             var one: Int32 = 1
             setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
@@ -92,7 +96,7 @@ final class ControlServer: @unchecked Sendable {
             if n < 0 && errno == EINTR { continue }
             if n <= 0 { break }
             data.append(contentsOf: buf[0..<n])
-            if data.count > 1 << 20 { return }
+            if data.count > 1 << 20 { data.removeAll(); break }   // oversize: answer "bad request"
             if data.contains(10) { break }
         }
         if let i = data.firstIndex(of: 10) { data = data.prefix(upTo: i) }
@@ -201,26 +205,41 @@ enum ControlClient {
         return d
     }
 
-    private static func send(_ msg: [String: String], path: String) -> String? {
-        guard let out = encode(msg) else { return nil }
+    /// True when a running Pane is already serving this socket.
+    static func isServing(path: String) -> Bool {
+        guard let s = connect(path: path) else { return false }
+        close(s)
+        return true
+    }
+
+    /// Connected client socket with 2 s send/receive timeouts, so a stalled app never stalls an agent hook.
+    private static func connect(path: String) -> Int32? {
         let s = socket(AF_UNIX, SOCK_STREAM, 0)
         guard s >= 0 else { return nil }
-        defer { close(s) }
         var one: Int32 = 1
         setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        var tv = timeval(tv_sec: 2, tv_usec: 0)
+        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         let bytes = Array(path.utf8)
-        guard bytes.count < MemoryLayout.size(ofValue: addr.sun_path) else { return nil }
+        guard bytes.count < MemoryLayout.size(ofValue: addr.sun_path) else { close(s); return nil }
         withUnsafeMutableBytes(of: &addr.sun_path) { buf in
             for (i, b) in bytes.enumerated() { buf[i] = b }
             buf[bytes.count] = 0
         }
         let len = socklen_t(MemoryLayout<sockaddr_un>.size)
         let rc = withUnsafePointer(to: &addr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(s, $0, len) }
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(s, $0, len) }
         }
-        guard rc == 0 else { return nil }
+        guard rc == 0 else { close(s); return nil }
+        return s
+    }
+
+    private static func send(_ msg: [String: String], path: String) -> String? {
+        guard let out = encode(msg), let s = connect(path: path) else { return nil }
+        defer { close(s) }
         var off = 0
         while off < out.count {
             let n = out[off...].withUnsafeBytes { write(s, $0.baseAddress, $0.count) }

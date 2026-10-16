@@ -158,11 +158,21 @@ struct Layout: Codable, Equatable, Sendable {
     init() {
         try? FileManager.default.createDirectory(at: Store.directory, withIntermediateDirectories: true)
         let url = Store.directory.appendingPathComponent("layout.json")
-        var l = (try? Data(contentsOf: url)).flatMap { try? JSONDecoder().decode(Layout.self, from: $0) } ?? Layout.default
+        let data = try? Data(contentsOf: url)
+        let decoded = data.flatMap { try? JSONDecoder().decode(Layout.self, from: $0) }
+        if data != nil, decoded == nil {
+            // Never overwrite a layout we failed to read; keep it for recovery.
+            try? FileManager.default.removeItem(at: url.appendingPathExtension("bak"))
+            try? FileManager.default.moveItem(at: url, to: url.appendingPathExtension("bak"))
+        }
+        var l = decoded ?? Layout.default
         l.activeProject = l.projects.isEmpty ? 0 : min(max(l.activeProject, 0), l.projects.count - 1)
         for i in l.projects.indices {
             let n = l.projects[i].tabs.count
             l.projects[i].activeTab = n == 0 ? 0 : min(max(l.projects[i].activeTab, 0), n - 1)
+            for t in l.projects[i].tabs.indices where !(l.projects[i].tabs[t].focused.map(l.projects[i].tabs[t].root.contains) ?? false) {
+                l.projects[i].tabs[t].focused = l.projects[i].tabs[t].root.leaves.first?.id
+            }
         }
         layout = l
     }

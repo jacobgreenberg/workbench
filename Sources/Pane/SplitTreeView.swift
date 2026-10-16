@@ -75,6 +75,10 @@ private final class DividerSplitView: NSSplitView {
     }
 
     override func setFrameSize(_ newSize: NSSize) {
+        // A window resize (often during a mouse drag) must not be recorded as a divider drag.
+        let was = isApplyingRatios
+        isApplyingRatios = true
+        defer { isApplyingRatios = was }
         let changed = newSize != frame.size
         super.setFrameSize(newSize)
         rootView?.frame = bounds

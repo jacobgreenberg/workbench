@@ -168,10 +168,10 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         ghostty_surface_request_process_termination(s)
         surface = nil
         nonisolated(unsafe) let ptr = s
-        nonisolated(unsafe) let view = self
+        let view = self
         DispatchQueue.global(qos: .utility).async {
             ghostty_surface_free(ptr)
-            _ = view
+            DispatchQueue.main.async { _ = view }   // last release (NSView dealloc) must happen on main
         }
     }
 

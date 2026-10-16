@@ -160,7 +160,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
 
     private func mutatePane(_ id: PaneID, _ f: (inout PaneSpec) -> Void) {
         guard let (p, t) = locate(id) else { return }
-        store.layout.projects[p].tabs[t].root = store.layout.projects[p].tabs[t].root.updating(id, f)
+        let root = store.layout.projects[p].tabs[t].root.updating(id, f)
+        guard root != store.layout.projects[p].tabs[t].root else { return }
+        store.layout.projects[p].tabs[t].root = root
         store.changed()
     }
 
@@ -179,7 +181,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             s.onFocus = { [unowned self] id in paneFocused(id) }
             v = s
         case let .markdown(path):
-            v = MarkdownPaneView(id: spec.id, path: path, theme: theme)
+            let m = MarkdownPaneView(id: spec.id, path: path, theme: theme)
+            m.onOpenLink = { [unowned self, id = spec.id] url in open(url, from: id) }
+            v = m
         }
         views[spec.id] = v
         return v
@@ -210,6 +214,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     }
 
     private func render() {
+        if let f = findPane, !(activeTab?.root.contains(f) ?? false) {
+            findSurface?.perform("end_search")
+            findBar.isHidden = true
+            findPane = nil
+        }
         if let tab = activeTab {
             tree.isHidden = false
             emptyLabel.isHidden = true
@@ -298,6 +307,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         store.layout.projects[p].activeTab = t
         store.layout.projects[p].tabs[t].focused = id
         store.changed()
+        if window?.isMiniaturized == true { window?.deminiaturize(nil) }
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate()
         render()
@@ -309,6 +319,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     }
 
     private func setStatus(_ id: PaneID, _ new: PaneStatus, title: String? = nil, body: String? = nil) {
+        guard locate(id) != nil else { return }   // late event from a closed pane
         let old = status[id] ?? .idle
         let watched = isWatched(id)
         status[id] = (watched && (new == .done || new == .attention)) ? .idle : new
@@ -333,8 +344,10 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     // MARK: - RuntimeDelegate
 
     func runtime(_ runtime: Runtime, pane id: PaneID, event: PaneEvent) {
+        guard views[id] != nil else { return }   // queued before the pane closed
         switch event {
         case let .title(t):
+            guard titles[id] != t else { return }
             titles[id] = t
             updateChrome()
         case let .pwd(path):
@@ -346,7 +359,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         case let .notification(title, body):
             setStatus(id, .attention, title: title.isEmpty ? nil : title, body: body)
         case let .commandFinished(_, ns):
-            if ns > 5_000_000_000 { setStatus(id, .done, body: "Command finished") }
+            if ns > 5_000_000_000 {
+                setStatus(id, .done, body: "Command finished")
+            } else if status[id] == .busy {
+                setStatus(id, .idle)   // agent exited without a Stop hook
+            }
         case let .openURL(url):
             openURL(url, from: id)
         case .closeRequested:
@@ -377,17 +394,29 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     }
 
     private func openURL(_ url: String, from id: PaneID) {
-        var path = url.hasPrefix("file://") ? (URL(string: url)?.path ?? url) : url
-        let lower = path.lowercased()
-        if !url.contains("://") || url.hasPrefix("file://"), lower.hasSuffix(".md") || lower.hasSuffix(".markdown") {
-            if !path.hasPrefix("/"), let spec = spec(id), case let .terminal(cwd, _) = spec.kind {
-                path = URL(fileURLWithPath: cwd).appendingPathComponent(path).standardizedFileURL.path
+        if let u = URL(string: url), u.scheme != nil { open(u, from: id); return }
+        var path = (url as NSString).expandingTildeInPath
+        if !path.hasPrefix("/"), let spec = spec(id), case let .terminal(cwd, _) = spec.kind {
+            path = URL(fileURLWithPath: cwd).appendingPathComponent(path).standardizedFileURL.path
+        }
+        open(URL(fileURLWithPath: path), from: id)
+    }
+
+    /// The one link policy for terminal ⌘-clicks and markdown links. Terminal output and documents are untrusted,
+    /// so a click never launches an app or executable and never follows an arbitrary URL scheme.
+    private func open(_ url: URL, from id: PaneID) {
+        if url.isFileURL {
+            if ["md", "markdown"].contains(url.pathExtension.lowercased()) { openMarkdown(url.path, from: id); return }
+            let v = try? url.resourceValues(forKeys: [.isApplicationKey, .isExecutableKey, .isDirectoryKey])
+            if v?.isApplication == true || (v?.isExecutable == true && v?.isDirectory != true) {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            } else {
+                NSWorkspace.shared.open(url)
             }
-            openMarkdown(path, from: id)
-        } else if let u = URL(string: url), u.scheme != nil {
-            NSWorkspace.shared.open(u)
+        } else if ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") {
+            NSWorkspace.shared.open(url)
         } else {
-            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+            NSSound.beep()
         }
     }
 
@@ -447,9 +476,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         if findPane == id { hideFind() }
     }
 
+    // Close paths resolve their target by id only after any confirm dialog: the modal run loop keeps
+    // processing shell exits and socket commands, so indices captured before it may be stale.
     func closePane(_ id: PaneID, confirm ask: Bool = true) {
-        guard let (p, t) = locate(id) else { destroy(id); return }
         if ask, needsConfirm([id]), !confirm("Close this pane?") { return }
+        guard let (p, t) = locate(id) else { destroy(id); return }
         destroy(id)
         if let root = store.layout.projects[p].tabs[t].root.removing(id) {
             store.layout.projects[p].tabs[t].root = root
@@ -457,9 +488,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                 store.layout.projects[p].tabs[t].focused = root.leaves.first?.id
             }
         } else {
-            store.layout.projects[p].tabs.remove(at: t)
-            let count = store.layout.projects[p].tabs.count
-            store.layout.projects[p].activeTab = max(0, min(store.layout.projects[p].activeTab, count - 1))
+            removeTab(project: p, at: t)
         }
         store.changed()
         render()
@@ -467,14 +496,23 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
 
     private func closeTab(at index: Int) {
         guard let p = activeProjectIndex, store.layout.projects[p].tabs.indices.contains(index) else { return }
-        let ids = store.layout.projects[p].tabs[index].root.leaves.map(\.id)
-        if needsConfirm(ids), !confirm("Close this tab?") { return }
-        ids.forEach(destroy)
-        store.layout.projects[p].tabs.remove(at: index)
-        let count = store.layout.projects[p].tabs.count
-        store.layout.projects[p].activeTab = max(0, min(store.layout.projects[p].activeTab, count - 1))
+        let tabID = store.layout.projects[p].tabs[index].id
+        if needsConfirm(store.layout.projects[p].tabs[index].root.leaves.map(\.id)), !confirm("Close this tab?") { return }
+        guard let (p, t) = store.layout.projects.enumerated().lazy
+            .compactMap({ p, project in project.tabs.firstIndex { $0.id == tabID }.map { (p, $0) } }).first else { return }
+        store.layout.projects[p].tabs[t].root.leaves.map(\.id).forEach(destroy)
+        removeTab(project: p, at: t)
         store.changed()
         render()
+    }
+
+    /// Removes a tab and keeps the active tab pointing at the same tab.
+    private func removeTab(project p: Int, at t: Int) {
+        store.layout.projects[p].tabs.remove(at: t)
+        let count = store.layout.projects[p].tabs.count
+        var active = store.layout.projects[p].activeTab
+        if t < active { active -= 1 }
+        store.layout.projects[p].activeTab = max(0, min(active, count - 1))
     }
 
     private func selectTab(_ index: Int) {
@@ -493,11 +531,15 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
 
     private func removeProject(_ index: Int) {
         guard store.layout.projects.indices.contains(index) else { return }
-        let ids = store.layout.projects[index].tabs.flatMap { $0.root.leaves.map(\.id) }
-        if needsConfirm(ids), !confirm("Remove project “\(store.layout.projects[index].name)”?") { return }
-        ids.forEach(destroy)
-        store.layout.projects.remove(at: index)
-        store.layout.activeProject = max(0, min(store.layout.activeProject, store.layout.projects.count - 1))
+        let project = store.layout.projects[index]
+        if needsConfirm(project.tabs.flatMap { $0.root.leaves.map(\.id) }),
+           !confirm("Remove project “\(project.name)”?") { return }
+        guard let i = store.layout.projects.firstIndex(where: { $0.id == project.id }) else { return }
+        store.layout.projects[i].tabs.flatMap { $0.root.leaves.map(\.id) }.forEach(destroy)
+        store.layout.projects.remove(at: i)
+        var active = store.layout.activeProject
+        if i < active { active -= 1 }
+        store.layout.activeProject = max(0, min(active, store.layout.projects.count - 1))
         store.changed()
         render()
     }
@@ -586,13 +628,20 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
 
     func windowDidChangeOcclusionState(_ notification: Notification) { syncVisibility() }
 
+    /// Single-window app: closing the window is quitting, so it goes through the quit confirmation
+    /// instead of leaving a running app with no window.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        NSApp.terminate(nil)
+        return false
+    }
+
     // MARK: - Menu actions
 
     @objc func newTab(_ sender: Any?) { newTab(kind: .terminal(cwd: cwdForNewPane(), launch: nil)) }
     @objc func splitRight(_ sender: Any?) { split(.horizontal, kind: .terminal(cwd: cwdForNewPane(), launch: nil)) }
     @objc func splitDown(_ sender: Any?) { split(.vertical, kind: .terminal(cwd: cwdForNewPane(), launch: nil)) }
     @objc func closePane(_ sender: Any?) {
-        if let id = focusedPane { closePane(id) } else { window?.performClose(nil) }
+        if let id = focusedPane { closePane(id) }
     }
     @objc func closeTab(_ sender: Any?) {
         if let p = activeProjectIndex { closeTab(at: store.layout.projects[p].activeTab) }
@@ -648,17 +697,22 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     @objc func focusUp(_ sender: Any?) { moveFocus(.up) }
     @objc func focusDown(_ sender: Any?) { moveFocus(.down) }
     private func moveFocus(_ d: FocusDirection) {
-        guard let id = focusedPane, let n = tree.neighbor(of: id, d), let v = views[n] else { return }
+        guard let id = focusedPane, let n = tree.neighbor(of: id, d) else { return }
+        focus(n)
+    }
+    /// Focus a pane in the active tab. The model is updated directly because markdown panes never become first responder.
+    private func focus(_ id: PaneID) {
+        guard let v = views[id] else { return }
         window?.makeFirstResponder(v)
-        paneFocused(n)
+        paneFocused(id)
     }
     @objc func focusNextPane(_ sender: Any?) { cyclePane(1) }
     @objc func focusPreviousPane(_ sender: Any?) { cyclePane(-1) }
     private func cyclePane(_ d: Int) {
         guard let tab = activeTab, let id = focusedPane else { return }
         let leaves = tab.root.leaves.map(\.id)
-        guard let i = leaves.firstIndex(of: id), let v = views[leaves[(i + d + leaves.count) % leaves.count]] else { return }
-        window?.makeFirstResponder(v)
+        guard let i = leaves.firstIndex(of: id) else { return }
+        focus(leaves[(i + d + leaves.count) % leaves.count])
     }
     @objc func clearScreen(_ sender: Any?) { focusedPane.flatMap { surfaceView(for: $0) }?.perform("clear_screen") }
     @objc func find(_ sender: Any?) { focusedPane.flatMap { surfaceView(for: $0) }?.perform("start_search") }

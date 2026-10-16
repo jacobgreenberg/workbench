@@ -51,6 +51,7 @@ extension Theme {
         let parts = t[t.index(after: open)..<close].split(separator: ",").map { Double($0.trimmingCharacters(in: .whitespaces)) }
         guard parts.count == 3 || parts.count == 4, !parts.contains(where: { $0 == nil }) else { return nil }
         let n = parts.map { $0! }
+        guard n.allSatisfy(\.isFinite) else { return nil }
         return (n[0], n[1], n[2], n.count == 4 ? n[3] : 1)
     }
 

@@ -111,8 +111,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         main.addItem(menu("Pane", [
             NSMenuItem(title: "About Pane", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: ""),
             .separator(),
-            NSMenuItem(title: "Hide Pane", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h"),
-            NSMenuItem(title: "Quit Pane", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"),
+            item("Hide Pane", #selector(NSApplication.hide(_:)), "h"),
+            item("Quit Pane", #selector(NSApplication.terminate(_:)), "q"),
         ]))
         main.addItem(menu("File", [
             item("New Tab", #selector(w.newTab(_:)), "t"),
@@ -175,7 +175,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         ]))
         main.addItem(menu("Agents", presetItems))
         let window = menu("Window", [
-            NSMenuItem(title: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m"),
+            item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"),
             NSMenuItem(title: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: ""),
         ])
         main.addItem(window)

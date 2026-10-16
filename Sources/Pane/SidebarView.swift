@@ -134,7 +134,7 @@ private final class SidebarCell: NSTableCellView {
         self.selected = selected
         self.theme = theme
 
-        layer?.backgroundColor = theme.color("background").cgColor
+        layer?.backgroundColor = theme.color("tertiary").cgColor   // a shade off the terminal area
         addButton.attributedTitle = NSAttributedString(string: "+", attributes: [
             .font: NSFont.systemFont(ofSize: 16, weight: .light),
             .foregroundColor: theme.color("mutedForeground"),
