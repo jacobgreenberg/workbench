@@ -34,7 +34,6 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private let emptyLabel = NSTextField(labelWithString: "")
     private lazy var tree = SplitTreeView { [unowned self] spec in self.view(for: spec) }
     private var sidebarWidth: NSLayoutConstraint!
-    private var tabBarLeading: NSLayoutConstraint!
 
     init(store: Store, runtime: Runtime) {
         self.store = store
@@ -84,17 +83,15 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         content.addSubview(findBar)
 
         sidebarWidth = sidebar.widthAnchor.constraint(equalToConstant: store.layout.sidebarVisible ? 220 : 0)
-        tabBarLeading = tabBar.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor,
-                                                        constant: store.layout.sidebarVisible ? 0 : 78)
         NSLayoutConstraint.activate([
             sidebar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             sidebar.topAnchor.constraint(equalTo: root.topAnchor),
             sidebar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             sidebarWidth,
-            tabBarLeading,
+            tabBar.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
             tabBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             tabBar.topAnchor.constraint(equalTo: root.topAnchor),
-            tabBar.heightAnchor.constraint(equalToConstant: 34),
+            tabBar.heightAnchor.constraint(equalToConstant: TabBarView.titleStrip + TabBarView.tabHeight),
             content.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
             content.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             content.topAnchor.constraint(equalTo: tabBar.bottomAnchor),
@@ -774,7 +771,6 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         let visible = store.layout.sidebarVisible
         sidebar.isHidden = !visible
         sidebarWidth.constant = visible ? 220 : 0
-        tabBarLeading.constant = visible ? 0 : 78
     }
     @objc func focusLeft(_ sender: Any?) { moveFocus(.left) }
     @objc func focusRight(_ sender: Any?) { moveFocus(.right) }

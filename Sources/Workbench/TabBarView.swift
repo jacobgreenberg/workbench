@@ -154,6 +154,11 @@ final class HandButton: NSButton {
 }
 
 @MainActor final class TabBarView: NSView {
+    /// Empty band above the tabs: it is the window's title bar (drag, double-click to minimize, traffic lights),
+    /// kept apart so double-clicking a tab can only rename it.
+    static let titleStrip: CGFloat = 28
+    static let tabHeight: CGFloat = 34
+
     var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
     var onNew: (() -> Void)?
@@ -185,7 +190,7 @@ final class HandButton: NSButton {
         }
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.heightAnchor.constraint(equalToConstant: Self.tabHeight),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
             stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
             border.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -213,7 +218,7 @@ final class HandButton: NSButton {
             buttons.forEach { $0.removeFromSuperview() }
             plus.removeFromSuperview()
             buttons = newItems.indices.map { i in
-                let b = TabButton(height: max(bounds.height, 34))
+                let b = TabButton(height: Self.tabHeight)
                 b.onSelect = { [weak self] in self?.onSelect?(i) }
                 b.onClose = { [weak self] in self?.onClose?(i) }
                 b.onRename = { [weak self] in self?.onRename?(i, $0) }
