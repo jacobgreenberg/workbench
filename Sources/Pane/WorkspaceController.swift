@@ -402,16 +402,22 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         open(URL(fileURLWithPath: path), from: id)
     }
 
-    /// The one link policy for terminal ⌘-clicks and markdown links. Terminal output and documents are untrusted,
-    /// so a click never launches an app or executable and never follows an arbitrary URL scheme.
+    /// The one link policy for terminal ⌘-clicks and markdown links. Terminal output and documents are untrusted, so
+    /// a click only opens passive files (text/source, images, PDF) and plain folders, and only follows http/https/mailto.
+    /// Everything else, including scripts, .command/.terminal/.webloc files and bundles, is revealed in Finder, never run.
     private func open(_ url: URL, from id: PaneID) {
         if url.isFileURL {
-            if ["md", "markdown"].contains(url.pathExtension.lowercased()) { openMarkdown(url.path, from: id); return }
-            let v = try? url.resourceValues(forKeys: [.isApplicationKey, .isExecutableKey, .isDirectoryKey])
-            if v?.isApplication == true || (v?.isExecutable == true && v?.isDirectory != true) {
-                NSWorkspace.shared.activateFileViewerSelecting([url])
+            let file = url.resolvingSymlinksInPath()
+            if ["md", "markdown"].contains(file.pathExtension.lowercased()) { openMarkdown(file.path, from: id); return }
+            let v = try? file.resourceValues(forKeys: [.contentTypeKey, .isDirectoryKey, .isPackageKey])
+            let passive = v?.contentType.map {
+                ($0.conforms(to: .text) || $0.conforms(to: .image) || $0.conforms(to: .pdf))
+                    && !$0.conforms(to: .script) && !$0.conforms(to: .propertyList)
+            } ?? false
+            if (v?.isDirectory == true && v?.isPackage != true) || (v?.isDirectory != true && passive) {
+                NSWorkspace.shared.open(file)
             } else {
-                NSWorkspace.shared.open(url)
+                NSWorkspace.shared.activateFileViewerSelecting([file])
             }
         } else if ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") {
             NSWorkspace.shared.open(url)
