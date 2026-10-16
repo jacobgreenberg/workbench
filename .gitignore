@@ -1,0 +1,6 @@
+.build/
+vendor/GhosttyKit.xcframework/
+vendor/*.tar.gz
+vendor/ghostty-src/
+build/
+*.app

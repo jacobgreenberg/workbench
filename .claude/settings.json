@@ -1,0 +1,1 @@
+{"hooks":{"PreToolUse":[{"matcher":"Agent|Workflow","hooks":[{"type":"command","command":"python3 -I \"/Users/jgreenberg/.claude-shared/hooks/agent-model-guard.py\""}]}]}}

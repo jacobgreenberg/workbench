@@ -1,0 +1,8 @@
+{
+  "hooks": {
+    "SessionStart": [{"hooks": [{"type": "command", "command": "\"$PANE_BIN\" hook start"}]}],
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "\"$PANE_BIN\" hook busy"}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "\"$PANE_BIN\" hook done"}]}],
+    "Notification": [{"hooks": [{"type": "command", "command": "\"$PANE_BIN\" hook attention"}]}]
+  }
+}

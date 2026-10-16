@@ -1,0 +1,696 @@
+import AppKit
+@preconcurrency import GhosttyKit
+import UserNotifications
+
+@MainActor
+final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDelegate {
+    static func overrides(_ theme: Theme) -> String {
+        """
+        cursor-style-blink = false
+        confirm-close-surface = false
+        scrollback-limit = 10000000
+        unfocused-split-opacity = 1
+        window-padding-x = 8
+        window-padding-y = 4
+        window-padding-balance = true
+
+        """ + theme.ghosttyConfig
+    }
+
+    let store: Store
+    let runtime: Runtime
+    private(set) var theme: Theme
+
+    private var views: [PaneID: NSView] = [:]
+    private var status: [PaneID: PaneStatus] = [:]
+    private var titles: [PaneID: String] = [:]
+    private var searchCounts: (total: Int, selected: Int) = (-1, -1)
+    private var findPane: PaneID?
+    private var activity: NSObjectProtocol?
+
+    private let sidebar = SidebarView(frame: .zero)
+    private let tabBar = TabBarView(frame: .zero)
+    private let content = NSView()
+    private let findBar = FindBar(frame: .zero)
+    private let emptyLabel = NSTextField(labelWithString: "")
+    private lazy var tree = SplitTreeView { [unowned self] spec in self.view(for: spec) }
+    private var sidebarWidth: NSLayoutConstraint!
+    private var tabBarLeading: NSLayoutConstraint!
+
+    init(store: Store, runtime: Runtime) {
+        self.store = store
+        self.runtime = runtime
+        self.theme = Theme.named(store.layout.theme)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1400, height: 900),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered, defer: false)
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.isReleasedWhenClosed = false
+        window.tabbingMode = .disallowed
+        window.center()
+        window.setFrameAutosaveName("PaneMain")
+        super.init(window: window)
+        window.delegate = self
+        runtime.delegate = self
+        buildLayout()
+        wireCallbacks()
+        paintTheme()
+        restore()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    // MARK: - Layout
+
+    private func buildLayout() {
+        guard let root = window?.contentView else { return }
+        root.wantsLayer = true
+        for v in [sidebar, tabBar, content] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            root.addSubview(v)
+        }
+        content.wantsLayer = true
+        tree.frame = content.bounds
+        tree.autoresizingMask = [.width, .height]
+        content.addSubview(tree)
+        emptyLabel.translatesAutoresizingMaskIntoConstraints = false
+        emptyLabel.font = .systemFont(ofSize: 13)
+        emptyLabel.alignment = .center
+        content.addSubview(emptyLabel)
+        findBar.translatesAutoresizingMaskIntoConstraints = false
+        findBar.isHidden = true
+        content.addSubview(findBar)
+
+        sidebarWidth = sidebar.widthAnchor.constraint(equalToConstant: store.layout.sidebarVisible ? 220 : 0)
+        tabBarLeading = tabBar.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor,
+                                                        constant: store.layout.sidebarVisible ? 0 : 78)
+        NSLayoutConstraint.activate([
+            sidebar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            sidebar.topAnchor.constraint(equalTo: root.topAnchor),
+            sidebar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            sidebarWidth,
+            tabBarLeading,
+            tabBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            tabBar.topAnchor.constraint(equalTo: root.topAnchor),
+            tabBar.heightAnchor.constraint(equalToConstant: 34),
+            content.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
+            content.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            content.topAnchor.constraint(equalTo: tabBar.bottomAnchor),
+            content.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            emptyLabel.centerXAnchor.constraint(equalTo: content.centerXAnchor),
+            emptyLabel.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            findBar.topAnchor.constraint(equalTo: content.topAnchor, constant: 8),
+            findBar.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+        ])
+        sidebar.isHidden = !store.layout.sidebarVisible
+    }
+
+    private func wireCallbacks() {
+        sidebar.onSelect = { [unowned self] i in selectProject(i) }
+        sidebar.onAdd = { [unowned self] in addProject(nil) }
+        sidebar.onRemove = { [unowned self] i in removeProject(i) }
+        tabBar.onSelect = { [unowned self] i in selectTab(i) }
+        tabBar.onClose = { [unowned self] i in closeTab(at: i) }
+        tabBar.onNew = { [unowned self] in newTab(nil) }
+        tree.onRatiosChanged = { [unowned self] newRoot in
+            mutateActiveTab { $0.root = $0.root.withRatios(from: newRoot) }
+        }
+        findBar.onChange = { [unowned self] text in findSurface?.perform("search:\(text)") }
+        findBar.onNext = { [unowned self] in findSurface?.perform("navigate_search:next") }
+        findBar.onPrevious = { [unowned self] in findSurface?.perform("navigate_search:previous") }
+        findBar.onClose = { [unowned self] in findSurface?.perform("end_search"); hideFind() }
+    }
+
+    // MARK: - Model access
+
+    private var activeProjectIndex: Int? {
+        store.layout.projects.indices.contains(store.layout.activeProject) ? store.layout.activeProject : nil
+    }
+
+    private var activeTab: Tab? {
+        guard let p = activeProjectIndex else { return nil }
+        let project = store.layout.projects[p]
+        return project.tabs.indices.contains(project.activeTab) ? project.tabs[project.activeTab] : nil
+    }
+
+    private var focusedPane: PaneID? { activeTab.flatMap { $0.focused ?? $0.root.leaves.first?.id } }
+
+    private func mutateActiveTab(_ f: (inout Tab) -> Void) {
+        guard let p = activeProjectIndex else { return }
+        let t = store.layout.projects[p].activeTab
+        guard store.layout.projects[p].tabs.indices.contains(t) else { return }
+        f(&store.layout.projects[p].tabs[t])
+        store.changed()
+    }
+
+    private func locate(_ id: PaneID) -> (project: Int, tab: Int)? {
+        for (p, project) in store.layout.projects.enumerated() {
+            if let t = project.tabs.firstIndex(where: { $0.root.contains(id) }) { return (p, t) }
+        }
+        return nil
+    }
+
+    private func spec(_ id: PaneID) -> PaneSpec? {
+        guard let (p, t) = locate(id) else { return nil }
+        return store.layout.projects[p].tabs[t].root.leaves.first { $0.id == id }
+    }
+
+    private func mutatePane(_ id: PaneID, _ f: (inout PaneSpec) -> Void) {
+        guard let (p, t) = locate(id) else { return }
+        store.layout.projects[p].tabs[t].root = store.layout.projects[p].tabs[t].root.updating(id, f)
+        store.changed()
+    }
+
+    // MARK: - Views
+
+    func surfaceView(for id: PaneID) -> SurfaceView? { views[id] as? SurfaceView }
+
+    private func view(for spec: PaneSpec) -> NSView {
+        if let v = views[spec.id] { return v }
+        let v: NSView
+        switch spec.kind {
+        case let .terminal(cwd, launch):
+            let s = SurfaceView(app: runtime.app, id: spec.id, cwd: cwd,
+                                initialInput: launch.map { $0.commandLine + "\n" },
+                                env: env(for: spec.id), scrollbackLimit: launch?.scrollbackLimit)
+            s.onFocus = { [unowned self] id in paneFocused(id) }
+            v = s
+        case let .markdown(path):
+            v = MarkdownPaneView(id: spec.id, path: path, theme: theme)
+        }
+        views[spec.id] = v
+        return v
+    }
+
+    private func env(for id: PaneID) -> [String: String] {
+        let bin = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/pane").path
+        return [
+            "PANE_ID": id.uuidString,
+            "PANE_SOCK": Store.directory.appendingPathComponent("pane.sock").path,
+            "PANE_BIN": bin,
+            "PANE_CLAUDE_SETTINGS": Bundle.main.resourceURL?.appendingPathComponent("claude-hooks.json").path ?? "",
+        ]
+    }
+
+    // ponytail: eager restore so agents resume; surfaces outside the active tab are created
+    // unrealized, 4 per runloop turn. Switch to create-on-first-show if launch gets slow.
+    private func restore() {
+        render()
+        let active = Set(activeTab?.root.leaves.map(\.id) ?? [])
+        var pending = store.layout.projects.flatMap { $0.tabs.flatMap { $0.root.leaves } }.filter { !active.contains($0.id) }
+        func step() {
+            for spec in pending.prefix(4) { (view(for: spec) as? SurfaceView)?.setVisible(false) }
+            pending.removeFirst(min(4, pending.count))
+            if !pending.isEmpty { DispatchQueue.main.async { MainActor.assumeIsolated { step() } } }
+        }
+        if !pending.isEmpty { DispatchQueue.main.async { MainActor.assumeIsolated { step() } } }
+    }
+
+    private func render() {
+        if let tab = activeTab {
+            tree.isHidden = false
+            emptyLabel.isHidden = true
+            tree.render(tab.root, dividerColor: theme.color("border"))
+        } else {
+            tree.isHidden = true
+            tree.subviews.forEach { $0.removeFromSuperview() }
+            emptyLabel.isHidden = false
+            emptyLabel.stringValue = activeProjectIndex == nil ? "⇧⌘O  Add Project" : "⌘T  New Terminal"
+        }
+        syncVisibility()
+        updateChrome()
+        if let id = focusedPane, let v = views[id] { window?.makeFirstResponder(v) }
+    }
+
+    private func syncVisibility() {
+        let windowVisible = window?.occlusionState.contains(.visible) ?? false
+        let shown = windowVisible ? Set(activeTab?.root.leaves.map(\.id) ?? []) : []
+        for (id, v) in views {
+            guard let s = v as? SurfaceView else { continue }
+            s.setVisible(shown.contains(id))
+            if shown.contains(id) { s.refresh() }
+        }
+    }
+
+    private func updateChrome() {
+        let projects = store.layout.projects
+        sidebar.update(rows: projects.map { p in
+            SidebarRow(name: p.name, path: p.path,
+                       status: p.tabs.flatMap { $0.root.leaves }.map { status[$0.id] ?? .idle }.max() ?? .idle)
+        }, selected: store.layout.activeProject, theme: theme)
+        if let p = activeProjectIndex {
+            let project = projects[p]
+            tabBar.update(items: project.tabs.map { tab in
+                let id = tab.focused ?? tab.root.leaves.first?.id
+                return TabItem(title: id.flatMap { titles[$0] } ?? tab.title,
+                               status: tab.root.leaves.map { status[$0.id] ?? .idle }.max() ?? .idle)
+            }, selected: project.activeTab, theme: theme)
+        } else {
+            tabBar.update(items: [], selected: 0, theme: theme)
+        }
+        let badge = status.values.filter { $0 == .done || $0 == .attention }.count
+        NSApp.dockTile.badgeLabel = badge > 0 ? "\(badge)" : nil
+        if status.values.contains(.busy) {
+            if activity == nil {
+                activity = ProcessInfo.processInfo.beginActivity(
+                    options: .userInitiatedAllowingIdleSystemSleep, reason: "Agents running")
+            }
+        } else if let a = activity {
+            ProcessInfo.processInfo.endActivity(a)
+            activity = nil
+        }
+    }
+
+    func applyTheme(_ id: String) {
+        store.layout.theme = id
+        store.changed()
+        theme = Theme.named(id)
+        runtime.reload(overrides: Self.overrides(theme))
+        paintTheme()
+        render()
+    }
+
+    private func paintTheme() {
+        window?.backgroundColor = theme.color("background")
+        content.layer?.backgroundColor = theme.color("background").cgColor
+        emptyLabel.textColor = theme.color("mutedForeground")
+        findBar.apply(theme: theme)
+        for v in views.values { (v as? MarkdownPaneView)?.apply(theme: theme) }
+    }
+
+    // MARK: - Focus & status
+
+    private func paneFocused(_ id: PaneID) {
+        if let (p, t) = locate(id), store.layout.projects[p].tabs[t].focused != id {
+            store.layout.projects[p].tabs[t].focused = id
+            store.changed()
+        }
+        if let s = status[id], s == .done || s == .attention { status[id] = .idle }
+        updateChrome()
+    }
+
+    func focusPane(_ id: PaneID) {
+        guard let (p, t) = locate(id) else { return }
+        store.layout.activeProject = p
+        store.layout.projects[p].activeTab = t
+        store.layout.projects[p].tabs[t].focused = id
+        store.changed()
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate()
+        render()
+    }
+
+    private func isWatched(_ id: PaneID) -> Bool {
+        NSApp.isActive && (window?.occlusionState.contains(.visible) ?? false)
+            && (activeTab?.root.contains(id) ?? false) && focusedPane == id
+    }
+
+    private func setStatus(_ id: PaneID, _ new: PaneStatus, title: String? = nil, body: String? = nil) {
+        let old = status[id] ?? .idle
+        let watched = isWatched(id)
+        status[id] = (watched && (new == .done || new == .attention)) ? .idle : new
+        if !watched, new != old, new == .done || new == .attention {
+            notify(id, title: title, body: body ?? (new == .done ? "Finished" : "Needs your input"))
+        }
+        updateChrome()
+    }
+
+    private func notify(_ id: PaneID, title: String?, body: String) {
+        guard let (p, _) = locate(id) else { return }
+        let c = UNMutableNotificationContent()
+        c.title = title ?? store.layout.projects[p].name
+        c.subtitle = titles[id] ?? ""
+        c.body = body
+        c.sound = .default
+        c.userInfo = ["pane": id.uuidString]
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: id.uuidString, content: c, trigger: nil))
+    }
+
+    // MARK: - RuntimeDelegate
+
+    func runtime(_ runtime: Runtime, pane id: PaneID, event: PaneEvent) {
+        switch event {
+        case let .title(t):
+            titles[id] = t
+            updateChrome()
+        case let .pwd(path):
+            mutatePane(id) { spec in
+                if case let .terminal(_, launch) = spec.kind { spec.kind = .terminal(cwd: path, launch: launch) }
+            }
+        case .bell:
+            setStatus(id, .attention, body: "Bell")
+        case let .notification(title, body):
+            setStatus(id, .attention, title: title.isEmpty ? nil : title, body: body)
+        case let .commandFinished(_, ns):
+            if ns > 5_000_000_000 { setStatus(id, .done, body: "Command finished") }
+        case let .openURL(url):
+            openURL(url, from: id)
+        case .closeRequested:
+            closePane(id, confirm: false)
+        case let .startSearch(needle):
+            findPane = id
+            searchCounts = (-1, -1)
+            findBar.isHidden = false
+            findBar.setCounts(total: -1, selected: -1)
+            findBar.show(needle: needle)
+        case .endSearch:
+            hideFind()
+        case let .searchTotal(n):
+            searchCounts.total = n
+            findBar.setCounts(total: searchCounts.total, selected: searchCounts.selected)
+        case let .searchSelected(n):
+            searchCounts.selected = n
+            findBar.setCounts(total: searchCounts.total, selected: searchCounts.selected)
+        }
+    }
+
+    private var findSurface: SurfaceView? { findPane.flatMap { surfaceView(for: $0) } }
+
+    private func hideFind() {
+        findBar.isHidden = true
+        if let v = findSurface { window?.makeFirstResponder(v) }
+        findPane = nil
+    }
+
+    private func openURL(_ url: String, from id: PaneID) {
+        var path = url.hasPrefix("file://") ? (URL(string: url)?.path ?? url) : url
+        let lower = path.lowercased()
+        if !url.contains("://") || url.hasPrefix("file://"), lower.hasSuffix(".md") || lower.hasSuffix(".markdown") {
+            if !path.hasPrefix("/"), let spec = spec(id), case let .terminal(cwd, _) = spec.kind {
+                path = URL(fileURLWithPath: cwd).appendingPathComponent(path).standardizedFileURL.path
+            }
+            openMarkdown(path, from: id)
+        } else if let u = URL(string: url), u.scheme != nil {
+            NSWorkspace.shared.open(u)
+        } else {
+            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+        }
+    }
+
+    // MARK: - Structure changes
+
+    private func split(_ axis: Axis, kind: PaneKind, from source: PaneID? = nil) {
+        guard let base = source ?? focusedPane, let (p, t) = locate(base), let old = spec(base) else {
+            newTab(kind: kind)
+            return
+        }
+        let new = PaneSpec(id: UUID(), kind: kind)
+        store.layout.activeProject = p
+        store.layout.projects[p].activeTab = t
+        var tab = store.layout.projects[p].tabs[t]
+        tab.root = tab.root.replacing(base, with: .split(axis: axis, ratio: 0.5, a: .leaf(old), b: .leaf(new)))
+        tab.focused = new.id
+        store.layout.projects[p].tabs[t] = tab
+        store.changed()
+        render()
+    }
+
+    private func cwdForNewPane() -> String {
+        if let id = focusedPane, let spec = spec(id), case let .terminal(cwd, _) = spec.kind { return cwd }
+        guard let p = activeProjectIndex else { return NSHomeDirectory() }
+        return store.layout.projects[p].path
+    }
+
+    private func newTab(kind: PaneKind? = nil) {
+        guard let p = activeProjectIndex else { addProject(nil); return }
+        let spec = PaneSpec(id: UUID(), kind: kind ?? .terminal(cwd: store.layout.projects[p].path, launch: nil))
+        store.layout.projects[p].tabs.append(Tab(id: UUID(), title: "Terminal", root: .leaf(spec), focused: spec.id))
+        store.layout.projects[p].activeTab = store.layout.projects[p].tabs.count - 1
+        store.changed()
+        render()
+    }
+
+    private func confirm(_ message: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.informativeText = "Running processes will be terminated."
+        alert.addButton(withTitle: "Close")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    private func needsConfirm(_ ids: [PaneID]) -> Bool {
+        ids.contains { surfaceView(for: $0)?.needsConfirmQuit ?? false }
+    }
+
+    private func destroy(_ id: PaneID) {
+        if let s = views[id] as? SurfaceView { s.close() }
+        if let m = views[id] as? MarkdownPaneView { m.close() }
+        views[id]?.removeFromSuperview()
+        views[id] = nil
+        status[id] = nil
+        titles[id] = nil
+        if findPane == id { hideFind() }
+    }
+
+    func closePane(_ id: PaneID, confirm ask: Bool = true) {
+        guard let (p, t) = locate(id) else { destroy(id); return }
+        if ask, needsConfirm([id]), !confirm("Close this pane?") { return }
+        destroy(id)
+        if let root = store.layout.projects[p].tabs[t].root.removing(id) {
+            store.layout.projects[p].tabs[t].root = root
+            if store.layout.projects[p].tabs[t].focused == id {
+                store.layout.projects[p].tabs[t].focused = root.leaves.first?.id
+            }
+        } else {
+            store.layout.projects[p].tabs.remove(at: t)
+            let count = store.layout.projects[p].tabs.count
+            store.layout.projects[p].activeTab = max(0, min(store.layout.projects[p].activeTab, count - 1))
+        }
+        store.changed()
+        render()
+    }
+
+    private func closeTab(at index: Int) {
+        guard let p = activeProjectIndex, store.layout.projects[p].tabs.indices.contains(index) else { return }
+        let ids = store.layout.projects[p].tabs[index].root.leaves.map(\.id)
+        if needsConfirm(ids), !confirm("Close this tab?") { return }
+        ids.forEach(destroy)
+        store.layout.projects[p].tabs.remove(at: index)
+        let count = store.layout.projects[p].tabs.count
+        store.layout.projects[p].activeTab = max(0, min(store.layout.projects[p].activeTab, count - 1))
+        store.changed()
+        render()
+    }
+
+    private func selectTab(_ index: Int) {
+        guard let p = activeProjectIndex, store.layout.projects[p].tabs.indices.contains(index) else { return }
+        store.layout.projects[p].activeTab = index
+        store.changed()
+        render()
+    }
+
+    private func selectProject(_ index: Int) {
+        guard store.layout.projects.indices.contains(index) else { return }
+        store.layout.activeProject = index
+        store.changed()
+        render()
+    }
+
+    private func removeProject(_ index: Int) {
+        guard store.layout.projects.indices.contains(index) else { return }
+        let ids = store.layout.projects[index].tabs.flatMap { $0.root.leaves.map(\.id) }
+        if needsConfirm(ids), !confirm("Remove project “\(store.layout.projects[index].name)”?") { return }
+        ids.forEach(destroy)
+        store.layout.projects.remove(at: index)
+        store.layout.activeProject = max(0, min(store.layout.activeProject, store.layout.projects.count - 1))
+        store.changed()
+        render()
+    }
+
+    func openMarkdown(_ path: String, from source: PaneID?) {
+        split(.horizontal, kind: .markdown(path: path), from: source)
+    }
+
+    var hasBusyAgents: Bool { status.values.contains(.busy) }
+
+    func terminateAll() {
+        store.flush()
+        for id in Array(views.keys) { destroy(id) }
+    }
+
+    // MARK: - Control socket
+
+    func handleControl(_ msg: [String: String]) -> String {
+        let pane = msg["pane"].flatMap(UUID.init(uuidString:))
+        switch msg["cmd"] {
+        case "hook":
+            guard let id = pane else { return #"{"error":"no pane"}"# }
+            if let session = msg["session"], !session.isEmpty {
+                mutatePane(id) { spec in
+                    if case .terminal(let cwd, var launch?) = spec.kind, launch.sessionID != session {
+                        launch.sessionID = session
+                        spec.kind = .terminal(cwd: cwd, launch: launch)
+                    }
+                }
+            }
+            switch msg["event"] {
+            case "busy": setStatus(id, .busy)
+            case "done": setStatus(id, .done)
+            case "attention": setStatus(id, .attention)
+            default: break
+            }
+            return "{}"
+        case "list":
+            var rows: [[String: String]] = []
+            for project in store.layout.projects {
+                for tab in project.tabs {
+                    for leaf in tab.root.leaves {
+                        var kind = "terminal"
+                        if case .markdown = leaf.kind { kind = "markdown" }
+                        rows.append(["pane": leaf.id.uuidString, "project": project.name, "kind": kind,
+                                     "title": titles[leaf.id] ?? tab.title,
+                                     "status": "\(status[leaf.id] ?? .idle)"])
+                    }
+                }
+            }
+            let data = (try? JSONSerialization.data(withJSONObject: rows, options: [.sortedKeys])) ?? Data()
+            return String(decoding: data, as: UTF8.self)
+        case "focus":
+            guard let id = pane, locate(id) != nil else { return #"{"error":"unknown pane"}"# }
+            focusPane(id)
+            return "{}"
+        case "split":
+            let axis: Axis = msg["axis"] == "vertical" ? .vertical : .horizontal
+            let launch = msg["command"].map { Launch(command: $0, resume: nil, agent: nil, sessionID: nil, scrollbackLimit: nil) }
+            split(axis, kind: .terminal(cwd: cwdFor(pane), launch: launch), from: pane.flatMap { locate($0) != nil ? $0 : nil })
+            return #"{"pane":"\#(focusedPane?.uuidString ?? "")"}"#
+        case "send":
+            guard let id = pane, let s = surfaceView(for: id)?.surface else { return #"{"error":"unknown pane"}"# }
+            let text = (msg["text"] ?? "") + "\r"
+            text.withCString { ghostty_surface_text(s, $0, UInt(text.utf8.count)) }
+            return "{}"
+        case "add":
+            guard let path = msg["path"] else { return #"{"error":"no path"}"# }
+            addProject(at: URL(fileURLWithPath: path))
+            return "{}"
+        case "open":
+            guard let path = msg["path"] else { return #"{"error":"no path"}"# }
+            openMarkdown(path, from: pane.flatMap { locate($0) != nil ? $0 : nil })
+            return "{}"
+        default:
+            return #"{"error":"unknown command"}"#
+        }
+    }
+
+    private func cwdFor(_ pane: PaneID?) -> String {
+        if let id = pane, let spec = spec(id), case let .terminal(cwd, _) = spec.kind { return cwd }
+        return cwdForNewPane()
+    }
+
+    // MARK: - NSWindowDelegate
+
+    func windowDidChangeOcclusionState(_ notification: Notification) { syncVisibility() }
+
+    // MARK: - Menu actions
+
+    @objc func newTab(_ sender: Any?) { newTab(kind: .terminal(cwd: cwdForNewPane(), launch: nil)) }
+    @objc func splitRight(_ sender: Any?) { split(.horizontal, kind: .terminal(cwd: cwdForNewPane(), launch: nil)) }
+    @objc func splitDown(_ sender: Any?) { split(.vertical, kind: .terminal(cwd: cwdForNewPane(), launch: nil)) }
+    @objc func closePane(_ sender: Any?) {
+        if let id = focusedPane { closePane(id) } else { window?.performClose(nil) }
+    }
+    @objc func closeTab(_ sender: Any?) {
+        if let p = activeProjectIndex { closeTab(at: store.layout.projects[p].activeTab) }
+    }
+    @objc func equalizeSplits(_ sender: Any?) {
+        mutateActiveTab { $0.root = $0.root.equalized() }
+        render()
+    }
+    @objc func nextTab(_ sender: Any?) { cycleTab(1) }
+    @objc func previousTab(_ sender: Any?) { cycleTab(-1) }
+    private func cycleTab(_ d: Int) {
+        guard let p = activeProjectIndex else { return }
+        let n = store.layout.projects[p].tabs.count
+        guard n > 0 else { return }
+        selectTab((store.layout.projects[p].activeTab + d + n) % n)
+    }
+    @objc func selectProjectByTag(_ sender: NSMenuItem) { selectProject(sender.tag - 1) }
+    @objc func nextProject(_ sender: Any?) { cycleProject(1) }
+    @objc func previousProject(_ sender: Any?) { cycleProject(-1) }
+    private func cycleProject(_ d: Int) {
+        let n = store.layout.projects.count
+        guard n > 0 else { return }
+        selectProject((store.layout.activeProject + d + n) % n)
+    }
+    @objc func addProject(_ sender: Any?) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.prompt = "Add Project"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        addProject(at: url)
+    }
+    private func addProject(at url: URL) {
+        if let i = store.layout.projects.firstIndex(where: { $0.path == url.path }) { selectProject(i); return }
+        let spec = PaneSpec(id: UUID(), kind: .terminal(cwd: url.path, launch: nil))
+        store.layout.projects.append(Project(id: UUID(), path: url.path, name: url.lastPathComponent,
+                                             tabs: [Tab(id: UUID(), title: "Terminal", root: .leaf(spec), focused: spec.id)],
+                                             activeTab: 0))
+        store.layout.activeProject = store.layout.projects.count - 1
+        store.changed()
+        render()
+    }
+    @objc func toggleSidebar(_ sender: Any?) {
+        store.layout.sidebarVisible.toggle()
+        store.changed()
+        let visible = store.layout.sidebarVisible
+        sidebar.isHidden = !visible
+        sidebarWidth.constant = visible ? 220 : 0
+        tabBarLeading.constant = visible ? 0 : 78
+    }
+    @objc func focusLeft(_ sender: Any?) { moveFocus(.left) }
+    @objc func focusRight(_ sender: Any?) { moveFocus(.right) }
+    @objc func focusUp(_ sender: Any?) { moveFocus(.up) }
+    @objc func focusDown(_ sender: Any?) { moveFocus(.down) }
+    private func moveFocus(_ d: FocusDirection) {
+        guard let id = focusedPane, let n = tree.neighbor(of: id, d), let v = views[n] else { return }
+        window?.makeFirstResponder(v)
+        paneFocused(n)
+    }
+    @objc func focusNextPane(_ sender: Any?) { cyclePane(1) }
+    @objc func focusPreviousPane(_ sender: Any?) { cyclePane(-1) }
+    private func cyclePane(_ d: Int) {
+        guard let tab = activeTab, let id = focusedPane else { return }
+        let leaves = tab.root.leaves.map(\.id)
+        guard let i = leaves.firstIndex(of: id), let v = views[leaves[(i + d + leaves.count) % leaves.count]] else { return }
+        window?.makeFirstResponder(v)
+    }
+    @objc func clearScreen(_ sender: Any?) { focusedPane.flatMap { surfaceView(for: $0) }?.perform("clear_screen") }
+    @objc func find(_ sender: Any?) { focusedPane.flatMap { surfaceView(for: $0) }?.perform("start_search") }
+    @objc func increaseFontSize(_ sender: Any?) { focusedPane.flatMap { surfaceView(for: $0) }?.perform("increase_font_size:1") }
+    @objc func decreaseFontSize(_ sender: Any?) { focusedPane.flatMap { surfaceView(for: $0) }?.perform("decrease_font_size:1") }
+    @objc func resetFontSize(_ sender: Any?) { focusedPane.flatMap { surfaceView(for: $0) }?.perform("reset_font_size") }
+    @objc func launchPreset(_ sender: NSMenuItem) {
+        guard let preset = store.layout.presets.first(where: { $0.key == sender.tag }) else { return }
+        let launch = Launch(command: preset.command, resume: preset.resume, agent: preset.agent,
+                            sessionID: nil, scrollbackLimit: preset.scrollbackLimit)
+        let kind = PaneKind.terminal(cwd: activeProjectIndex.map { store.layout.projects[$0].path } ?? NSHomeDirectory(),
+                                     launch: launch)
+        if activeTab == nil { newTab(kind: kind) } else { split(.horizontal, kind: kind) }
+    }
+    @objc func openMarkdownFile(_ sender: Any?) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.init(filenameExtension: "md")!, .plainText]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        openMarkdown(url.path, from: focusedPane)
+    }
+    @objc func selectTheme(_ sender: NSMenuItem) {
+        if let id = sender.representedObject as? String { applyTheme(id) }
+    }
+}
+
+extension SplitNode {
+    func withRatios(from other: SplitNode) -> SplitNode {
+        switch (self, other) {
+        case let (.split(axis, _, a, b), .split(oAxis, ratio, oa, ob)) where axis == oAxis:
+            return .split(axis: axis, ratio: ratio, a: a.withRatios(from: oa), b: b.withRatios(from: ob))
+        default:
+            return self
+        }
+    }
+}
