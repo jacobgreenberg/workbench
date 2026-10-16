@@ -201,12 +201,13 @@ enum PaneEvent: Sendable {
         return strings.isEmpty ? nil : strings.joined(separator: " ")
     }
 
-    /// Upstream Ghostty's set: backslash-escape shell metacharacters and spaces.
+    /// Bare when every character is shell-safe, else POSIX single-quoted. Quoting (not a list of characters to
+    /// backslash) means nothing in a filename, newlines included, can end the word and run as a command.
     nonisolated static func shellEscape(_ path: String) -> String {
-        path.reduce(into: "") { out, c in
-            if "\\ ()[]{}<>\"'`!#$&;|*?\t".contains(c) { out.append("\\") }
-            out.append(c)
+        if !path.isEmpty, path.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || "/._-+,:@%=".contains($0)) }) {
+            return path
         }
+        return "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     private nonisolated static let confirmReadClipboard: ghostty_runtime_confirm_read_clipboard_cb = { userdata, cstr, state, request in
