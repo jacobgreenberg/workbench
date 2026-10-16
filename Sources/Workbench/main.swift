@@ -34,6 +34,12 @@ if instanceLock >= 0, flock(instanceLock, LOCK_EX | LOCK_NB) != 0 {
     exit(0)
 }
 
+// Launched from inside an agent (`open` in a Claude/Codex shell), we inherit that session's markers, and every pane
+// would too: a Claude started there believes it is a child session and stops saving its transcript.
+for key in ProcessInfo.processInfo.environment.keys where key.hasPrefix("CLAUDE") || key.hasPrefix("CODEX_") {
+    unsetenv(key)
+}
+
 if let res = Bundle.main.resourceURL?.appendingPathComponent("ghostty").path {
     setenv("GHOSTTY_RESOURCES_DIR", res, 1)
 }
