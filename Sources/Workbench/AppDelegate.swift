@@ -143,7 +143,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             themeItems.append(t)
         }
         main.addItem(menu("View", [
-            item("Toggle Sidebar", #selector(w.toggleSidebar(_:)), "b"),
+            item("Toggle Sidebar", #selector(w.toggleProjectSidebar(_:)), "b"),
             item("Equalize Splits", #selector(w.equalizeSplits(_:)), "0", [.command, .shift]),
             .separator(),
             item("Bigger", #selector(w.increaseFontSize(_:)), "="),

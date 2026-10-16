@@ -765,7 +765,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         store.changed()
         render()
     }
-    @objc func toggleSidebar(_ sender: Any?) {
+    // Not `toggleSidebar(_:)`: NSWindow implements that action itself and, earlier in the responder chain, swallows it.
+    @objc func toggleProjectSidebar(_ sender: Any?) {
         store.layout.sidebarVisible.toggle()
         store.changed()
         let visible = store.layout.sidebarVisible
