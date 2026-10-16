@@ -214,7 +214,20 @@ enum PaneEvent: Sendable {
         guard let id = boxID(userdata) else { return }
         let s = UInt(bitPattern: state)
         if request == GHOSTTY_CLIPBOARD_REQUEST_PASTE {
-            complete(id, cstr.map { String(cString: $0) } ?? "", s, true)
+            // Ghostty's paste protection flagged this text (line breaks the program won't treat as a paste, or a
+            // sequence that ends bracketed paste early): either could run commands. Ask, as upstream does.
+            let text = cstr.map { String(cString: $0) } ?? ""
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    let alert = NSAlert()
+                    alert.messageText = "Paste text that could run commands?"
+                    alert.informativeText = String(text.prefix(400))
+                    alert.addButton(withTitle: "Paste")
+                    alert.addButton(withTitle: "Cancel")
+                    let ok = alert.runModal() == .alertFirstButtonReturn
+                    complete(id, ok ? text : "", s, true)
+                }
+            }
         } else {
             complete(id, "", s, true)   // deny an OSC 52 read: empty data, confirmed (upstream's cancel path)
         }
