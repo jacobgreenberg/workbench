@@ -21,7 +21,7 @@ extension Theme {
         for dir in dirs {
             let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
             for f in files.filter({ $0.pathExtension == "json" }).sorted(by: { $0.path < $1.path }) {
-                guard let data = try? Data(contentsOf: f),
+                guard let data = readFile(f, cap: 1 << 20),
                       let t = try? JSONDecoder().decode(Theme.self, from: data) else { continue }
                 byID[t.id] = t
             }

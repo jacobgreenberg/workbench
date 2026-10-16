@@ -62,7 +62,6 @@ enum PaneEvent: Sendable {
     init(overrides: String)              // default files + recursive files, then ghostty_config_load_string(overrides), finalize, ghostty_app_new
     func reload(overrides: String)       // build new config the same way, ghostty_app_update_config, free old config
     func setFocus(_ focused: Bool)       // ghostty_app_set_focus
-    func shutdown()                      // stop ticking, ghostty_app_free (call after all surfaces are freed)
 }
 
 // SurfaceView.swift
@@ -110,7 +109,7 @@ enum FocusDirection: Sendable { case left, right, up, down }
 @MainActor final class SplitTreeView: NSView {
     var onRatiosChanged: ((SplitNode) -> Void)?           // user dragged a divider; tree with updated ratios
     init(provider: @escaping (PaneSpec) -> NSView)        // returns the existing leaf view for a pane (never creates duplicates)
-    func render(_ root: SplitNode, dividerColor: NSColor)
+    @discardableResult func render(_ root: SplitNode, dividerColor: NSColor) -> Bool   // false = unchanged, nothing rebuilt
     func clear()                                          // drop the tree and every view it retains
     func neighbor(of id: PaneID, _ direction: FocusDirection) -> PaneID?
 }

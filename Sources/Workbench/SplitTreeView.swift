@@ -16,6 +16,7 @@ private final class DividerSplitView: NSSplitView {
     private var splits: [(NSSplitView, Double)] = []
     private var rootView: NSView?
     private var isApplyingRatios = false
+    private var dividerColor: NSColor?
 
     init(provider: @escaping (PaneSpec) -> NSView) {
         self.provider = provider
@@ -24,7 +25,10 @@ private final class DividerSplitView: NSSplitView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
 
-    func render(_ root: SplitNode, dividerColor: NSColor) {
+    /// Rebuilds the split hierarchy; returns false (and does nothing) when the tree and colour are unchanged.
+    @discardableResult func render(_ root: SplitNode, dividerColor: NSColor) -> Bool {
+        if root == self.root, dividerColor == self.dividerColor, rootView != nil { return false }
+        self.dividerColor = dividerColor
         isApplyingRatios = true
         defer { isApplyingRatios = false }
         subviews.forEach { $0.removeFromSuperview() }
@@ -39,6 +43,7 @@ private final class DividerSplitView: NSSplitView {
         rootView = view
         layoutSubtreeIfNeeded()
         applyRatios()
+        return true
     }
 
     func clear() {
@@ -47,6 +52,7 @@ private final class DividerSplitView: NSSplitView {
         splits = []
         root = nil
         rootView = nil
+        dividerColor = nil
     }
 
     private func build(_ node: SplitNode, path: [Bool], color: NSColor) -> NSView {

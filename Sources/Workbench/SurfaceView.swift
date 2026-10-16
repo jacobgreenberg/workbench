@@ -21,6 +21,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
     private var keyTextAccumulator: [String]?
     private var lastPerformKeyEvent: TimeInterval?
     private var eventMonitor: Any?
+    private var sentSize: (w: UInt32, h: UInt32) = (0, 0)
     private var screenObserver: NSObjectProtocol?
     private var visible = true
     private var closed = false
@@ -89,13 +90,6 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         }
         self.surface = created
 
-        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyUp]) { [weak self] event in
-            nonisolated(unsafe) let ev = event
-            nonisolated(unsafe) var result: NSEvent? = ev
-            MainActor.assumeIsolated { result = self?.localEventHandler(ev) ?? ev }
-            return result
-        }
-
         updateTrackingAreas()
     }
 
@@ -111,7 +105,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         if visible {
             ghostty_surface_set_renderer_realized(s, true)
             ghostty_surface_set_occlusion(s, true)
-            sizeDidChange(contentSize)
+            refresh()
         } else {
             ghostty_surface_set_occlusion(s, false)
             ghostty_surface_set_renderer_realized(s, false)
@@ -204,23 +198,35 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         guard self.focused != focused else { return }
         self.focused = focused
         ghostty_surface_set_focus(surface, focused)
+        // ⌘-key releases never reach keyUp (AppKit eats them), so the focused surface watches for them; only the
+        // focused one, so a keystroke costs one monitor call however many panes exist.
+        if focused, eventMonitor == nil {
+            eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyUp]) { [weak self] event in
+                nonisolated(unsafe) let ev = event
+                nonisolated(unsafe) var result: NSEvent? = ev
+                MainActor.assumeIsolated { result = self?.localEventHandler(ev) ?? ev }
+                return result
+            }
+        } else if !focused, let m = eventMonitor {
+            NSEvent.removeMonitor(m)
+            eventMonitor = nil
+        }
     }
 
-    private func sizeDidChange(_ size: CGSize) {
-        guard surface != nil, !closed else { return }
-        let scaledSize = convertToBacking(size)
-        setSurfaceSize(width: UInt32(max(scaledSize.width, 1)), height: UInt32(max(scaledSize.height, 1)))
-        contentSize = size
-    }
-
-    private func setSurfaceSize(width: UInt32, height: UInt32) {
+    /// layout() and setFrameSize both fire per resize step; only a changed pixel size reaches Ghostty.
+    private func sizeDidChange(_ size: CGSize, force: Bool = false) {
         guard let surface, !closed else { return }
-        ghostty_surface_set_size(surface, width, height)
+        let px = convertToBacking(size)
+        let w = UInt32(max(px.width, 1)), h = UInt32(max(px.height, 1))
+        contentSize = size
+        guard force || w != sentSize.w || h != sentSize.h else { return }
+        sentSize = (w, h)
+        ghostty_surface_set_size(surface, w, h)
     }
 
     func refresh() {
         guard let s = surface, !closed else { return }
-        sizeDidChange(frame.size)
+        sizeDidChange(frame.size, force: true)
         ghostty_surface_refresh(s)
     }
 
@@ -321,8 +327,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         let yScale = fbFrame.size.height / self.frame.size.height
         ghostty_surface_set_content_scale(surface, xScale, yScale)
 
-        let scaledSize = self.convertToBacking(contentSize)
-        setSurfaceSize(width: UInt32(scaledSize.width), height: UInt32(scaledSize.height))
+        sizeDidChange(contentSize, force: true)
     }
 
     override func menu(for event: NSEvent) -> NSMenu? { nil }

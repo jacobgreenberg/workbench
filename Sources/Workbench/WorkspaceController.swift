@@ -50,7 +50,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
         window.center()
-        window.setFrameAutosaveName("PaneMain")
+        window.setFrameAutosaveName("Main")
         super.init(window: window)
         window.delegate = self
         runtime.delegate = self
@@ -222,28 +222,31 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             findBar.isHidden = true
             findPane = nil
         }
+        var rebuilt = false
         if let tab = activeTab {
             tree.isHidden = false
             emptyLabel.isHidden = true
-            tree.render(tab.root, dividerColor: theme.color("border"))
+            rebuilt = tree.render(tab.root, dividerColor: theme.color("border"))
         } else {
             tree.isHidden = true
             tree.clear()
             emptyLabel.isHidden = false
             emptyLabel.stringValue = activeProjectIndex == nil ? "⇧⌘O  Add Project" : "⌘T  New Terminal"
         }
-        syncVisibility()
+        syncVisibility(refresh: rebuilt)
         updateChrome()
         if let id = focusedPane, let v = views[id] { window?.makeFirstResponder(v) }
     }
 
-    private func syncVisibility() {
+    /// `refresh`: the split hierarchy was rebuilt, so re-parented surfaces must redraw (else they show blank).
+    /// Surfaces that just became visible refresh themselves in setVisible.
+    private func syncVisibility(refresh: Bool = false) {
         let windowVisible = window?.occlusionState.contains(.visible) ?? false
         let shown = windowVisible ? Set(activeTab?.root.leaves.map(\.id) ?? []) : []
         for (id, v) in views {
             guard let s = v as? SurfaceView else { continue }
             s.setVisible(shown.contains(id))
-            if shown.contains(id) { s.refresh() }
+            if refresh, shown.contains(id) { s.refresh() }
         }
     }
 
@@ -324,6 +327,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private func setStatus(_ id: PaneID, _ new: PaneStatus, title: String? = nil, body: String? = nil) {
         guard locate(id) != nil else { return }   // late event from a closed pane
         let old = status[id] ?? .idle
+        if new == .busy, old != .busy { scheduleCapture() }   // a turn started: record its resume command now, not only at quit
         let watched = isWatched(id)
         status[id] = (watched && (new == .done || new == .attention)) ? .idle : new
         if !watched, new != old, new == .done || new == .attention {
@@ -574,10 +578,29 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         for id in Array(views.keys) { destroy(id) }
     }
 
+    private var captureScheduled = false
+
+    /// Coalesced background scan (~5 ms for ~1300 processes), applied on main. Keeps resume commands current
+    /// if the app crashes instead of quitting.
+    private func scheduleCapture() {
+        guard !captureScheduled else { return }
+        captureScheduled = true
+        DispatchQueue.global(qos: .utility).async {
+            let running = Agents.running()
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.captureScheduled = false
+                    self.apply(running)
+                }
+            }
+        }
+    }
+
     /// Record, per terminal pane, the command that resumes the agent running in it (through the launcher it was
     /// started with); a pane with no agent running forgets any earlier one.
-    private func captureAgents() {
-        let running = Agents.running()
+    private func captureAgents() { apply(Agents.running()) }
+
+    private func apply(_ running: [PaneID: String]) {
         for project in store.layout.projects {
             for tab in project.tabs {
                 for leaf in tab.root.leaves {

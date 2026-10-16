@@ -124,6 +124,15 @@ struct Layout: Codable, Equatable, Sendable {
     )
 }
 
+/// A regular file's contents, read once and at most `cap` bytes; nil when missing, not a regular file, or larger
+/// than `cap`, so a FIFO, device or runaway file can neither block nor exhaust memory.
+func readFile(_ url: URL, cap: Int) -> Data? {
+    guard (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true,
+          let h = try? FileHandle(forReadingFrom: url) else { return nil }
+    let data = (try? h.read(upToCount: cap + 1)) ?? Data()
+    return data.count > cap ? nil : data
+}
+
 @MainActor final class Store {
     static let directory: URL = {
         #if DEBUG
@@ -141,9 +150,8 @@ struct Layout: Codable, Equatable, Sendable {
     init() {
         try? FileManager.default.createDirectory(at: Store.directory, withIntermediateDirectories: true)
         let url = Store.directory.appendingPathComponent("layout.json")
-        let data = try? Data(contentsOf: url)
-        let decoded = data.flatMap { try? JSONDecoder().decode(Layout.self, from: $0) }
-        if data != nil, decoded == nil {
+        let decoded = readFile(url, cap: 16 << 20).flatMap { try? JSONDecoder().decode(Layout.self, from: $0) }
+        if decoded == nil, FileManager.default.fileExists(atPath: url.path) {
             // Never overwrite a layout we failed to read; keep it for recovery.
             try? FileManager.default.removeItem(at: url.appendingPathExtension("bak"))
             try? FileManager.default.moveItem(at: url, to: url.appendingPathExtension("bak"))
@@ -188,7 +196,7 @@ func modelSelfCheck() {
     let md = dir.appendingPathComponent("a.md"), empty = dir.appendingPathComponent("e.md"), fifo = dir.appendingPathComponent("f.md")
     try! Data("# hi".utf8).write(to: md); try! Data().write(to: empty); mkfifo(fifo.path, 0o600)
     assert(MarkdownPaneView.load(md.path) == "# hi" && MarkdownPaneView.load(empty.path) == "")
-    assert(MarkdownPaneView.load(fifo.path).hasPrefix("Cannot read"))   // must not block
+    assert(MarkdownPaneView.load(fifo.path).hasPrefix("Cannot preview"))   // must not block
 
     func leaf() -> PaneSpec { PaneSpec(id: UUID(), kind: .markdown(path: "/x")) }
     let p1 = leaf(), p2 = leaf(), p3 = leaf()

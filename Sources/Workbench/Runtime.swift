@@ -19,7 +19,6 @@ enum PaneEvent: Sendable {
     weak var delegate: RuntimeDelegate?
 
     private var config: ghostty_config_t
-    fileprivate var shuttingDown = false
     private var keyboardObserver: NSObjectProtocol?
 
     nonisolated static let pending = Atomic<Bool>(false)
@@ -71,13 +70,6 @@ enum PaneEvent: Sendable {
         config = new
     }
 
-    func shutdown() {
-        shuttingDown = true
-        ghostty_app_free(app)
-        ghostty_config_free(config)
-        Runtime.current = nil
-    }
-
     private func deliver(_ id: PaneID, _ event: PaneEvent) {
         delegate?.runtime(self, pane: id, event: event)
     }
@@ -96,7 +88,7 @@ enum PaneEvent: Sendable {
             DispatchQueue.main.async {
                 pending.store(false, ordering: .releasing)
                 MainActor.assumeIsolated {
-                    if let rt = Runtime.current, !rt.shuttingDown { ghostty_app_tick(rt.app) }
+                    if let rt = Runtime.current { ghostty_app_tick(rt.app) }
                 }
             }
         }

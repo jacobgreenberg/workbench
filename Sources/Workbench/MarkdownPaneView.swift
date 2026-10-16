@@ -1,5 +1,6 @@
 import AppKit
 import Markdown
+import Synchronization
 
 private struct RGBA: Sendable {
     let r: CGFloat, g: CGFloat, b: CGFloat, a: CGFloat
@@ -159,6 +160,9 @@ private struct Renderer: Sendable {
     private let scrollView = NSScrollView()
     private let textView = NSTextView(usingTextLayoutManager: true)
     private var generation = 0
+    /// Newest requested generation, readable off main: queued renders that are already stale skip the read and parse.
+    private final class Latest: Sendable { let value = Atomic<Int>(0) }
+    private let latest = Latest()
     private var closed = false
     private var dirSource: DispatchSourceFileSystemObject?
     private var fileSource: DispatchSourceFileSystemObject?
@@ -206,6 +210,7 @@ private struct Renderer: Sendable {
 
     func close() {
         closed = true
+        latest.value.store(-1, ordering: .relaxed)   // queued renders for this pane exit before any work
         pending?.cancel(); pending = nil
         dirSource?.cancel(); dirSource = nil
         fileSource?.cancel(); fileSource = nil
@@ -213,9 +218,12 @@ private struct Renderer: Sendable {
 
     private func reload() {
         generation += 1
-        let gen = generation, path = path, palette = palette
+        latest.value.store(generation, ordering: .relaxed)
+        let gen = generation, path = path, palette = palette, latest = latest
         renderQueue.async { [weak self] in
+            guard latest.value.load(ordering: .relaxed) == gen else { return }
             let text = Self.load(path)
+            guard latest.value.load(ordering: .relaxed) == gen else { return }
             let dir = URL(fileURLWithPath: path).deletingLastPathComponent()
             let result = Renderer(markdown: text, baseDir: dir, palette: palette).render()
             DispatchQueue.main.async {
@@ -235,11 +243,8 @@ private struct Renderer: Sendable {
 
     /// Regular files only (a FIFO or device would block or never end), read once up to the preview cap.
     nonisolated static func load(_ path: String) -> String {
-        let url = URL(fileURLWithPath: path), cap = 10 << 20
-        guard (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true,
-              let h = try? FileHandle(forReadingFrom: url) else { return "Cannot read \(path)" }
-        let data = (try? h.read(upToCount: cap + 1)) ?? Data()
-        return data.count > cap ? "File too large to preview (over 10 MB)" : String(decoding: data, as: UTF8.self)
+        readFile(URL(fileURLWithPath: path), cap: 10 << 20).map { String(decoding: $0, as: UTF8.self) }
+            ?? "Cannot preview \(path): unreadable, not a regular file, or over 10 MB"
     }
 
     private func makeSource(_ target: String) -> DispatchSourceFileSystemObject? {
