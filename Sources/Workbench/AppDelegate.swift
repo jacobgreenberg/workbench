@@ -7,7 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var runtime: Runtime!
     private var workspace: WorkspaceController!
     private var control: ControlServer?
-    private var reserved: [(key: String, mods: NSEvent.ModifierFlags, item: NSMenuItem)] = []
+    private var reserved: [String: NSMenuItem] = [:]   // "key|mods" → item; looked up on every ⌘/⌃ keyDown in a terminal
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Agents.discoverLaunchers()
@@ -75,8 +75,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func performReserved(_ event: NSEvent) -> Bool {
         guard let chars = event.characters(byApplyingModifiers: [])?.lowercased() else { return false }
         let mods = event.modifierFlags.intersection([.command, .option, .control, .shift])
-        guard let match = reserved.first(where: { $0.key == chars && $0.mods == mods }) else { return false }
-        NSApp.sendAction(match.item.action!, to: match.item.target, from: match.item)
+        guard let match = reserved["\(chars)|\(mods.rawValue)"] else { return false }
+        NSApp.sendAction(match.action!, to: match.target, from: match)
         return true
     }
 
@@ -85,7 +85,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
         item.keyEquivalentModifierMask = mods
         item.tag = tag
-        if isReserved, !key.isEmpty { reserved.append((key.lowercased(), mods, item)) }
+        if isReserved, !key.isEmpty, reserved["\(key.lowercased())|\(mods.rawValue)"] == nil {
+            reserved["\(key.lowercased())|\(mods.rawValue)"] = item
+        }
         return item
     }
 

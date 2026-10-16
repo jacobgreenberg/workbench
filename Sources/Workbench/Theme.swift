@@ -11,7 +11,11 @@ struct Theme: Decodable, Sendable {
 extension Theme {
     typealias RGBA = (r: Double, g: Double, b: Double, a: Double)
 
-    static func all() -> [Theme] {
+    /// Read once: the Theme menu is built at launch, so the set is fixed for the run.
+    static func all() -> [Theme] { cache }
+    private static let cache = scan()
+
+    private static func scan() -> [Theme] {
         var dirs: [URL] = []
         if let r = Bundle.main.resourceURL { dirs.append(r.appendingPathComponent("themes")) }
         if let s = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {

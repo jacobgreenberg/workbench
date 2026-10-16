@@ -199,18 +199,18 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     }
 
     // ponytail: eager restore so agents resume; surfaces outside the active tab are created
-    // unrealized, 4 per runloop turn. Switch to create-on-first-show if launch gets slow.
+    // unrealized, 2 per runloop turn (each forks a login shell). Switch to create-on-first-show if launch gets slow.
     private func restore() {
         render()
         let active = Set(activeTab?.root.leaves.map(\.id) ?? [])
         var pending = store.layout.projects.flatMap { $0.tabs.flatMap { $0.root.leaves.map(\.id) } }.filter { !active.contains($0) }
         func step() {
             // Re-resolve each batch: a pane may have been closed, or shown and created by render(), since launch.
-            for id in pending.prefix(4) where views[id] == nil {
+            for id in pending.prefix(2) where views[id] == nil {
                 guard let spec = spec(id) else { continue }
                 (view(for: spec) as? SurfaceView)?.setVisible(false)
             }
-            pending.removeFirst(min(4, pending.count))
+            pending.removeFirst(min(2, pending.count))
             if !pending.isEmpty { DispatchQueue.main.async { MainActor.assumeIsolated { step() } } }
         }
         if !pending.isEmpty { DispatchQueue.main.async { MainActor.assumeIsolated { step() } } }
@@ -267,7 +267,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             tabBar.update(items: [], selected: 0, theme: theme)
         }
         let badge = status.values.filter { $0 == .done || $0 == .attention }.count
-        NSApp.dockTile.badgeLabel = badge > 0 ? "\(badge)" : nil
+        let label = badge > 0 ? "\(badge)" : nil
+        if NSApp.dockTile.badgeLabel != label { NSApp.dockTile.badgeLabel = label }
         if status.values.contains(.busy) {
             if activity == nil {
                 activity = ProcessInfo.processInfo.beginActivity(
@@ -359,12 +360,13 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             // A braille spinner means the agent is mid-turn: that drives the status dot for agents started any way,
             // not only through presets with hooks. Spinner gone means the turn ended.
             let spinning = raw.unicodeScalars.first.map { (0x2800...0x28FF).contains($0.value) } ?? false
-            if spinning, status[id] != .busy { setStatus(id, .busy) }
-            if !spinning, status[id] == .busy { setStatus(id, .done) }
             let t = Self.stripStatusGlyphs(raw)
-            guard titles[id] != t else { return }
+            let titleChanged = titles[id] != t
             titles[id] = t
-            updateChrome()
+            // One chrome update per event: setStatus does it when the state flips.
+            if spinning, status[id] != .busy { setStatus(id, .busy) }
+            else if !spinning, status[id] == .busy { setStatus(id, .done) }
+            else if titleChanged { updateChrome() }
         case let .pwd(path):
             mutatePane(id) { spec in
                 if case let .terminal(_, launch) = spec.kind { spec.kind = .terminal(cwd: path, launch: launch) }

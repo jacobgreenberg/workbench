@@ -91,7 +91,7 @@ enum GhosttyInput {
 // Theme.swift
 struct Theme: Decodable, Sendable { let id: String; let name: String; let type: String; let ui: [String: String]; let terminal: [String: String] }
 extension Theme {
-    static func all() -> [Theme]                         // Bundle.main.resourceURL/themes/*.json, then Store.directory/themes/*.json overriding by id; sorted by name
+    static func all() -> [Theme]                         // read once per run: Bundle.main.resourceURL/themes/*.json, then Store.directory/themes/*.json overriding by id; sorted by name
     static func named(_ id: String) -> Theme             // falls back to "oceanic-v2", then first
     func color(_ key: String) -> NSColor                  // ui[key] (hex #RRGGBB or rgba(r, g, b, a)); magenta if missing
     var ghosttyConfig: String                             // newline-separated ghostty config lines for terminal colors + split-divider-color

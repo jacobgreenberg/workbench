@@ -22,6 +22,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
     private var lastPerformKeyEvent: TimeInterval?
     private var eventMonitor: Any?
     private var sentSize: (w: UInt32, h: UInt32) = (0, 0)
+    private var displayID: UInt32?
     private var screenObserver: NSObjectProtocol?
     private var visible = true
     private var closed = false
@@ -280,6 +281,8 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
     private func windowDidChangeScreen() {
         guard let window, let screen = window.screen, let surface, !closed else { return }
         let id = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
+        guard id != displayID else { return }   // re-parenting within a split rebuild lands here on the same screen
+        displayID = id
         ghostty_surface_set_display_id(surface, id)
         DispatchQueue.main.async { [weak self] in
             self?.viewDidChangeBackingProperties()

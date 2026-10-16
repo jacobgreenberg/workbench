@@ -232,7 +232,9 @@ private struct Renderer: Sendable {
                     let clip = self.scrollView.contentView
                     let origin = clip.bounds.origin
                     self.textView.textStorage?.setAttributedString(result)
-                    self.textView.layoutSubtreeIfNeeded()
+                    // Restoring a scroll offset needs the document laid out that far; at the top (the common case)
+                    // TextKit lays out lazily instead of the whole file on main.
+                    if origin.y > 0 { self.textView.layoutSubtreeIfNeeded() }
                     clip.scroll(to: origin)
                     self.scrollView.reflectScrolledClipView(clip)
                 }

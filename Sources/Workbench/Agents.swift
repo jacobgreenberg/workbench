@@ -51,11 +51,10 @@ enum Agents {
             let parts = line.split(separator: "\t", maxSplits: 1)
             guard parts.count == 2, parts[0].allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }) else { continue }
             let name = String(parts[0]), body = String(parts[1])
-            let runs = { (cmd: String) in body.contains(try! Regex("(^|[\\s;|&(])\(cmd)(\\s|$)")) }
             let key: String
-            if runs("claude") {
+            if body.contains(runsClaude) {
                 key = "claude:" + (value(of: "CLAUDE_CONFIG_DIR", in: body, home: home) ?? home + "/.claude")
-            } else if runs("codex") {
+            } else if body.contains(runsCodex) {
                 key = "codex:" + (value(of: "CODEX_HOME", in: body, home: home) ?? home + "/.codex")
             } else { continue }
             if map[key] == nil || name.count < map[key]!.count { map[key] = name }   // shortest name wins (cc1 over cc1-debug)
@@ -63,8 +62,16 @@ enum Agents {
         return map
     }
 
+    // Compiled once; a large zsh setup has hundreds of functions.
+    nonisolated(unsafe) private static let runsClaude = try! Regex(#"(^|[\s;|&(])claude(\s|$)"#)
+    nonisolated(unsafe) private static let runsCodex = try! Regex(#"(^|[\s;|&(])codex(\s|$)"#)
+    nonisolated(unsafe) private static let assignment = [
+        "CLAUDE_CONFIG_DIR": try! Regex(#"CLAUDE_CONFIG_DIR=("[^"]*"|'[^']*'|[^\s;]+)"#),
+        "CODEX_HOME": try! Regex(#"CODEX_HOME=("[^"]*"|'[^']*'|[^\s;]+)"#),
+    ]
+
     private static func value(of variable: String, in body: String, home: String) -> String? {
-        guard let m = body.firstMatch(of: try! Regex("\(variable)=(\"[^\"]*\"|'[^']*'|[^\\s;]+)")) else { return nil }
+        guard let m = body.firstMatch(of: assignment[variable]!) else { return nil }
         var v = String(body[m.range].dropFirst(variable.count + 1))
         if v.first == "\"" || v.first == "'" { v = String(v.dropFirst().dropLast()) }
         v = v.replacingOccurrences(of: "${HOME}", with: home).replacingOccurrences(of: "$HOME", with: home)
@@ -86,6 +93,8 @@ enum Agents {
                   let pane = env["PANE_ID"].flatMap(UUID.init(uuidString:))
             else { continue }
             let words = argv.prefix(2).map { ($0 as NSString).lastPathComponent }
+            // One-shot runs (`claude -p`, `codex exec`) are not sessions to resume.
+            if argv.contains("-p") || argv.contains("--print") || argv.contains("exec") || argv.contains("e") { continue }
             if words.first == "claude" {
                 let dir = env["CLAUDE_CONFIG_DIR"].map { ($0 as NSString).standardizingPath } ?? home + "/.claude"
                 var cmd = map["claude:" + dir] ?? (env["CLAUDE_CONFIG_DIR"] == nil ? "claude" : "CLAUDE_CONFIG_DIR=\(Runtime.shellEscape(dir)) claude")

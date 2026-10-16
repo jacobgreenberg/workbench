@@ -171,20 +171,25 @@ func readFile(_ url: URL, cap: Int) -> Data? {
     func changed() {
         pending?.cancel()
         let item = DispatchWorkItem { [weak self] in
-            MainActor.assumeIsolated { self?.flush() }
+            MainActor.assumeIsolated { self?.save(wait: false) }
         }
         pending = item
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: item)
     }
 
-    func flush() {
+    func flush() { save(wait: true) }
+
+    /// Encode on main (small), write on the serial queue: debounced saves never block main on disk; flush (quit)
+    /// waits, which also drains any earlier queued write first.
+    private func save(wait: Bool) {
         pending?.cancel()
         pending = nil
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? enc.encode(layout) else { return }
         let url = Store.directory.appendingPathComponent("layout.json")
-        queue.sync { try? data.write(to: url, options: .atomic) }
+        let write: @Sendable () -> Void = { _ = try? data.write(to: url, options: .atomic) }
+        if wait { queue.sync(execute: write) } else { queue.async(execute: write) }
     }
 }
 

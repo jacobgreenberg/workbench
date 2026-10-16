@@ -145,7 +145,13 @@ final class HandButton: NSButton {
 
     @objc private func newTapped() { onNew?() }
 
+    private var last: (items: [TabItem], selected: Int, theme: String)?
+
     func update(items newItems: [TabItem], selected: Int, theme: Theme) {
+        // Called on every title/status event of any pane; most change nothing visible here.
+        let state = (newItems, selected, theme.id)
+        if let last, last == state { return }
+        last = state
         if buttons.count != newItems.count {
             buttons.forEach { $0.removeFromSuperview() }
             plus.removeFromSuperview()

@@ -129,6 +129,7 @@ private final class SidebarCell: NSTableCellView {
     }
 
     func update(rows: [SidebarRow], selected: Int, theme: Theme) {
+        guard rows != self.rows || selected != self.selected || theme.id != self.theme?.id else { return }
         let changed = rows != self.rows
         self.rows = rows
         self.selected = selected
