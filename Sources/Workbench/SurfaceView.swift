@@ -25,6 +25,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
     private var displayID: UInt32?
     private var screenObserver: NSObjectProtocol?
     private var visible = true
+    private var realized = true
     private var closed = false
     private var cursor: NSCursor = .iBeam
     private var contentSizeBacking: NSSize?
@@ -100,17 +101,18 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
 
     // MARK: - Public API
 
-    func setVisible(_ visible: Bool) {
-        guard let s = surface, !closed, self.visible != visible else { return }
+    /// True when the surface became visible and already refreshed. libghostty can refuse a realize/unrealize
+    /// mid-frame; `realized` records only what it accepted, so the next sync retries instead of forgetting.
+    @discardableResult func setVisible(_ visible: Bool) -> Bool {
+        guard let s = surface, !closed, self.visible != visible || realized != visible else { return false }
+        let shown = visible && !self.visible
         self.visible = visible
-        if visible {
-            ghostty_surface_set_renderer_realized(s, true)
-            ghostty_surface_set_occlusion(s, true)
-            refresh()
-        } else {
-            ghostty_surface_set_occlusion(s, false)
-            ghostty_surface_set_renderer_realized(s, false)
-        }
+        if !visible { ghostty_surface_set_occlusion(s, false) }
+        if realized != visible, ghostty_surface_set_renderer_realized(s, visible) { realized = visible }
+        guard shown else { return false }
+        ghostty_surface_set_occlusion(s, true)
+        refresh()
+        return true
     }
 
     func setCursorShape(_ shape: ghostty_action_mouse_shape_e) {

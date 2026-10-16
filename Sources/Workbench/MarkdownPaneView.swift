@@ -226,6 +226,7 @@ private struct Renderer: Sendable {
             guard latest.value.load(ordering: .relaxed) == gen else { return }
             let dir = URL(fileURLWithPath: path).deletingLastPathComponent()
             let result = Renderer(markdown: text, baseDir: dir, palette: palette).render()
+            guard latest.value.load(ordering: .relaxed) == gen else { return }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self, gen == self.generation, !self.closed else { return }

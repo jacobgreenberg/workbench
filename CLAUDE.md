@@ -28,6 +28,7 @@ extension SplitNode {
     func replacing(_ id: PaneID, with node: SplitNode) -> SplitNode
     func removing(_ id: PaneID) -> SplitNode?                      // nil if tree becomes empty; parent split collapses to sibling
     func updating(_ id: PaneID, _ f: (inout PaneSpec) -> Void) -> SplitNode
+    func mapLeaves(_ f: (inout PaneSpec) -> Void) -> SplitNode    // f applied to every leaf
     func equalized() -> SplitNode                                  // every ratio = 0.5
 }
 struct Tab: Codable, Identifiable, Equatable, Sendable { var id: UUID; var title: String; var root: SplitNode; var focused: PaneID? }
@@ -73,7 +74,7 @@ final class SurfaceBox: Sendable { let id: PaneID; init(id: PaneID) }   // C use
     var onFocus: ((PaneID) -> Void)?                     // called from becomeFirstResponder
     static var isReservedShortcut: (NSEvent) -> Bool = { _ in false }   // set by AppDelegate; performs the matching Pane menu action and returns true, else false
     init(app: ghostty_app_t, id: PaneID, cwd: String, initialInput: String?, env: [String: String], scrollbackLimit: Int?)
-    func setVisible(_ visible: Bool)     // hide: set_occlusion(false) then set_renderer_realized(false); show: realized(true), occlusion(true), resend size. No-op if unchanged.
+    @discardableResult func setVisible(_ visible: Bool) -> Bool   // hide: occlusion(false), realized(false); show: realized(true), occlusion(true), refresh. Realize state is kept only when libghostty accepts it, so a refused one retries on the next call. True = just shown (already refreshed).
     func setCursorShape(_ shape: ghostty_action_mouse_shape_e)
     func setCursorVisibility(_ visible: Bool)
     @discardableResult func perform(_ action: String) -> Bool   // ghostty_surface_binding_action

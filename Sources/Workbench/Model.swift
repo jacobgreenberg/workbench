@@ -74,6 +74,16 @@ extension SplitNode {
         }
     }
 
+    func mapLeaves(_ f: (inout PaneSpec) -> Void) -> SplitNode {
+        switch self {
+        case .leaf(var s):
+            f(&s)
+            return .leaf(s)
+        case .split(let axis, let ratio, let a, let b):
+            return .split(axis: axis, ratio: ratio, a: a.mapLeaves(f), b: b.mapLeaves(f))
+        }
+    }
+
     func equalized() -> SplitNode {
         switch self {
         case .leaf: return self
@@ -179,16 +189,19 @@ func readFile(_ url: URL, cap: Int) -> Data? {
 
     func flush() { save(wait: true) }
 
-    /// Encode on main (small), write on the serial queue: debounced saves never block main on disk; flush (quit)
+    /// Snapshot on main, encode and write on the serial queue: debounced saves never block main; flush (quit)
     /// waits, which also drains any earlier queued write first.
     private func save(wait: Bool) {
         pending?.cancel()
         pending = nil
-        let enc = JSONEncoder()
-        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? enc.encode(layout) else { return }
+        let snapshot = layout
         let url = Store.directory.appendingPathComponent("layout.json")
-        let write: @Sendable () -> Void = { _ = try? data.write(to: url, options: .atomic) }
+        let write: @Sendable () -> Void = {
+            let enc = JSONEncoder()
+            enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+            guard let data = try? enc.encode(snapshot) else { return }
+            _ = try? data.write(to: url, options: .atomic)
+        }
         if wait { queue.sync(execute: write) } else { queue.async(execute: write) }
     }
 }
@@ -219,6 +232,8 @@ func modelSelfCheck() {
         return []
     }
     assert(ratios(tree.equalized()) == [0.5, 0.5])
+    let mapped = tree.mapLeaves { $0.kind = .markdown(path: "/y") }
+    assert(mapped.leaves.map(\.id) == tree.leaves.map(\.id) && mapped.leaves.allSatisfy { $0.kind == .markdown(path: "/y") })
     let old = #"{"command":"c","resume":"r {id}","agent":"claude","sessionID":"S"}"#
     assert(try! JSONDecoder().decode(Launch.self, from: Data(old.utf8)) == Launch(command: "c", scrollbackLimit: nil))
     let layout = Layout(

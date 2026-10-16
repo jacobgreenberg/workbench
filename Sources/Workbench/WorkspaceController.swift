@@ -239,14 +239,13 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     }
 
     /// `refresh`: the split hierarchy was rebuilt, so re-parented surfaces must redraw (else they show blank).
-    /// Surfaces that just became visible refresh themselves in setVisible.
+    /// Surfaces that just became visible already refreshed in setVisible.
     private func syncVisibility(refresh: Bool = false) {
         let windowVisible = window?.occlusionState.contains(.visible) ?? false
         let shown = windowVisible ? Set(activeTab?.root.leaves.map(\.id) ?? []) : []
         for (id, v) in views {
             guard let s = v as? SurfaceView else { continue }
-            s.setVisible(shown.contains(id))
-            if refresh, shown.contains(id) { s.refresh() }
+            if !s.setVisible(shown.contains(id)), refresh, shown.contains(id) { s.refresh() }
         }
     }
 
@@ -603,18 +602,20 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private func captureAgents() { apply(Agents.running()) }
 
     private func apply(_ running: [PaneID: String]) {
-        for project in store.layout.projects {
-            for tab in project.tabs {
-                for leaf in tab.root.leaves {
-                    mutatePane(leaf.id) { spec in
-                        guard case let .terminal(cwd, launch) = spec.kind else { return }
-                        spec.kind = .terminal(cwd: cwd, launch: running[leaf.id].map {
-                            Launch(command: $0, scrollbackLimit: launch?.scrollbackLimit)
-                        })
-                    }
+        var layout = store.layout
+        for p in layout.projects.indices {
+            for t in layout.projects[p].tabs.indices {
+                layout.projects[p].tabs[t].root = layout.projects[p].tabs[t].root.mapLeaves { spec in
+                    guard case let .terminal(cwd, launch) = spec.kind else { return }
+                    spec.kind = .terminal(cwd: cwd, launch: running[spec.id].map {
+                        Launch(command: $0, scrollbackLimit: launch?.scrollbackLimit)
+                    })
                 }
             }
         }
+        guard layout != store.layout else { return }
+        store.layout = layout
+        store.changed()
     }
 
     // MARK: - Control socket
