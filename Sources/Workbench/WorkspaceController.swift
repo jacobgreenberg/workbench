@@ -198,22 +198,28 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         ]
     }
 
-    // ponytail: eager restore so agents resume; surfaces outside the active tab are created
-    // unrealized, 2 per runloop turn (each forks a login shell). Switch to create-on-first-show if launch gets slow.
+    /// Only panes with an agent to resume start at launch (unrealized, 2 per runloop turn: each forks a login
+    /// shell). Plain shells and markdown panes are created when first shown, by render().
     private func restore() {
         render()
         let active = Set(activeTab?.root.leaves.map(\.id) ?? [])
-        var pending = store.layout.projects.flatMap { $0.tabs.flatMap { $0.root.leaves.map(\.id) } }.filter { !active.contains($0) }
+        var pending = store.layout.projects.flatMap { $0.tabs.flatMap { $0.root.leaves } }.filter {
+            if case .terminal(_, .some) = $0.kind { return !active.contains($0.id) }
+            return false
+        }.map(\.id)
         func step() {
             // Re-resolve each batch: a pane may have been closed, or shown and created by render(), since launch.
-            for id in pending.prefix(2) where views[id] == nil {
-                guard let spec = spec(id) else { continue }
-                (view(for: spec) as? SurfaceView)?.setVisible(false)
-            }
+            for id in pending.prefix(2) { createHidden(id) }
             pending.removeFirst(min(2, pending.count))
             if !pending.isEmpty { DispatchQueue.main.async { MainActor.assumeIsolated { step() } } }
         }
         if !pending.isEmpty { DispatchQueue.main.async { MainActor.assumeIsolated { step() } } }
+    }
+
+    /// A pane outside the visible tab, started without a renderer; no-op if it already exists or is gone.
+    private func createHidden(_ id: PaneID) {
+        guard views[id] == nil, let spec = spec(id) else { return }
+        (view(for: spec) as? SurfaceView)?.setVisible(false)
     }
 
     private func render() {
@@ -657,6 +663,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             split(axis, kind: .terminal(cwd: cwdFor(pane), launch: launch), from: pane.flatMap { locate($0) != nil ? $0 : nil })
             return #"{"pane":"\#(focusedPane?.uuidString ?? "")"}"#
         case "send":
+            if let id = pane { createHidden(id) }   // a restored plain shell not shown yet
             guard let id = pane, let s = surfaceView(for: id)?.surface else { return #"{"error":"unknown pane"}"# }
             let text = (msg["text"] ?? "") + "\r"
             text.withCString { ghostty_surface_text(s, $0, UInt(text.utf8.count)) }
