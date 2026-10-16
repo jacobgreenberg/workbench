@@ -13,9 +13,11 @@ private final class SidebarTable: NSTableView {
 
 private final class SidebarRowView: NSTableRowView {
     var accent = NSColor.clear
+    /// The active project. Not `isSelected`: the table owns that and resets it from its own (empty) selection.
+    var isCurrent = false
 
     override func drawBackground(in dirtyRect: NSRect) {
-        guard isSelected else { return }
+        guard isCurrent else { return }
         accent.setFill()
         NSBezierPath(roundedRect: bounds.insetBy(dx: 10, dy: 0), xRadius: 6, yRadius: 6).fill()
     }
@@ -152,8 +154,8 @@ private final class SidebarCell: NSTableCellView {
 
     private func style(_ rv: SidebarRowView, row: Int) {
         guard let theme else { return }
-        rv.accent = theme.color("tertiaryActive")
-        rv.isSelected = row == selected
+        rv.accent = theme.color("sidebarAccent")
+        rv.isCurrent = row == selected
         rv.needsDisplay = true
     }
 
