@@ -176,8 +176,25 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
     }
 
     @IBAction func copy(_ sender: Any?) { perform("copy_to_clipboard") }
-    @IBAction func paste(_ sender: Any?) { perform("paste_from_clipboard") }
-    @IBAction func pasteAsPlainText(_ sender: Any?) { perform("paste_from_clipboard") }
+    @IBAction func paste(_ sender: Any?) {
+        // An image-only clipboard has nothing for Ghostty to paste. Send ⌃V instead: Claude Code and Codex
+        // read the clipboard image themselves on ⌃V, so ⌘V works for screenshots too.
+        let pb = NSPasteboard.general
+        if pb.string(forType: .string) == nil, pb.availableType(from: [.fileURL]) == nil,
+           pb.canReadObject(forClasses: [NSImage.self], options: nil), let s = surface, !closed {
+            for action in [GHOSTTY_ACTION_PRESS, GHOSTTY_ACTION_RELEASE] {
+                var ev = ghostty_input_key_s()
+                ev.action = action
+                ev.mods = GHOSTTY_MODS_CTRL
+                ev.keycode = 9   // kVK_ANSI_V
+                ev.unshifted_codepoint = 0x76
+                _ = ghostty_surface_key(s, ev)
+            }
+            return
+        }
+        perform("paste_from_clipboard")
+    }
+    @IBAction func pasteAsPlainText(_ sender: Any?) { paste(sender) }
     @IBAction override func selectAll(_ sender: Any?) { perform("select_all") }
 
     // MARK: - Focus / size

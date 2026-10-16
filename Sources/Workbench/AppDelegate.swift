@@ -127,7 +127,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         ]))
         main.addItem(menu("Edit", [
             item("Copy", #selector(SurfaceView.copy(_:)), "c", reserved: false),
-            item("Paste", #selector(SurfaceView.paste(_:)), "v", reserved: false),
+            item("Paste", #selector(SurfaceView.paste(_:)), "v"),
             item("Select All", #selector(SurfaceView.selectAll(_:)), "a", reserved: false),
             .separator(),
             item("Find…", #selector(w.find(_:)), "f"),

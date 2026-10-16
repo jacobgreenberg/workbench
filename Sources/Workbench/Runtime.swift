@@ -182,9 +182,30 @@ enum PaneEvent: Sendable {
         nonisolated(unsafe) let state = state
         return MainActor.assumeIsolated {
             guard let surface = Runtime.current?.delegate?.surfaceView(for: id)?.surface,
-                  let str = NSPasteboard.general.string(forType: .string) else { return false }
+                  let str = pasteboardText() else { return false }
             ghostty_surface_complete_clipboard_request(surface, str, state, false)
             return true
+        }
+    }
+
+    /// File URLs become shell-escaped paths (as upstream Ghostty does), so a file copied in Finder pastes as its
+    /// path, which agents pick up as an attachment; anything else is the plain string.
+    @MainActor private static func pasteboardText() -> String? {
+        let strings = (NSPasteboard.general.pasteboardItems ?? []).compactMap { item -> String? in
+            if let plist = item.propertyList(forType: .fileURL),
+               let url = NSURL(pasteboardPropertyList: plist, ofType: .fileURL) as URL?, url.isFileURL {
+                return shellEscape(url.path)
+            }
+            return item.string(forType: .string)
+        }
+        return strings.isEmpty ? nil : strings.joined(separator: " ")
+    }
+
+    /// Upstream Ghostty's set: backslash-escape shell metacharacters and spaces.
+    nonisolated static func shellEscape(_ path: String) -> String {
+        path.reduce(into: "") { out, c in
+            if "\\ ()[]{}<>\"'`!#$&;|*?\t".contains(c) { out.append("\\") }
+            out.append(c)
         }
     }
 

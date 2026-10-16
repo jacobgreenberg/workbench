@@ -350,7 +350,10 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     func runtime(_ runtime: Runtime, pane id: PaneID, event: PaneEvent) {
         guard views[id] != nil else { return }   // queued before the pane closed
         switch event {
-        case let .title(t):
+        case let .title(raw):
+            // Agents animate a spinner glyph at the front of their title (Claude Code: ⠋⠙⠹…, ✳ when idle).
+            // The status dot already shows busy/idle, so drop it; that also stops a chrome redraw per frame.
+            let t = Self.stripStatusGlyphs(raw)
             guard titles[id] != t else { return }
             titles[id] = t
             updateChrome()
@@ -756,5 +759,13 @@ extension SplitNode {
         default:
             return self
         }
+    }
+}
+
+extension WorkspaceController {
+    nonisolated static func stripStatusGlyphs(_ title: String) -> String {
+        String(String.UnicodeScalarView(title.unicodeScalars.drop {
+            $0.properties.generalCategory == .otherSymbol || $0 == "·" || $0.properties.isWhitespace
+        }))
     }
 }
