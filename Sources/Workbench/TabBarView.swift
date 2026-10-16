@@ -7,9 +7,56 @@ final class HandButton: NSButton {
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
 }
 
+/// Double-click rename: makes a label an in-place text field. Return or clicking away commits, Esc cancels
+/// (`done(nil)`).
+@MainActor final class InlineRename: NSObject, NSTextFieldDelegate {
+    private static var active: InlineRename?
+    private let field: NSTextField
+    private let original: String
+    private let done: (String?) -> Void
+    private var finished = false
+
+    static var isEditing: Bool { active != nil }
+
+    @discardableResult init(_ field: NSTextField, done: @escaping (String?) -> Void) {
+        self.field = field
+        original = field.stringValue
+        self.done = done
+        super.init()
+        InlineRename.active?.finish(field.stringValue)
+        InlineRename.active = self
+        field.isEditable = true
+        field.isSelectable = true
+        field.delegate = self
+        field.window?.makeFirstResponder(field)
+        field.currentEditor()?.selectAll(nil)
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        guard selector == #selector(NSResponder.cancelOperation(_:)) else { return false }
+        finish(nil)
+        return true
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) { finish(field.stringValue) }
+
+    private func finish(_ value: String?) {
+        guard !finished else { return }
+        finished = true
+        if InlineRename.active === self { InlineRename.active = nil }
+        if value == nil { field.stringValue = original }
+        field.delegate = nil
+        field.isEditable = false
+        field.isSelectable = false
+        field.abortEditing()
+        done(value)
+    }
+}
+
 @MainActor private final class TabButton: NSView {
     var onSelect: (() -> Void)?
     var onClose: (() -> Void)?
+    var onRename: ((String?) -> Void)?
     private let dot = NSView()
     private let label = NSTextField(labelWithString: "")
     private let close = NSTextField(labelWithString: "×")
@@ -66,7 +113,7 @@ final class HandButton: NSButton {
 
     /// Updates in place; buttons are only rebuilt when the tab count changes.
     func apply(item: TabItem, selected: Bool, theme: Theme) {
-        if label.stringValue != item.title {
+        if label.stringValue != item.title, !label.isEditable {
             label.stringValue = item.title
             width.constant = Self.width(for: item.title)
         }
@@ -89,7 +136,9 @@ final class HandButton: NSButton {
 
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
-        if !close.isHidden && p.x >= close.frame.minX - 6 { onClose?() } else { onSelect?() }
+        if !close.isHidden && p.x >= close.frame.minX - 6 { onClose?() }
+        else if event.clickCount == 2 { InlineRename(label) { [weak self] in self?.onRename?($0) } }
+        else { onSelect?() }
     }
 
     override func otherMouseDown(with event: NSEvent) {
@@ -101,6 +150,7 @@ final class HandButton: NSButton {
     var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
     var onNew: (() -> Void)?
+    var onRename: ((Int, String?) -> Void)?
 
     private let stack = NSStackView()
     private let plus = HandButton(title: "+", target: nil, action: nil)
@@ -159,6 +209,7 @@ final class HandButton: NSButton {
                 let b = TabButton(height: max(bounds.height, 34))
                 b.onSelect = { [weak self] in self?.onSelect?(i) }
                 b.onClose = { [weak self] in self?.onClose?(i) }
+                b.onRename = { [weak self] in self?.onRename?(i, $0) }
                 stack.addArrangedSubview(b)
                 return b
             }

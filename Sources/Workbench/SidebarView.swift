@@ -58,10 +58,12 @@ private final class SidebarCell: NSTableCellView {
     var onSelect: ((Int) -> Void)?
     var onAdd: (() -> Void)?
     var onRemove: ((Int) -> Void)?
+    var onRename: ((Int, String?) -> Void)?
 
     private var rows: [SidebarRow] = []
     private var selected = -1
     private var theme: Theme?
+    private var needsReload = false   // rows changed while a name was being edited
     private let table = SidebarTable()
     private let addButton = HandButton()
 
@@ -87,6 +89,7 @@ private final class SidebarCell: NSTableCellView {
         table.delegate = self
         table.target = self
         table.action = #selector(rowClicked)
+        table.doubleAction = #selector(rowDoubleClicked)
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "Remove Project", action: #selector(removeTapped), keyEquivalent: ""))
         menu.items[0].target = self
@@ -125,6 +128,16 @@ private final class SidebarCell: NSTableCellView {
         if r >= 0 { onSelect?(r) }
     }
 
+    @objc private func rowDoubleClicked() {
+        let r = table.clickedRow
+        guard r >= 0, let cell = table.view(atColumn: 0, row: r, makeIfNecessary: false) as? SidebarCell else { return }
+        InlineRename(cell.label) { [weak self] name in
+            guard let self else { return }
+            if needsReload { needsReload = false; table.reloadData() }
+            onRename?(r, name)
+        }
+    }
+
     @objc private func removeTapped() {
         let r = table.clickedRow
         if r >= 0 { onRemove?(r) }
@@ -143,7 +156,8 @@ private final class SidebarCell: NSTableCellView {
             .foregroundColor: theme.color("mutedForeground"),
         ])
 
-        if changed { table.reloadData() }
+        // Reloading would destroy a name field mid-edit; the rename's end reloads instead.
+        if changed { if InlineRename.isEditing { needsReload = true } else { table.reloadData() } }
         for r in 0..<rows.count {
             if let rv = table.rowView(atRow: r, makeIfNecessary: false) as? SidebarRowView {
                 style(rv, row: r)
@@ -162,7 +176,7 @@ private final class SidebarCell: NSTableCellView {
     private func style(_ cell: SidebarCell, row: Int) {
         guard let theme, row < rows.count else { return }
         let r = rows[row]
-        cell.label.stringValue = r.name
+        if !cell.label.isEditable { cell.label.stringValue = r.name }
         cell.label.textColor = theme.color(row == selected ? "cardForeground" : "sidebarForeground")
         cell.toolTip = r.path
         styleStatusDot(cell.dot, r.status, theme: theme)

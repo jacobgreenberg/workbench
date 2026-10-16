@@ -98,6 +98,7 @@ struct Tab: Codable, Identifiable, Equatable, Sendable {
     var title: String
     var root: SplitNode
     var focused: PaneID?
+    var customTitle: String? = nil   // set by renaming the tab; wins over the terminal's title
 }
 
 struct Project: Codable, Identifiable, Equatable, Sendable {
@@ -240,6 +241,8 @@ func modelSelfCheck() {
         projects: [Project(id: UUID(), path: "/p", name: "p",
                            tabs: [Tab(id: UUID(), title: "t", root: tree, focused: p1.id)], activeTab: 0)],
         activeProject: 0, sidebarVisible: true, theme: "t", presets: Layout.default.presets)
+    let oldTab = #"{"id":"\#(UUID().uuidString)","title":"t","root":{"leaf":{"_0":{"id":"\#(p1.id.uuidString)","kind":{"markdown":{"path":"/x"}}}}}}"#
+    assert(try! JSONDecoder().decode(Tab.self, from: Data(oldTab.utf8)).customTitle == nil)
     let data = try! JSONEncoder().encode(layout)
     assert(try! JSONDecoder().decode(Layout.self, from: data) == layout)
 }

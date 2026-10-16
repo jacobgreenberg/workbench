@@ -114,6 +114,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         tabBar.onSelect = { [unowned self] i in selectTab(i) }
         tabBar.onClose = { [unowned self] i in closeTab(at: i) }
         tabBar.onNew = { [unowned self] in newTab(nil) }
+        sidebar.onRename = { [unowned self] i, name in renameProject(i, name) }
+        tabBar.onRename = { [unowned self] i, name in renameTab(i, name) }
         tree.onRatiosChanged = { [unowned self] newRoot in
             mutateActiveTab { $0.root = $0.root.withRatios(from: newRoot) }
         }
@@ -241,7 +243,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         }
         syncVisibility(refresh: rebuilt)
         updateChrome()
-        if let id = focusedPane, let v = views[id] { window?.makeFirstResponder(v) }
+        if !InlineRename.isEditing, let id = focusedPane, let v = views[id] { window?.makeFirstResponder(v) }
     }
 
     /// `refresh`: the split hierarchy was rebuilt, so re-parented surfaces must redraw (else they show blank).
@@ -255,6 +257,26 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         }
     }
 
+    /// nil = rename cancelled; empty = back to the folder name.
+    private func renameProject(_ i: Int, _ name: String?) {
+        if let name, store.layout.projects.indices.contains(i) {
+            let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            store.layout.projects[i].name = n.isEmpty ? URL(fileURLWithPath: store.layout.projects[i].path).lastPathComponent : n
+            store.changed()
+        }
+        render()   // also hands keyboard focus back to the terminal
+    }
+
+    /// nil = rename cancelled; empty = back to the terminal's own title.
+    private func renameTab(_ i: Int, _ name: String?) {
+        if let name, let p = activeProjectIndex, store.layout.projects[p].tabs.indices.contains(i) {
+            let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            store.layout.projects[p].tabs[i].customTitle = n.isEmpty ? nil : n
+            store.changed()
+        }
+        render()
+    }
+
     private func updateChrome() {
         let projects = store.layout.projects
         sidebar.update(rows: projects.map { p in
@@ -265,7 +287,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             let project = projects[p]
             tabBar.update(items: project.tabs.map { tab in
                 let id = tab.focused ?? tab.root.leaves.first?.id
-                return TabItem(title: id.flatMap { titles[$0] } ?? tab.title,
+                return TabItem(title: tab.customTitle ?? id.flatMap { titles[$0] } ?? tab.title,
                                status: tab.root.leaves.map { status[$0.id] ?? .idle }.max() ?? .idle)
             }, selected: project.activeTab, theme: theme)
         } else {
@@ -646,7 +668,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                         var kind = "terminal"
                         if case .markdown = leaf.kind { kind = "markdown" }
                         rows.append(["pane": leaf.id.uuidString, "project": project.name, "kind": kind,
-                                     "title": titles[leaf.id] ?? tab.title,
+                                     "title": tab.customTitle ?? titles[leaf.id] ?? tab.title,
                                      "status": "\(status[leaf.id] ?? .idle)"])
                     }
                 }
