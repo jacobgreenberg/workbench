@@ -48,7 +48,10 @@ extension SplitNode {
     }
 
     func contains(_ id: PaneID) -> Bool {
-        leaves.contains { $0.id == id }
+        switch self {
+        case .leaf(let s): return s.id == id
+        case .split(_, _, let a, let b): return a.contains(id) || b.contains(id)
+        }
     }
 
     func replacing(_ id: PaneID, with node: SplitNode) -> SplitNode {
@@ -199,6 +202,14 @@ struct Layout: Codable, Equatable, Sendable {
 
 #if DEBUG
 func modelSelfCheck() {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let md = dir.appendingPathComponent("a.md"), empty = dir.appendingPathComponent("e.md"), fifo = dir.appendingPathComponent("f.md")
+    try! Data("# hi".utf8).write(to: md); try! Data().write(to: empty); mkfifo(fifo.path, 0o600)
+    assert(MarkdownPaneView.load(md.path) == "# hi" && MarkdownPaneView.load(empty.path) == "")
+    assert(MarkdownPaneView.load(fifo.path).hasPrefix("Cannot read"))   // must not block
+
     func leaf() -> PaneSpec { PaneSpec(id: UUID(), kind: .markdown(path: "/x")) }
     let p1 = leaf(), p2 = leaf(), p3 = leaf()
     let tree = SplitNode.split(axis: .horizontal, ratio: 0.3, a: .leaf(p1),

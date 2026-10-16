@@ -41,6 +41,14 @@ private final class DividerSplitView: NSSplitView {
         applyRatios()
     }
 
+    func clear() {
+        subviews.forEach { $0.removeFromSuperview() }
+        paths = [:]
+        splits = []
+        root = nil
+        rootView = nil
+    }
+
     private func build(_ node: SplitNode, path: [Bool], color: NSColor) -> NSView {
         switch node {
         case .leaf(let spec):

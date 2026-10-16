@@ -186,8 +186,6 @@ private struct Renderer: Sendable {
         textView.isVerticallyResizable = true
         scrollView.documentView = textView
         addSubview(scrollView)
-        // The file watcher is owned by rewatchFileIfNeeded (called from every reload); only the directory is watched here.
-        dirSource = makeSource(URL(fileURLWithPath: path).deletingLastPathComponent().path)
         apply(theme: theme)
     }
 
@@ -217,9 +215,7 @@ private struct Renderer: Sendable {
         generation += 1
         let gen = generation, path = path, palette = palette
         renderQueue.async { [weak self] in
-            let size = (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int) ?? 0
-            let text = size > 10 << 20 ? "File too large to preview (\(size >> 20) MB)"
-                : (try? String(contentsOfFile: path, encoding: .utf8)) ?? "Cannot read \(path)"
+            let text = Self.load(path)
             let dir = URL(fileURLWithPath: path).deletingLastPathComponent()
             let result = Renderer(markdown: text, baseDir: dir, palette: palette).render()
             DispatchQueue.main.async {
@@ -235,6 +231,15 @@ private struct Renderer: Sendable {
             }
         }
         rewatchFileIfNeeded()
+    }
+
+    /// Regular files only (a FIFO or device would block or never end), read once up to the preview cap.
+    nonisolated static func load(_ path: String) -> String {
+        let url = URL(fileURLWithPath: path), cap = 10 << 20
+        guard (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true,
+              let h = try? FileHandle(forReadingFrom: url) else { return "Cannot read \(path)" }
+        let data = (try? h.read(upToCount: cap + 1)) ?? Data()
+        return data.count > cap ? "File too large to preview (over 10 MB)" : String(decoding: data, as: UTF8.self)
     }
 
     private func makeSource(_ target: String) -> DispatchSourceFileSystemObject? {
@@ -261,6 +266,13 @@ private struct Renderer: Sendable {
             fileSource?.cancel()
             fileSource = makeSource(path)
             fileInode = ino
+        }
+        // Watch the directory only while the file is missing, to catch it reappearing; otherwise sibling
+        // saves would wake and reparse every preview in that folder.
+        if fileSource == nil {
+            if dirSource == nil { dirSource = makeSource(URL(fileURLWithPath: path).deletingLastPathComponent().path) }
+        } else {
+            dirSource?.cancel(); dirSource = nil
         }
     }
 

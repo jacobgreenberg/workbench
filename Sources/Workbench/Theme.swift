@@ -51,7 +51,7 @@ extension Theme {
         let parts = t[t.index(after: open)..<close].split(separator: ",").map { Double($0.trimmingCharacters(in: .whitespaces)) }
         guard parts.count == 3 || parts.count == 4, !parts.contains(where: { $0 == nil }) else { return nil }
         let n = parts.map { $0! }
-        guard n.allSatisfy(\.isFinite) else { return nil }
+        guard n.prefix(3).allSatisfy({ (0...255).contains($0) }), n.count == 3 || (0...1).contains(n[3]) else { return nil }
         return (n[0], n[1], n[2], n.count == 4 ? n[3] : 1)
     }
 
@@ -99,6 +99,7 @@ func themeSelfCheck() {
     assert(p?.r == 30 && p?.g == 39 && p?.b == 44 && p?.a == 1)
     let q = Theme.parse("rgba(84, 110, 122, 0.5)")
     assert(q?.r == 84 && q?.g == 110 && q?.b == 122 && q?.a == 0.5)
+    assert(Theme.parse("rgb(1e100, 0, 0)") == nil && Theme.parse("rgba(1, 2, 3, 2)") == nil)
     let t = Theme(id: "x", name: "x", type: "dark", ui: [:], terminal: [
         "background": "#1E272C", "selectionBackground": "rgba(84, 110, 122, 0.5)", "black": "#546E7A",
     ])

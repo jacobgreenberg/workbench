@@ -15,8 +15,11 @@ if CommandLine.arguments.first.map({ URL(fileURLWithPath: $0).lastPathComponent 
     exit(ControlClient.run(Array(CommandLine.arguments.dropFirst())))
 }
 
-// One instance per state directory: a second copy would steal the socket and race layout.json.
-if ControlClient.isServing(path: Store.directory.appendingPathComponent("pane.sock").path) {
+// One instance per state directory: the lock holder owns the socket and layout.json. The fd stays open for the
+// process lifetime; O_CLOEXEC keeps terminal children from inheriting (and outliving us with) the lock.
+try? FileManager.default.createDirectory(at: Store.directory, withIntermediateDirectories: true)
+let instanceLock = open(Store.directory.appendingPathComponent("lock").path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+if instanceLock >= 0, flock(instanceLock, LOCK_EX | LOCK_NB) != 0 {
     let me = ProcessInfo.processInfo.processIdentifier
     NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
         .first { $0.processIdentifier != me }?.activate()

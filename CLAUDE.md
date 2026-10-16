@@ -109,6 +109,7 @@ enum FocusDirection: Sendable { case left, right, up, down }
     var onRatiosChanged: ((SplitNode) -> Void)?           // user dragged a divider; tree with updated ratios
     init(provider: @escaping (PaneSpec) -> NSView)        // returns the existing leaf view for a pane (never creates duplicates)
     func render(_ root: SplitNode, dividerColor: NSColor)
+    func clear()                                          // drop the tree and every view it retains
     func neighbor(of id: PaneID, _ direction: FocusDirection) -> PaneID?
 }
 

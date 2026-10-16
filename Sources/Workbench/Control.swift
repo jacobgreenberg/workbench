@@ -81,8 +81,7 @@ final class ControlServer: @unchecked Sendable {
                 default: NSLog("pane: control accept() failed: %d", errno); return
                 }
             }
-            var one: Int32 = 1
-            setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+            configure(c)
             DispatchQueue.global(qos: .utility).async { [self] in handle(c) }
         }
     }
@@ -205,22 +204,11 @@ enum ControlClient {
         return d
     }
 
-    /// True when a running Pane is already serving this socket.
-    static func isServing(path: String) -> Bool {
-        guard let s = connect(path: path) else { return false }
-        close(s)
-        return true
-    }
-
     /// Connected client socket with 2 s send/receive timeouts, so a stalled app never stalls an agent hook.
     private static func connect(path: String) -> Int32? {
         let s = socket(AF_UNIX, SOCK_STREAM, 0)
         guard s >= 0 else { return nil }
-        var one: Int32 = 1
-        setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
-        var tv = timeval(tv_sec: 2, tv_usec: 0)
-        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-        setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        configure(s)
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         let bytes = Array(path.utf8)
@@ -270,3 +258,12 @@ func controlSelfCheck() {
     assert(back == msg)
 }
 #endif
+
+/// No SIGPIPE, and 2 s send/receive deadlines so a stalled peer never pins a thread or an fd.
+private func configure(_ s: Int32) {
+    var one: Int32 = 1
+    setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+    var tv = timeval(tv_sec: 2, tv_usec: 0)
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+}

@@ -204,9 +204,13 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private func restore() {
         render()
         let active = Set(activeTab?.root.leaves.map(\.id) ?? [])
-        var pending = store.layout.projects.flatMap { $0.tabs.flatMap { $0.root.leaves } }.filter { !active.contains($0.id) }
+        var pending = store.layout.projects.flatMap { $0.tabs.flatMap { $0.root.leaves.map(\.id) } }.filter { !active.contains($0) }
         func step() {
-            for spec in pending.prefix(4) { (view(for: spec) as? SurfaceView)?.setVisible(false) }
+            // Re-resolve each batch: a pane may have been closed, or shown and created by render(), since launch.
+            for id in pending.prefix(4) where views[id] == nil {
+                guard let spec = spec(id) else { continue }
+                (view(for: spec) as? SurfaceView)?.setVisible(false)
+            }
             pending.removeFirst(min(4, pending.count))
             if !pending.isEmpty { DispatchQueue.main.async { MainActor.assumeIsolated { step() } } }
         }
@@ -225,7 +229,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             tree.render(tab.root, dividerColor: theme.color("border"))
         } else {
             tree.isHidden = true
-            tree.subviews.forEach { $0.removeFromSuperview() }
+            tree.clear()
             emptyLabel.isHidden = false
             emptyLabel.stringValue = activeProjectIndex == nil ? "⇧⌘O  Add Project" : "⌘T  New Terminal"
         }
