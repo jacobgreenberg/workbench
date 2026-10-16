@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "Pane",
+    name: "Workbench",
     platforms: [.macOS(.v15)],
     dependencies: [
         .package(url: "https://github.com/swiftlang/swift-markdown.git", from: "0.6.0"),
@@ -10,7 +10,7 @@ let package = Package(
     targets: [
         .binaryTarget(name: "GhosttyKit", path: "vendor/GhosttyKit.xcframework"),
         .executableTarget(
-            name: "Pane",
+            name: "Workbench",
             dependencies: [
                 "GhosttyKit",
                 .product(name: "Markdown", package: "swift-markdown"),

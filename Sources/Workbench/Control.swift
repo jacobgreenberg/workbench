@@ -121,7 +121,7 @@ final class ControlServer: @unchecked Sendable {
 enum ControlClient {
     static func run(_ args: [String]) -> Int32 {
         let env = ProcessInfo.processInfo.environment
-        let path = env["PANE_SOCK"] ?? (NSHomeDirectory() + "/Library/Application Support/Pane/pane.sock")
+        let path = env["PANE_SOCK"] ?? (NSHomeDirectory() + "/Library/Application Support/Workbench/pane.sock")
         let paneID = env["PANE_ID"]
         guard let cmd = args.first else { return usage() }
 
@@ -171,7 +171,7 @@ enum ControlClient {
         }
 
         guard let reply = send(msg, path: path) else {
-            FileHandle.standardError.write(Data("pane: Pane is not running\n".utf8))
+            FileHandle.standardError.write(Data("pane: Workbench is not running\n".utf8))
             return 1
         }
         if let d = reply.data(using: .utf8),

@@ -15,7 +15,7 @@ extension Theme {
         var dirs: [URL] = []
         if let r = Bundle.main.resourceURL { dirs.append(r.appendingPathComponent("themes")) }
         if let s = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
-            dirs.append(s.appendingPathComponent("Pane/themes"))
+            dirs.append(s.appendingPathComponent("Workbench/themes"))
         }
         var byID: [String: Theme] = [:]
         for dir in dirs {

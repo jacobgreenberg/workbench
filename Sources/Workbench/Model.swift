@@ -148,7 +148,7 @@ struct Layout: Codable, Equatable, Sendable {
         if let dir = ProcessInfo.processInfo.environment["PANE_STATE_DIR"] { return URL(fileURLWithPath: dir) }
         #endif
         return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Pane")
+            .appendingPathComponent("Workbench")
     }()
 
     var layout: Layout

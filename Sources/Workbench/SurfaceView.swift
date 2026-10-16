@@ -84,7 +84,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
             return ghostty_surface_new(app, &c)
         }
         guard let created else {
-            NSLog("Pane: ghostty_surface_new failed for pane \(id)")
+            NSLog("Workbench: ghostty_surface_new failed for pane \(id)")
             return
         }
         self.surface = created

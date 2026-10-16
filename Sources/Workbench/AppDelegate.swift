@@ -37,7 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard workspace.hasBusyAgents else { return .terminateNow }
         let alert = NSAlert()
-        alert.messageText = "Quit Pane?"
+        alert.messageText = "Quit Workbench?"
         alert.informativeText = "Agents are still working. Their sessions can be resumed on next launch."
         alert.addButton(withTitle: "Quit")
         alert.addButton(withTitle: "Cancel")
@@ -108,11 +108,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func buildMenu() -> NSMenu {
         let main = NSMenu()
         let w = WorkspaceController.self
-        main.addItem(menu("Pane", [
-            NSMenuItem(title: "About Pane", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: ""),
+        main.addItem(menu("Workbench", [
+            NSMenuItem(title: "About Workbench", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: ""),
             .separator(),
-            item("Hide Pane", #selector(NSApplication.hide(_:)), "h"),
-            item("Quit Pane", #selector(NSApplication.terminate(_:)), "q"),
+            item("Hide Workbench", #selector(NSApplication.hide(_:)), "h"),
+            item("Quit Workbench", #selector(NSApplication.terminate(_:)), "q"),
         ]))
         main.addItem(menu("File", [
             item("New Tab", #selector(w.newTab(_:)), "t"),
