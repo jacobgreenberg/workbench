@@ -4,3 +4,4 @@ vendor/*.tar.gz
 vendor/ghostty-src/
 build/
 *.app
+build.noindex/

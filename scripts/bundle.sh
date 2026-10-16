@@ -7,7 +7,7 @@ SI=vendor/ghostty-src/src/shell-integration
 
 swift build -c release
 
-APP=build/Workbench.app
+APP=build.noindex/Workbench.app   # .noindex: Spotlight/launchers list only the /Applications copy
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/ghostty"
 cp .build/release/Workbench "$APP/Contents/MacOS/Workbench"

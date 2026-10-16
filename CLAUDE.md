@@ -2,7 +2,7 @@
 
 Native macOS terminal IDE for running many Claude Code / Codex sessions. Swift 6 + AppKit + GhosttyKit (libghostty, cmux fork `manaflow-ai/ghostty@cb1ef70`, prebuilt via `scripts/fetch-ghosttykit.sh`). Single SwiftPM executable target `Workbench`, all sources in `Sources/Workbench/`. Reference Ghostty sources (read-only) are in `vendor/ghostty-src/macos/Sources/Ghostty/`; the C API is `vendor/ghostty-src/include/ghostty.h`.
 
-Build: `swift build -c release`, then `scripts/bundle.sh` → `build/Workbench.app`. Run: `open build/Workbench.app`.
+Build: `swift build -c release`, then `scripts/bundle.sh` → `build.noindex/Workbench.app`. Run: `open build.noindex/Workbench.app`.
 
 Rules: AppKit only (no SwiftUI). No polling timers. Every C callback is a nonisolated `@convention(c)` function that copies data into owned Swift values and hops to main with `DispatchQueue.main.async`. Never touch a SurfaceView's `wantsLayer`/`layer` before `ghostty_surface_new`. Import GhosttyKit as `@preconcurrency import GhosttyKit`.
 

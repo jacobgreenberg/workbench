@@ -16,7 +16,7 @@ Requires macOS 15+, Xcode command line tools, and Ghostty.app installed (for ter
 
 ```sh
 scripts/fetch-ghosttykit.sh      # once: pinned, checksum-verified GhosttyKit.xcframework
-scripts/bundle.sh --install      # builds build/Workbench.app and copies it to /Applications
+scripts/bundle.sh --install      # builds build.noindex/Workbench.app and copies it to /Applications
 ```
 
 Update later with `scripts/update.sh` (pull, rebuild, install).
