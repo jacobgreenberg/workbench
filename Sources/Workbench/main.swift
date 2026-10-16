@@ -6,7 +6,13 @@ if CommandLine.arguments.contains("--selfcheck") {
     MainActor.assumeIsolated { modelSelfCheck() }
     themeSelfCheck()
     controlSelfCheck()
+    agentsSelfCheck()
     print("selfcheck ok")
+    exit(0)
+}
+if CommandLine.arguments.contains("--agents") {   // what quit would record for each pane's running agent
+    Agents.loadLaunchers()
+    for (pane, cmd) in Agents.running() { print(pane, cmd) }
     exit(0)
 }
 #endif

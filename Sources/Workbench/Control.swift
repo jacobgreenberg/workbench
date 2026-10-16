@@ -126,18 +126,9 @@ enum ControlClient {
 
         if cmd == "hook" {
             guard let paneID, args.count > 1 else { return 0 }
-            var raw: Data?
-            if args.count > 2 {
-                raw = args.last?.data(using: .utf8)
-            } else if isatty(0) == 0 {
-                raw = FileHandle.standardInput.readDataToEndOfFile()
-            }
-            var msg = ["cmd": "hook", "pane": paneID, "event": args[1]]
-            if let raw, let obj = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
-               let session = (obj["session_id"] ?? obj["thread-id"]) as? String {
-                msg["session"] = session
-            }
-            _ = send(msg, path: path)
+            // Drain Claude's hook payload (unused) so its write never fails with EPIPE; Codex passes argv instead.
+            if args.count == 2, isatty(0) == 0 { _ = FileHandle.standardInput.readDataToEndOfFile() }
+            _ = send(["cmd": "hook", "pane": paneID, "event": args[1]], path: path)
             return 0
         }
 

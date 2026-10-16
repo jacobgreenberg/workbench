@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var reserved: [(key: String, mods: NSEvent.ModifierFlags, item: NSMenuItem)] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Agents.discoverLaunchers()
         store = Store()
         runtime = Runtime(overrides: WorkspaceController.overrides(Theme.named(store.layout.theme)))
         NSApp.mainMenu = buildMenu()
@@ -35,10 +36,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func applicationDidResignActive(_ notification: Notification) { runtime?.setFocus(false) }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard workspace.hasBusyAgents else { return .terminateNow }
+        guard workspace.needsConfirmQuit else { return .terminateNow }
         let alert = NSAlert()
         alert.messageText = "Quit Workbench?"
-        alert.informativeText = "Agents are still working. Their sessions can be resumed on next launch."
+        alert.informativeText = "Running processes will be closed. Claude and Codex sessions resume on next launch."
         alert.addButton(withTitle: "Quit")
         alert.addButton(withTitle: "Cancel")
         return alert.runModal() == .alertFirstButtonReturn ? .terminateNow : .terminateCancel

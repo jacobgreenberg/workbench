@@ -71,7 +71,6 @@ final class HandButton: NSButton {
             width.constant = Self.width(for: item.title)
         }
         status = item.status
-        dot.isHidden = item.status == .idle
         self.selected = selected
         self.theme = theme
         refresh()
@@ -82,13 +81,7 @@ final class HandButton: NSButton {
         label.textColor = theme.color(selected ? "cardForeground" : hovering ? "foreground" : "mutedForeground")
         close.textColor = theme.color("mutedForeground")
         close.isHidden = !hovering
-        let key: String
-        switch status {
-        case .busy: key = "primary"
-        case .done: key = "chart2"
-        default: key = "chart3"
-        }
-        dot.layer?.backgroundColor = theme.color(key).cgColor
+        styleStatusDot(dot, status, theme: theme)
     }
 
     override func mouseEntered(with event: NSEvent) { hovering = true; refresh() }
@@ -172,5 +165,27 @@ final class HandButton: NSButton {
             .foregroundColor: theme.color("mutedForeground"),
         ])
         for (i, b) in buttons.enumerated() { b.apply(item: newItems[i], selected: i == selected, theme: theme) }
+    }
+}
+
+/// Status dot: hidden when idle, a slow breathing pulse while busy, solid green when done, amber when it needs you.
+/// The pulse is a Core Animation layer animation, so it runs in the render server without waking the app.
+@MainActor func styleStatusDot(_ dot: NSView, _ status: PaneStatus, theme: Theme) {
+    dot.isHidden = status == .idle
+    let key = switch status { case .idle, .busy: "primary"; case .done: "chart2"; case .attention: "chart3" }
+    dot.layer?.backgroundColor = theme.color(key).cgColor
+    guard let layer = dot.layer else { return }
+    if status != .busy {
+        layer.removeAnimation(forKey: "pulse")
+    } else if layer.animation(forKey: "pulse") == nil {
+        let a = CABasicAnimation(keyPath: "opacity")
+        a.fromValue = 1
+        a.toValue = 0.2
+        a.duration = 0.9
+        a.autoreverses = true
+        a.repeatCount = .infinity
+        a.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        a.isRemovedOnCompletion = false
+        layer.add(a, forKey: "pulse")
     }
 }

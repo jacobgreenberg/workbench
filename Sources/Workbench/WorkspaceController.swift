@@ -7,7 +7,6 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     static func overrides(_ theme: Theme) -> String {
         """
         cursor-style-blink = false
-        confirm-close-surface = false
         scrollback-limit = 10000000
         unfocused-split-opacity = 1
         window-padding-x = 8
@@ -176,7 +175,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         switch spec.kind {
         case let .terminal(cwd, launch):
             let s = SurfaceView(app: runtime.app, id: spec.id, cwd: cwd,
-                                initialInput: launch.map { $0.commandLine + "\n" },
+                                initialInput: launch.map { $0.command + "\n" },
                                 env: env(for: spec.id), scrollbackLimit: launch?.scrollbackLimit)
             s.onFocus = { [unowned self] id in paneFocused(id) }
             v = s
@@ -353,6 +352,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         case let .title(raw):
             // Agents animate a spinner glyph at the front of their title (Claude Code: ⠋⠙⠹…, ✳ when idle).
             // The status dot already shows busy/idle, so drop it; that also stops a chrome redraw per frame.
+            // A braille spinner means the agent is mid-turn: that drives the status dot for agents started any way,
+            // not only through presets with hooks. Spinner gone means the turn ended.
+            let spinning = raw.unicodeScalars.first.map { (0x2800...0x28FF).contains($0.value) } ?? false
+            if spinning, status[id] != .busy { setStatus(id, .busy) }
+            if !spinning, status[id] == .busy { setStatus(id, .done) }
             let t = Self.stripStatusGlyphs(raw)
             guard titles[id] != t else { return }
             titles[id] = t
@@ -561,11 +565,31 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         split(.horizontal, kind: .markdown(path: path), from: source)
     }
 
-    var hasBusyAgents: Bool { status.values.contains(.busy) }
+    /// Something would be lost by quitting: a process other than an idle shell, or an agent mid-turn.
+    var needsConfirmQuit: Bool { status.values.contains(.busy) || views.keys.contains { needsConfirm([$0]) } }
 
     func terminateAll() {
+        captureAgents()
         store.flush()
         for id in Array(views.keys) { destroy(id) }
+    }
+
+    /// Record, per terminal pane, the command that resumes the agent running in it (through the launcher it was
+    /// started with); a pane with no agent running forgets any earlier one.
+    private func captureAgents() {
+        let running = Agents.running()
+        for project in store.layout.projects {
+            for tab in project.tabs {
+                for leaf in tab.root.leaves {
+                    mutatePane(leaf.id) { spec in
+                        guard case let .terminal(cwd, launch) = spec.kind else { return }
+                        spec.kind = .terminal(cwd: cwd, launch: running[leaf.id].map {
+                            Launch(command: $0, scrollbackLimit: launch?.scrollbackLimit)
+                        })
+                    }
+                }
+            }
+        }
     }
 
     // MARK: - Control socket
@@ -575,14 +599,6 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         switch msg["cmd"] {
         case "hook":
             guard let id = pane else { return #"{"error":"no pane"}"# }
-            if let session = msg["session"], !session.isEmpty {
-                mutatePane(id) { spec in
-                    if case .terminal(let cwd, var launch?) = spec.kind, launch.sessionID != session {
-                        launch.sessionID = session
-                        spec.kind = .terminal(cwd: cwd, launch: launch)
-                    }
-                }
-            }
             switch msg["event"] {
             case "busy": setStatus(id, .busy)
             case "done": setStatus(id, .done)
@@ -611,7 +627,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             return "{}"
         case "split":
             let axis: Axis = msg["axis"] == "vertical" ? .vertical : .horizontal
-            let launch = msg["command"].map { Launch(command: $0, resume: nil, agent: nil, sessionID: nil, scrollbackLimit: nil) }
+            let launch = msg["command"].map { Launch(command: $0, scrollbackLimit: nil) }
             split(axis, kind: .terminal(cwd: cwdFor(pane), launch: launch), from: pane.flatMap { locate($0) != nil ? $0 : nil })
             return #"{"pane":"\#(focusedPane?.uuidString ?? "")"}"#
         case "send":
@@ -734,8 +750,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     @objc func resetFontSize(_ sender: Any?) { focusedPane.flatMap { surfaceView(for: $0) }?.perform("reset_font_size") }
     @objc func launchPreset(_ sender: NSMenuItem) {
         guard let preset = store.layout.presets.first(where: { $0.key == sender.tag }) else { return }
-        let launch = Launch(command: preset.command, resume: preset.resume, agent: preset.agent,
-                            sessionID: nil, scrollbackLimit: preset.scrollbackLimit)
+        let launch = Launch(command: preset.command, scrollbackLimit: preset.scrollbackLimit)
         let kind = PaneKind.terminal(cwd: activeProjectIndex.map { store.layout.projects[$0].path } ?? NSHomeDirectory(),
                                      launch: launch)
         if activeTab == nil { newTab(kind: kind) } else { split(.horizontal, kind: kind) }

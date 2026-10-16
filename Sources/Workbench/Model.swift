@@ -2,21 +2,9 @@ import Foundation
 
 typealias PaneID = UUID
 
-enum Agent: String, Codable, Sendable { case claude, codex }
-
 struct Launch: Codable, Equatable, Sendable {
-    var command: String
-    var resume: String?
-    var agent: Agent?
-    var sessionID: String?
+    var command: String          // typed into the shell; rewritten at quit to the agent's resume command
     var scrollbackLimit: Int?
-
-    var commandLine: String {
-        if let id = sessionID, let r = resume {
-            return r.replacingOccurrences(of: "{id}", with: id)
-        }
-        return command
-    }
 }
 
 enum PaneKind: Codable, Equatable, Sendable {
@@ -114,8 +102,6 @@ struct Preset: Codable, Equatable, Sendable {
     var key: Int
     var name: String
     var command: String
-    var resume: String?
-    var agent: Agent?
     var scrollbackLimit: Int?
 }
 
@@ -132,14 +118,8 @@ struct Layout: Codable, Equatable, Sendable {
         sidebarVisible: true,
         theme: "oceanic-v2",
         presets: [
-            Preset(key: 1, name: "Claude",
-                   command: "cc1 --settings \"$PANE_CLAUDE_SETTINGS\"",
-                   resume: "cc1 --settings \"$PANE_CLAUDE_SETTINGS\" --resume {id}",
-                   agent: .claude, scrollbackLimit: nil),
-            Preset(key: 2, name: "Codex",
-                   command: "gpt1 -c \"notify=[\\\"$PANE_BIN\\\",\\\"hook\\\",\\\"done\\\"]\"",
-                   resume: "gpt1 -c \"notify=[\\\"$PANE_BIN\\\",\\\"hook\\\",\\\"done\\\"]\" resume {id}",
-                   agent: .codex, scrollbackLimit: nil),
+            Preset(key: 1, name: "Claude", command: "cc1 " + Agents.claudeHookArgs, scrollbackLimit: nil),
+            Preset(key: 2, name: "Codex", command: "gpt1 " + Agents.codexHookArgs, scrollbackLimit: nil),
         ]
     )
 }
@@ -226,10 +206,8 @@ func modelSelfCheck() {
         return []
     }
     assert(ratios(tree.equalized()) == [0.5, 0.5])
-    var l = Launch(command: "c", resume: "r {id} {id}", agent: nil, sessionID: nil, scrollbackLimit: nil)
-    assert(l.commandLine == "c")
-    l.sessionID = "S"
-    assert(l.commandLine == "r S S")
+    let old = #"{"command":"c","resume":"r {id}","agent":"claude","sessionID":"S"}"#
+    assert(try! JSONDecoder().decode(Launch.self, from: Data(old.utf8)) == Launch(command: "c", scrollbackLimit: nil))
     let layout = Layout(
         projects: [Project(id: UUID(), path: "/p", name: "p",
                            tabs: [Tab(id: UUID(), title: "t", root: tree, focused: p1.id)], activeTab: 0)],

@@ -11,14 +11,9 @@ Rules: AppKit only (no SwiftUI). No polling timers. Every C callback is a noniso
 ```swift
 // Model.swift
 typealias PaneID = UUID
-enum Agent: String, Codable, Sendable { case claude, codex }
 struct Launch: Codable, Equatable, Sendable {
-    var command: String          // typed into the shell as initial input
-    var resume: String?          // template containing "{id}", used when sessionID != nil
-    var agent: Agent?
-    var sessionID: String?
+    var command: String          // typed into the shell as initial input; rewritten at quit to the running agent's resume command
     var scrollbackLimit: Int?    // bytes; nil = global default
-    var commandLine: String { /* sessionID != nil && resume != nil ? resume!.replacingOccurrences(of: "{id}", with: sessionID!) : command */ }
 }
 enum PaneKind: Codable, Equatable, Sendable { case terminal(cwd: String, launch: Launch?), markdown(path: String) }
 struct PaneSpec: Codable, Equatable, Sendable { var id: PaneID; var kind: PaneKind }
@@ -37,7 +32,7 @@ extension SplitNode {
 }
 struct Tab: Codable, Identifiable, Equatable, Sendable { var id: UUID; var title: String; var root: SplitNode; var focused: PaneID? }
 struct Project: Codable, Identifiable, Equatable, Sendable { var id: UUID; var path: String; var name: String; var tabs: [Tab]; var activeTab: Int }
-struct Preset: Codable, Equatable, Sendable { var key: Int; var name: String; var command: String; var resume: String?; var agent: Agent?; var scrollbackLimit: Int? }
+struct Preset: Codable, Equatable, Sendable { var key: Int; var name: String; var command: String; var scrollbackLimit: Int? }
 struct Layout: Codable, Equatable, Sendable {
     var projects: [Project]; var activeProject: Int; var sidebarVisible: Bool; var theme: String; var presets: [Preset]
     static let `default`: Layout
@@ -101,6 +96,13 @@ extension Theme {
     static func named(_ id: String) -> Theme             // falls back to "oceanic-v2", then first
     func color(_ key: String) -> NSColor                  // ui[key] (hex #RRGGBB or rgba(r, g, b, a)); magenta if missing
     var ghosttyConfig: String                             // newline-separated ghostty config lines for terminal colors + split-divider-color
+}
+
+// Agents.swift — agent processes found by inherited PANE_ID; launcher (cc1/cc2/gpt1…) recovered from the user's zsh functions
+enum Agents {
+    static let claudeHookArgs: String; static let codexHookArgs: String
+    static func discoverLaunchers()                       // once at launch, background
+    static func running() -> [PaneID: String]            // pane → resume command, e.g. "cc2 --resume <id>", "gpt1 resume --last"
 }
 
 // SplitTreeView.swift

@@ -162,12 +162,7 @@ private final class SidebarCell: NSTableCellView {
         cell.label.stringValue = r.name
         cell.label.textColor = theme.color(row == selected ? "cardForeground" : "sidebarForeground")
         cell.toolTip = r.path
-        switch r.status {
-        case .idle: cell.dot.isHidden = true
-        case .busy: cell.dot.isHidden = false; cell.dot.layer?.backgroundColor = theme.color("primary").cgColor
-        case .done: cell.dot.isHidden = false; cell.dot.layer?.backgroundColor = theme.color("chart2").cgColor
-        case .attention: cell.dot.isHidden = false; cell.dot.layer?.backgroundColor = theme.color("chart3").cgColor
-        }
+        styleStatusDot(cell.dot, r.status, theme: theme)
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
