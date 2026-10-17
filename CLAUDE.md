@@ -32,7 +32,7 @@ extension SplitNode {
     func equalized() -> SplitNode                                  // every ratio = 0.5
 }
 struct Tab: Codable, Identifiable, Equatable, Sendable { var id: UUID; var title: String; var root: SplitNode; var focused: PaneID?; var customTitle: String? = nil /* user rename; wins over the terminal title */ }
-struct Project: Codable, Identifiable, Equatable, Sendable { var id: UUID; var path: String; var name: String; var tabs: [Tab]; var activeTab: Int }
+struct Project: Codable, Identifiable, Equatable, Sendable { var id: UUID; var path: String; var name: String; var tabs: [Tab]; var activeTab: Int; var scratch: Bool? = nil /* ⇧⌘N temp project in ~: dropped when its last tab closes and at load */ }
 struct Preset: Codable, Equatable, Sendable { var key: Int; var name: String; var command: String; var scrollbackLimit: Int? }
 struct Layout: Codable, Equatable, Sendable {
     var projects: [Project]; var activeProject: Int; var sidebarVisible: Bool; var theme: String; var presets: [Preset]

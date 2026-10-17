@@ -107,6 +107,7 @@ struct Project: Codable, Identifiable, Equatable, Sendable {
     var name: String
     var tabs: [Tab]
     var activeTab: Int
+    var scratch: Bool? = nil   // temporary home-folder project: gone when its last tab closes, never restored
 }
 
 struct Preset: Codable, Equatable, Sendable {
@@ -168,6 +169,9 @@ func readFile(_ url: URL, cap: Int) -> Data? {
             try? FileManager.default.moveItem(at: url, to: url.appendingPathExtension("bak"))
         }
         var l = decoded ?? Layout.default
+        let active = l.projects.indices.contains(l.activeProject) ? l.projects[l.activeProject].id : nil
+        l.projects.removeAll { $0.scratch == true }
+        l.activeProject = l.projects.firstIndex { $0.id == active } ?? 0
         l.activeProject = l.projects.isEmpty ? 0 : min(max(l.activeProject, 0), l.projects.count - 1)
         for i in l.projects.indices {
             let n = l.projects[i].tabs.count

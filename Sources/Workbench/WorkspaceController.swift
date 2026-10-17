@@ -556,6 +556,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     /// Removes a tab and keeps the active tab pointing at the same tab.
     private func removeTab(project p: Int, at t: Int) {
         store.layout.projects[p].tabs.remove(at: t)
+        if store.layout.projects[p].scratch == true, store.layout.projects[p].tabs.isEmpty { dropProject(p); return }
         let count = store.layout.projects[p].tabs.count
         var active = store.layout.projects[p].activeTab
         if t < active { active -= 1 }
@@ -583,12 +584,17 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
            !confirm("Remove project “\(project.name)”?") { return }
         guard let i = store.layout.projects.firstIndex(where: { $0.id == project.id }) else { return }
         store.layout.projects[i].tabs.flatMap { $0.root.leaves.map(\.id) }.forEach(destroy)
+        dropProject(i)
+        store.changed()
+        render()
+    }
+
+    /// Removes a project and keeps the active project pointing at the same project.
+    private func dropProject(_ i: Int) {
         store.layout.projects.remove(at: i)
         var active = store.layout.activeProject
         if i < active { active -= 1 }
         store.layout.activeProject = max(0, min(active, store.layout.projects.count - 1))
-        store.changed()
-        render()
     }
 
     func openMarkdown(_ path: String, from source: PaneID?) {
@@ -695,6 +701,13 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             guard let path = msg["path"] else { return #"{"error":"no path"}"# }
             openMarkdown(path, from: pane.flatMap { locate($0) != nil ? $0 : nil })
             return "{}"
+        #if DEBUG
+        case "action":   // test harness: run a menu action, e.g. "newTab:", without needing keyboard focus
+            let sel = NSSelectorFromString(msg["name"] ?? "")
+            guard responds(to: sel) else { return #"{"error":"unknown action"}"# }
+            perform(sel, with: nil)
+            return "{}"
+        #endif
         default:
             return #"{"error":"unknown command"}"#
         }
@@ -719,6 +732,16 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     // MARK: - Menu actions
 
     @objc func newTab(_ sender: Any?) { newTab(kind: .terminal(cwd: cwdForNewPane(), launch: nil)) }
+    @objc func newScratchTerminal(_ sender: Any?) {
+        if let i = store.layout.projects.firstIndex(where: { $0.scratch == true }) {
+            store.layout.activeProject = i
+        } else {
+            store.layout.projects.append(Project(id: UUID(), path: NSHomeDirectory(), name: "Scratch", tabs: [],
+                                                 activeTab: 0, scratch: true))
+            store.layout.activeProject = store.layout.projects.count - 1
+        }
+        newTab(kind: .terminal(cwd: NSHomeDirectory(), launch: nil))
+    }
     @objc func splitRight(_ sender: Any?) { split(.horizontal, kind: .terminal(cwd: cwdForNewPane(), launch: nil)) }
     @objc func splitDown(_ sender: Any?) { split(.vertical, kind: .terminal(cwd: cwdForNewPane(), launch: nil)) }
     @objc func closePane(_ sender: Any?) {
@@ -756,7 +779,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         addProject(at: url)
     }
     private func addProject(at url: URL) {
-        if let i = store.layout.projects.firstIndex(where: { $0.path == url.path }) { selectProject(i); return }
+        if let i = store.layout.projects.firstIndex(where: { $0.path == url.path && $0.scratch != true }) { selectProject(i); return }
         let spec = PaneSpec(id: UUID(), kind: .terminal(cwd: url.path, launch: nil))
         store.layout.projects.append(Project(id: UUID(), path: url.path, name: url.lastPathComponent,
                                              tabs: [Tab(id: UUID(), title: "Terminal", root: .leaf(spec), focused: spec.id)],

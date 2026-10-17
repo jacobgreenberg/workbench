@@ -119,6 +119,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         ]))
         main.addItem(menu("File", [
             item("New Tab", #selector(w.newTab(_:)), "t"),
+            item("New Scratch Terminal", #selector(w.newScratchTerminal(_:)), "n", [.command, .shift]),
             item("Split Right", #selector(w.splitRight(_:)), "d"),
             item("Split Down", #selector(w.splitDown(_:)), "d", [.command, .shift]),
             .separator(),
