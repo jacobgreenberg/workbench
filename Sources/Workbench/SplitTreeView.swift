@@ -13,6 +13,8 @@ private final class DividerSplitView: NSSplitView {
     static let height: CGFloat = 22
     let id: PaneID
     let label = NSTextField(labelWithString: "")
+    let grip = NSTextField(labelWithString: "⠿")   // marks the bar as a handle, not another row of tabs
+    let line = NSView()
     var onClick: (() -> Void)?
     var onDrag: ((NSPoint, _ done: Bool) -> Void)?   // window point; done = mouse released
 
@@ -22,10 +24,20 @@ private final class DividerSplitView: NSSplitView {
         wantsLayer = true
         label.font = .systemFont(ofSize: 11)
         label.lineBreakMode = .byTruncatingTail
-        label.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(label)
+        grip.font = .systemFont(ofSize: 11)
+        line.wantsLayer = true
+        for v in [label, grip, line] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(v)
+        }
         NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            grip.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            grip.centerYAnchor.constraint(equalTo: centerYAnchor),
+            line.leadingAnchor.constraint(equalTo: leadingAnchor),
+            line.trailingAnchor.constraint(equalTo: trailingAnchor),
+            line.bottomAnchor.constraint(equalTo: bottomAnchor),
+            line.heightAnchor.constraint(equalToConstant: 1),
+            label.leadingAnchor.constraint(equalTo: grip.trailingAnchor, constant: 6),
             label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -10),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
@@ -228,8 +240,11 @@ private final class DividerSplitView: NSSplitView {
         for (id, h) in headers {
             let t = title(id)
             if h.label.stringValue != t { h.label.stringValue = t }
+            // The terminal's own background, not the tab bar's: the bar reads as part of its pane.
             h.label.textColor = theme.color(id == focused ? "foreground" : "mutedForeground")
-            h.layer?.backgroundColor = theme.color("tertiary").cgColor
+            h.grip.textColor = theme.color(id == focused ? "primary" : "mutedForeground")
+            h.layer?.backgroundColor = theme.color("background").cgColor
+            h.line.layer?.backgroundColor = theme.color("border").cgColor
         }
         dropIndicator.wantsLayer = true
         dropIndicator.layer?.backgroundColor = theme.color("primary").withAlphaComponent(0.2).cgColor

@@ -60,6 +60,7 @@ final class HandButton: NSButton {
     private let dot = NSView()
     private let label = NSTextField(labelWithString: "")
     private let close = NSTextField(labelWithString: "×")
+    private let underline = NSView()
     private var status = PaneStatus.idle
     private var width: NSLayoutConstraint!
     private var selected = false
@@ -86,7 +87,8 @@ final class HandButton: NSButton {
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         close.font = .systemFont(ofSize: 13)
         close.isHidden = true
-        for v in [dot, label, close] as [NSView] {
+        underline.wantsLayer = true
+        for v in [dot, label, close, underline] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
@@ -100,6 +102,10 @@ final class HandButton: NSButton {
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
             close.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             close.centerYAnchor.constraint(equalTo: centerYAnchor),
+            underline.leadingAnchor.constraint(equalTo: leadingAnchor),
+            underline.trailingAnchor.constraint(equalTo: trailingAnchor),
+            underline.bottomAnchor.constraint(equalTo: bottomAnchor),
+            underline.heightAnchor.constraint(equalToConstant: 2),
         ])
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
     }
@@ -135,6 +141,9 @@ final class HandButton: NSButton {
         label.textColor = theme.color(selected ? "cardForeground" : hovering ? "foreground" : "mutedForeground")
         close.textColor = theme.color("mutedForeground")
         close.isHidden = !hovering
+        layer?.backgroundColor = selected ? theme.color("tertiaryActive").cgColor : nil
+        underline.layer?.backgroundColor = theme.color("primary").cgColor
+        underline.isHidden = !selected
         styleStatusDot(dot, status, theme: theme)
     }
 
@@ -233,9 +242,9 @@ final class HandButton: NSButton {
             }
             stack.addArrangedSubview(plus)
         }
-        layer?.backgroundColor = theme.color("background").cgColor
+        layer?.backgroundColor = theme.color("tertiary").cgColor
         border.layer?.backgroundColor = theme.color("border").cgColor
-        strip.layer?.backgroundColor = theme.color("tertiary").cgColor   // same as the sidebar
+        strip.layer?.backgroundColor = theme.color("tertiary").cgColor   // same as the sidebar and tab row
         plus.attributedTitle = NSAttributedString(string: "+", attributes: [
             .font: NSFont.systemFont(ofSize: 13),
             .foregroundColor: theme.color("mutedForeground"),
