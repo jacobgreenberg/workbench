@@ -632,15 +632,15 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     /// started with); a pane with no agent running forgets any earlier one.
     private func captureAgents() { apply(Agents.running()) }
 
-    private func apply(_ running: [PaneID: String]) {
+    private func apply(_ running: [PaneID: String?]) {
         var layout = store.layout
         for p in layout.projects.indices {
             for t in layout.projects[p].tabs.indices {
                 layout.projects[p].tabs[t].root = layout.projects[p].tabs[t].root.mapLeaves { spec in
                     guard case let .terminal(cwd, launch) = spec.kind else { return }
-                    spec.kind = .terminal(cwd: cwd, launch: running[spec.id].map {
-                        Launch(command: $0, scrollbackLimit: launch?.scrollbackLimit)
-                    })
+                    // Not in `running`: no agent, so it restores as a plain shell. Running with an unknown id: keep.
+                    guard let entry = running[spec.id] else { spec.kind = .terminal(cwd: cwd, launch: nil); return }
+                    if let command = entry { spec.kind = .terminal(cwd: cwd, launch: Launch(command: command, scrollbackLimit: launch?.scrollbackLimit)) }
                 }
             }
         }

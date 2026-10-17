@@ -102,7 +102,7 @@ extension Theme {
 enum Agents {
     static let claudeHookArgs: String; static let codexHookArgs: String
     static func discoverLaunchers()                       // once at launch, background
-    static func running() -> [PaneID: String]            // pane → resume command, e.g. "cc2 --resume <id>", "gpt1 resume <thread id>" (id from argv, else a distinct recent CLI thread of its folder from CODEX_HOME/state_*.sqlite)
+    static func running() -> [PaneID: String?]           // pane → resume command; nil = agent running but id unknown yet (keep the saved command), e.g. "cc2 --resume <id>", "gpt1 resume <thread id>" (id from argv, else a distinct recent CLI thread of its folder from CODEX_HOME/state_*.sqlite)
 }
 
 // SplitTreeView.swift

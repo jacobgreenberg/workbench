@@ -82,11 +82,12 @@ enum Agents {
 
     // MARK: process scan
 
-    /// The resume command for every pane with an agent running in it.
-    static func running() -> [PaneID: String] {
+    /// Every pane with an agent running in it → its resume command; nil when the session id can't be read yet (Claude
+    /// writes it shortly after starting), so the pane's saved command, typically the exact resume it launched with, stands.
+    static func running() -> [PaneID: String?] {
         let map = launchers.withLock { $0 }
         let home = NSHomeDirectory()
-        var result: [PaneID: String] = [:]
+        var result: [PaneID: String?] = [:]
         var unresolved: [(pane: PaneID, cmd: String, home: String, cwd: String, started: Int)] = []
         var claimed: Set<String> = []
         for pid in allPIDs() {
@@ -103,7 +104,7 @@ enum Agents {
                 var cmd = map["claude:" + dir] ?? (env["CLAUDE_CONFIG_DIR"] == nil ? "claude" : "CLAUDE_CONFIG_DIR=\(Runtime.shellEscape(dir)) claude")
                 if argv.contains(where: { $0.hasSuffix("/claude-hooks.json") }) { cmd += " " + claudeHookArgs }
                 let session = sessionID(claudeDir: dir, pid: pid)
-                result[pane] = cmd + (session.map { " --resume \($0)" } ?? " --continue")
+                result[pane] = .some(session.map { cmd + " --resume \($0)" })
             } else if words.contains("codex") {
                 let dir = env["CODEX_HOME"].map { ($0 as NSString).standardizingPath } ?? home + "/.codex"
                 var cmd = map["codex:" + dir] ?? (env["CODEX_HOME"] == nil ? "codex" : "CODEX_HOME=\(Runtime.shellEscape(dir)) codex")
