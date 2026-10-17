@@ -13,6 +13,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
     let box: SurfaceBox
     private(set) var surface: ghostty_surface_t?
     var onFocus: ((PaneID) -> Void)?
+    var contextMenu: ((PaneID) -> NSMenu?)?   // right-click, unless the terminal app captures the mouse (⇧ bypasses)
     static var isReservedShortcut: (NSEvent) -> Bool = { _ in false }
 
     private var markedText = NSMutableAttributedString()
@@ -335,7 +336,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         sizeDidChange(contentSize, force: true)
     }
 
-    override func menu(for event: NSEvent) -> NSMenu? { nil }
+    override func menu(for event: NSEvent) -> NSMenu? { closed ? nil : contextMenu?(paneID) }
 
     // MARK: - Mouse
 

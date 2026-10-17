@@ -177,6 +177,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                                 initialInput: launch.map { $0.command + "\n" },
                                 env: env(for: spec.id), scrollbackLimit: launch?.scrollbackLimit)
             s.onFocus = { [unowned self] id in paneFocused(id) }
+            s.contextMenu = { [unowned self] id in paneMenu(id) }
             v = s
         case let .markdown(path):
             let m = MarkdownPaneView(id: spec.id, path: path, theme: theme)
@@ -283,8 +284,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         if let p = activeProjectIndex {
             let project = projects[p]
             tabBar.update(items: project.tabs.map { tab in
-                let id = tab.focused ?? tab.root.leaves.first?.id
-                return TabItem(title: tab.customTitle ?? id.flatMap { titles[$0] } ?? tab.title,
+                TabItem(title: title(of: tab),
                                status: tab.root.leaves.map { status[$0.id] ?? .idle }.max() ?? .idle)
             }, selected: project.activeTab, theme: theme)
         } else {
@@ -302,6 +302,10 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             ProcessInfo.processInfo.endActivity(a)
             activity = nil
         }
+    }
+
+    private func title(of tab: Tab) -> String {
+        tab.customTitle ?? (tab.focused ?? tab.root.leaves.first?.id).flatMap { titles[$0] } ?? tab.title
     }
 
     func applyTheme(_ id: String) {
@@ -481,6 +485,61 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         tab.root = tab.root.replacing(base, with: .split(axis: axis, ratio: 0.5, a: .leaf(old), b: .leaf(new)))
         tab.focused = new.id
         store.layout.projects[p].tabs[t] = tab
+        store.changed()
+        render()
+    }
+
+    private func paneMenu(_ id: PaneID) -> NSMenu? {
+        guard let (p, t) = locate(id) else { return nil }
+        let tabs = store.layout.projects[p].tabs
+        let move = NSMenu()
+        for (i, tab) in tabs.enumerated() where i != t {
+            let item = NSMenuItem(title: title(of: tab), action: #selector(movePaneToTab(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = [id, tab.id]
+            move.addItem(item)
+        }
+        if tabs.count > 1 { move.addItem(.separator()) }
+        let new = NSMenuItem(title: "New Tab", action: tabs[t].root.leaves.count > 1 ? #selector(movePaneToTab(_:)) : nil,
+                             keyEquivalent: "")
+        new.target = self
+        new.representedObject = [id]
+        move.addItem(new)
+        let menu = NSMenu()
+        menu.autoenablesItems = false   // "New Tab" is disabled by having no action
+        menu.addItem(withTitle: "Copy", action: #selector(SurfaceView.copy(_:)), keyEquivalent: "").target = views[id]
+        menu.addItem(withTitle: "Paste", action: #selector(SurfaceView.paste(_:)), keyEquivalent: "").target = views[id]
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Move to Tab", action: nil, keyEquivalent: "").submenu = move
+        return menu
+    }
+
+    /// Moves a pane into another tab of its project (`target` nil: a new tab), split to the right of what is there.
+    /// Its view and process live on in `views`; only the layout changes.
+    private func movePane(_ id: PaneID, to target: UUID?) {
+        guard let (p, t) = locate(id), let moved = spec(id) else { return }
+        guard let rest = store.layout.projects[p].tabs[t].root.removing(id) else {
+            // Sole pane: moving it to a new tab changes nothing; into another tab, its own tab goes away.
+            guard target != nil else { return }
+            removeTab(project: p, at: t)
+            return place(moved, in: p, target)
+        }
+        store.layout.projects[p].tabs[t].root = rest
+        if store.layout.projects[p].tabs[t].focused == id { store.layout.projects[p].tabs[t].focused = rest.leaves.first?.id }
+        place(moved, in: p, target)
+    }
+
+    private func place(_ spec: PaneSpec, in p: Int, _ target: UUID?) {
+        if let target, let i = store.layout.projects[p].tabs.firstIndex(where: { $0.id == target }) {
+            let root = store.layout.projects[p].tabs[i].root
+            store.layout.projects[p].tabs[i].root = .split(axis: .horizontal, ratio: 0.5, a: root, b: .leaf(spec))
+            store.layout.projects[p].tabs[i].focused = spec.id
+            store.layout.projects[p].activeTab = i
+        } else {
+            store.layout.projects[p].tabs.append(Tab(id: UUID(), title: "Terminal", root: .leaf(spec), focused: spec.id))
+            store.layout.projects[p].activeTab = store.layout.projects[p].tabs.count - 1
+        }
+        store.layout.activeProject = p
         store.changed()
         render()
     }
@@ -707,6 +766,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             guard responds(to: sel) else { return #"{"error":"unknown action"}"# }
             perform(sel, with: nil)
             return "{}"
+        case "menu":     // test harness: pick a pane's "Move to Tab" entry by title
+            guard let id = pane, let move = paneMenu(id)?.item(withTitle: "Move to Tab")?.submenu,
+                  let item = move.item(withTitle: msg["item"] ?? ""), let action = item.action else { return #"{"error":"no item"}"# }
+            NSApp.sendAction(action, to: item.target, from: item)
+            return "{}"
         #endif
         default:
             return #"{"error":"unknown command"}"#
@@ -741,6 +805,10 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             store.layout.activeProject = store.layout.projects.count - 1
         }
         newTab(kind: .terminal(cwd: NSHomeDirectory(), launch: nil))
+    }
+    @objc func movePaneToTab(_ sender: NSMenuItem) {
+        guard let ids = sender.representedObject as? [UUID], let pane = ids.first else { return }
+        movePane(pane, to: ids.dropFirst().first)
     }
     @objc func splitRight(_ sender: Any?) { split(.horizontal, kind: .terminal(cwd: cwdForNewPane(), launch: nil)) }
     @objc func splitDown(_ sender: Any?) { split(.vertical, kind: .terminal(cwd: cwdForNewPane(), launch: nil)) }
