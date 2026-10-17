@@ -8,8 +8,82 @@ private final class DividerSplitView: NSSplitView {
     override var dividerThickness: CGFloat { 1 }
 }
 
+/// Title bar over each pane of a split tab; dragging it moves the pane (see SplitTreeView.drag).
+@MainActor private final class PaneHeader: NSView {
+    static let height: CGFloat = 22
+    let id: PaneID
+    let label = NSTextField(labelWithString: "")
+    var onClick: (() -> Void)?
+    var onDrag: ((NSPoint, _ done: Bool) -> Void)?   // window point; done = mouse released
+
+    init(id: PaneID) {
+        self.id = id
+        super.init(frame: .zero)
+        wantsLayer = true
+        label.font = .systemFont(ofSize: 11)
+        label.lineBreakMode = .byTruncatingTail
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -10),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override var mouseDownCanMoveWindow: Bool { false }
+    override func hitTest(_ point: NSPoint) -> NSView? { super.hitTest(point) == nil ? nil : self }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .openHand) }
+
+    override func mouseDown(with event: NSEvent) {
+        onClick?()
+        guard let window else { return }
+        let start = event.locationInWindow
+        var dragging = false
+        window.trackEvents(matching: [.leftMouseDragged, .leftMouseUp], timeout: .infinity, mode: .eventTracking) { e, stop in
+            guard let e else { return }
+            let up = e.type == .leftMouseUp
+            if up { stop.pointee = true }
+            if !dragging, hypot(e.locationInWindow.x - start.x, e.locationInWindow.y - start.y) < 4 { return }
+            if !dragging { dragging = true; NSCursor.closedHand.push() }
+            self.onDrag?(e.locationInWindow, up)
+            if up { NSCursor.pop() }
+        }
+    }
+}
+
+/// A pane's view with its header above it.
+@MainActor private final class PaneFrame: NSView {
+    let header: PaneHeader
+    let content: NSView
+
+    init(header: PaneHeader, content: NSView) {
+        self.header = header
+        self.content = content
+        super.init(frame: .zero)
+        addSubview(content)
+        addSubview(header)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layout() {
+        super.layout()
+        let h = PaneHeader.height
+        header.frame = NSRect(x: 0, y: bounds.height - h, width: bounds.width, height: h)
+        content.frame = NSRect(x: 0, y: 0, width: bounds.width, height: max(0, bounds.height - h))
+    }
+}
+
 @MainActor final class SplitTreeView: NSView, NSSplitViewDelegate {
     var onRatiosChanged: ((SplitNode) -> Void)?
+    var onMove: ((PaneID, PaneID, FocusDirection) -> Void)?   // pane dragged by its header onto a side of another
+    var onHeaderClick: ((PaneID) -> Void)?
+    private var headers: [PaneID: PaneHeader] = [:]
+    private let dropIndicator = NSView()
     private let provider: (PaneSpec) -> NSView
     private var root: SplitNode?
     private var paths: [ObjectIdentifier: [Bool]] = [:]
@@ -34,6 +108,7 @@ private final class DividerSplitView: NSSplitView {
         subviews.forEach { $0.removeFromSuperview() }
         paths = [:]
         splits = []
+        headers = [:]
         self.root = root
         let view = build(root, path: [], color: dividerColor)
         view.translatesAutoresizingMaskIntoConstraints = true
@@ -49,6 +124,7 @@ private final class DividerSplitView: NSSplitView {
     func clear() {
         subviews.forEach { $0.removeFromSuperview() }
         paths = [:]
+        headers = [:]
         splits = []
         root = nil
         rootView = nil
@@ -62,7 +138,12 @@ private final class DividerSplitView: NSSplitView {
             v.removeFromSuperview()
             v.translatesAutoresizingMaskIntoConstraints = true
             v.autoresizingMask = [.width, .height]
-            return v
+            guard case .split = root else { return v }   // a lone pane has nothing to be dragged beside: no header
+            let header = PaneHeader(id: spec.id)
+            header.onClick = { [unowned self] in onHeaderClick?(spec.id) }
+            header.onDrag = { [unowned self] point, done in drag(spec.id, to: point, done: done) }
+            headers[spec.id] = header
+            return PaneFrame(header: header, content: v)
         case .split(let axis, let ratio, let a, let b):
             let s = DividerSplitView()
             s.color = color
@@ -140,6 +221,55 @@ private final class DividerSplitView: NSSplitView {
 
     func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMaximumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
         proposedMaximumPosition - 60
+    }
+
+    /// Header titles and colours; cheap to call on every title change (only differences are applied).
+    func updateHeaders(focused: PaneID?, theme: Theme, title: (PaneID) -> String) {
+        for (id, h) in headers {
+            let t = title(id)
+            if h.label.stringValue != t { h.label.stringValue = t }
+            h.label.textColor = theme.color(id == focused ? "foreground" : "mutedForeground")
+            h.layer?.backgroundColor = theme.color("tertiary").cgColor
+        }
+        dropIndicator.wantsLayer = true
+        dropIndicator.layer?.backgroundColor = theme.color("primary").withAlphaComponent(0.2).cgColor
+        dropIndicator.layer?.borderColor = theme.color("primary").cgColor
+        dropIndicator.layer?.borderWidth = 1
+    }
+
+    /// Header drag in progress (window point): shows where the pane would land; on release, moves it there.
+    private func drag(_ id: PaneID, to point: NSPoint, done: Bool) {
+        let target = dropTarget(at: convert(point, from: nil), excluding: id)
+        if done {
+            dropIndicator.removeFromSuperview()
+            if let target { onMove?(id, target.pane, target.edge) }
+        } else if let target {
+            if dropIndicator.superview == nil { addSubview(dropIndicator) }
+            dropIndicator.frame = target.area
+        } else {
+            dropIndicator.removeFromSuperview()
+        }
+    }
+
+    /// The pane under `p` (tree coordinates) and its edge nearest to `p`, with the half it would give up.
+    private func dropTarget(at p: NSPoint, excluding id: PaneID) -> (pane: PaneID, edge: FocusDirection, area: NSRect)? {
+        for (pid, h) in headers where pid != id {
+            guard let frame = h.superview else { continue }
+            let r = convert(frame.bounds, from: frame)
+            guard r.contains(p) else { continue }
+            let x = (p.x - r.minX) / r.width
+            let fromTop = isFlipped ? (p.y - r.minY) / r.height : (r.maxY - p.y) / r.height
+            let edge = [(FocusDirection.left, x), (.right, 1 - x), (.up, fromTop), (.down, 1 - fromTop)].min { $0.1 < $1.1 }!.0
+            let (top, bottom) = r.divided(atDistance: r.height / 2, from: isFlipped ? .minYEdge : .maxYEdge)
+            let area: NSRect = switch edge {
+            case .left: r.divided(atDistance: r.width / 2, from: .minXEdge).slice
+            case .right: r.divided(atDistance: r.width / 2, from: .maxXEdge).slice
+            case .up: top
+            case .down: bottom
+            }
+            return (pid, edge, area)
+        }
+        return nil
     }
 
     func neighbor(of id: PaneID, _ direction: FocusDirection) -> PaneID? {

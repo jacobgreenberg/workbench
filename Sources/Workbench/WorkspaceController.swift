@@ -116,6 +116,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         tree.onRatiosChanged = { [unowned self] newRoot in
             mutateActiveTab { $0.root = $0.root.withRatios(from: newRoot) }
         }
+        tree.onMove = { [unowned self] id, target, edge in
+            mutateActiveTab { $0.root = $0.root.moving(id, to: target, edge); $0.focused = id }
+            render()
+        }
+        tree.onHeaderClick = { [unowned self] id in focus(id) }
         findBar.onChange = { [unowned self] text in findSurface?.perform("search:\(text)") }
         findBar.onNext = { [unowned self] in findSurface?.perform("navigate_search:next") }
         findBar.onPrevious = { [unowned self] in findSurface?.perform("navigate_search:previous") }
@@ -287,6 +292,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                 TabItem(title: title(of: tab),
                                status: tab.root.leaves.map { status[$0.id] ?? .idle }.max() ?? .idle)
             }, selected: project.activeTab, theme: theme)
+            tree.updateHeaders(focused: focusedPane, theme: theme) { [titles] id in
+                if let t = titles[id] { return t }
+                if case let .markdown(path)? = spec(id)?.kind { return (path as NSString).lastPathComponent }
+                return "Terminal"
+            }
         } else {
             tabBar.update(items: [], selected: 0, theme: theme)
         }
@@ -775,6 +785,28 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                                                    windowNumber: w.windowNumber, context: nil, eventNumber: 0,
                                                    clickCount: 1, pressure: 1)!)
                 }
+            }
+            return "{}"
+        case "drag":     // test harness: drag `pane` by its header to the `edge` (left/right/up/down) side of `target`
+            guard let id = pane, let src = views[id]?.superview, let w = src.window,
+                  let dst = msg["target"].flatMap(UUID.init(uuidString:)).flatMap({ views[$0] }) else { return #"{"error":"pane not shown"}"# }
+            let from = src.convert(NSPoint(x: src.bounds.midX, y: src.bounds.maxY - 5), to: nil)
+            let r = dst.convert(dst.bounds, to: nil)
+            let to: NSPoint = switch msg["edge"] {
+            case "left": NSPoint(x: r.minX + 10, y: r.midY)
+            case "right": NSPoint(x: r.maxX - 10, y: r.midY)
+            case "up": NSPoint(x: r.midX, y: r.maxY - 10)
+            default: NSPoint(x: r.midX, y: r.minY + 10)
+            }
+            func ev(_ t: NSEvent.EventType, _ p: NSPoint) -> NSEvent {
+                NSEvent.mouseEvent(with: t, location: p, modifierFlags: [], timestamp: 0, windowNumber: w.windowNumber,
+                                   context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+            }
+            DispatchQueue.main.async {
+                NSApp.postEvent(ev(.leftMouseDragged, NSPoint(x: (from.x + to.x) / 2, y: (from.y + to.y) / 2)), atStart: false)
+                NSApp.postEvent(ev(.leftMouseDragged, to), atStart: false)
+                NSApp.postEvent(ev(.leftMouseUp, to), atStart: false)
+                w.sendEvent(ev(.leftMouseDown, from))
             }
             return "{}"
         case "menu":     // test harness: pick a pane's "Move to Tab" entry by title

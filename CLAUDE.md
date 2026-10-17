@@ -30,6 +30,7 @@ extension SplitNode {
     func updating(_ id: PaneID, _ f: (inout PaneSpec) -> Void) -> SplitNode
     func mapLeaves(_ f: (inout PaneSpec) -> Void) -> SplitNode    // f applied to every leaf
     func equalized() -> SplitNode                                  // every ratio = 0.5
+    func moving(_ id: PaneID, to target: PaneID, _ edge: FocusDirection) -> SplitNode   // id re-split beside target on edge; self if same/missing
 }
 struct Tab: Codable, Identifiable, Equatable, Sendable { var id: UUID; var title: String; var root: SplitNode; var focused: PaneID?; var customTitle: String? = nil /* user rename; wins over the terminal title */ }
 struct Project: Codable, Identifiable, Equatable, Sendable { var id: UUID; var path: String; var name: String; var tabs: [Tab]; var activeTab: Int; var scratch: Bool? = nil /* ⇧⌘N temp project in ~: dropped when its last tab closes and at load */ }
@@ -110,6 +111,9 @@ enum Agents {
 enum FocusDirection: Sendable { case left, right, up, down }
 @MainActor final class SplitTreeView: NSView {
     var onRatiosChanged: ((SplitNode) -> Void)?           // user dragged a divider; tree with updated ratios
+    var onMove: ((PaneID, PaneID, FocusDirection) -> Void)?   // pane dragged by its header (shown when the tab has 2+ panes) onto a side of another
+    var onHeaderClick: ((PaneID) -> Void)?
+    func updateHeaders(focused: PaneID?, theme: Theme, title: (PaneID) -> String)   // called from updateChrome
     init(provider: @escaping (PaneSpec) -> NSView)        // returns the existing leaf view for a pane (never creates duplicates)
     @discardableResult func render(_ root: SplitNode, dividerColor: NSColor) -> Bool   // false = unchanged, nothing rebuilt
     func clear()                                          // drop the tree and every view it retains

@@ -84,6 +84,17 @@ extension SplitNode {
         }
     }
 
+    /// `id` taken out and put beside `target`, sharing its space on side `edge`; unchanged if either is missing or
+    /// they are the same pane.
+    func moving(_ id: PaneID, to target: PaneID, _ edge: FocusDirection) -> SplitNode {
+        guard id != target, let moved = leaves.first(where: { $0.id == id }), let rest = removing(id),
+              let old = rest.leaves.first(where: { $0.id == target }) else { return self }
+        let axis: Axis = edge == .left || edge == .right ? .horizontal : .vertical
+        let first = edge == .left || edge == .up
+        return rest.replacing(target, with: .split(axis: axis, ratio: 0.5, a: .leaf(first ? moved : old),
+                                                   b: .leaf(first ? old : moved)))
+    }
+
     func equalized() -> SplitNode {
         switch self {
         case .leaf: return self
@@ -237,6 +248,12 @@ func modelSelfCheck() {
         return []
     }
     assert(ratios(tree.equalized()) == [0.5, 0.5])
+    // p2 over p3, drag p3 to p2's right: they become side by side
+    assert(tree.moving(p3.id, to: p2.id, .right) == .split(axis: .horizontal, ratio: 0.3, a: .leaf(p1),
+                                                            b: .split(axis: .horizontal, ratio: 0.5, a: .leaf(p2), b: .leaf(p3))))
+    assert(tree.moving(p1.id, to: p3.id, .up) == .split(axis: .vertical, ratio: 0.7, a: .leaf(p2),
+                                                         b: .split(axis: .vertical, ratio: 0.5, a: .leaf(p1), b: .leaf(p3))))
+    assert(tree.moving(p1.id, to: p1.id, .left) == tree && tree.moving(p1.id, to: UUID(), .left) == tree)
     let mapped = tree.mapLeaves { $0.kind = .markdown(path: "/y") }
     assert(mapped.leaves.map(\.id) == tree.leaves.map(\.id) && mapped.leaves.allSatisfy { $0.kind == .markdown(path: "/y") })
     let old = #"{"command":"c","resume":"r {id}","agent":"claude","sessionID":"S"}"#
