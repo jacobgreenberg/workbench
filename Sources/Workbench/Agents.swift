@@ -87,6 +87,8 @@ enum Agents {
         let map = launchers.withLock { $0 }
         let home = NSHomeDirectory()
         var result: [PaneID: String] = [:]
+        var unresolved: [(pane: PaneID, cmd: String, home: String, cwd: String, started: Int)] = []
+        var claimed: Set<String> = []
         for pid in allPIDs() {
             // Identify by argv, not process name: Claude's binary is a versioned file ("2.1.301") behind a symlink.
             guard let ppid = parentPID(pid), ["zsh", "bash", "fish", "sh", "dash"].contains(processName(ppid)),
@@ -106,67 +108,59 @@ enum Agents {
                 let dir = env["CODEX_HOME"].map { ($0 as NSString).standardizingPath } ?? home + "/.codex"
                 var cmd = map["codex:" + dir] ?? (env["CODEX_HOME"] == nil ? "codex" : "CODEX_HOME=\(Runtime.shellEscape(dir)) codex")
                 if argv.contains(where: { $0.hasPrefix("notify=") && $0.contains("hook") }) { cmd += " " + codexHookArgs }
-                // The thread this TUI is on right now (what /status shows): its rollout file is held open by the TUI's
-                // own app-server child, beside those of its subagents. None open yet = nothing sent, start fresh.
-                let thread = mainThread(among: openRollouts(under: pid), codexHome: dir)
-                result[pane] = thread.map { cmd + " resume " + $0 } ?? cmd
+                // A thread resumed by id names itself in argv. Otherwise a running Codex does not expose its thread,
+                // so it gets one from the state db below; `resume --last` would send every pane in a folder to the
+                // same thread, which Codex then refuses as open elsewhere.
+                if let i = argv.firstIndex(of: "resume"), i + 1 < argv.count, UUID(uuidString: argv[i + 1]) != nil {
+                    claimed.insert(argv[i + 1].lowercased())
+                    result[pane] = cmd + " resume " + argv[i + 1]
+                } else if let cwd = processCwd(pid) {
+                    unresolved.append((pane, cmd, dir, cwd, startTime(pid)))
+                }
+            }
+        }
+        // ponytail: newest process gets the most recently active unclaimed thread of its folder; two unresumed Codex
+        // panes in one folder can swap conversations, never share one. Exact ids need Codex's SessionStart hook.
+        for group in Dictionary(grouping: unresolved, by: { $0.home + "\0" + $0.cwd }).values {
+            var threads = recentThreads(codexHome: group[0].home, cwd: group[0].cwd).filter { !claimed.contains($0) }.makeIterator()
+            for p in group.sorted(by: { $0.started > $1.started }) {
+                result[p.pane] = threads.next().map { p.cmd + " resume " + $0 } ?? p.cmd
             }
         }
         return result
     }
 
-    /// Thread ids of the rollout files open in `pid` or its descendants.
-    static func openRollouts(under pid: pid_t) -> [String] {
-        var ids: [String] = []
-        var queue = [pid]
-        while let p = queue.popLast() {
-            queue += childPIDs(p)
-            for path in openFiles(p) where path.hasSuffix(".jsonl") && (path as NSString).lastPathComponent.hasPrefix("rollout-") {
-                ids.append(String(path.dropLast(6).suffix(36)).lowercased())
-            }
-        }
-        return ids
-    }
-
-    /// The top-level CLI thread among `ids` (subagent threads excluded), most recently active first.
-    static func mainThread(among ids: [String], codexHome: String) -> String? {
-        guard !ids.isEmpty else { return nil }
+    /// Top-level CLI threads for a folder, most recently active first (subagent and IDE threads excluded).
+    static func recentThreads(codexHome: String, cwd: String) -> [String] {
         let files = (try? FileManager.default.contentsOfDirectory(atPath: codexHome)) ?? []
         // state_5.sqlite today; take the highest schema version present.
         guard let name = files.filter({ $0.hasPrefix("state_") && $0.hasSuffix(".sqlite") })
-            .max(by: { $0.localizedStandardCompare($1) == .orderedAscending }) else { return nil }
+            .max(by: { $0.localizedStandardCompare($1) == .orderedAscending }) else { return [] }
         var db: OpaquePointer?
         defer { sqlite3_close(db) }
-        guard sqlite3_open_v2(codexHome + "/" + name, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { return nil }
+        guard sqlite3_open_v2(codexHome + "/" + name, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { return [] }
         sqlite3_busy_timeout(db, 200)
         var stmt: OpaquePointer?
         defer { sqlite3_finalize(stmt) }
-        let sql = "select id from threads where source = 'cli' and instr(?1, id) > 0 order by updated_at_ms desc limit 1"
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
-        sqlite3_bind_text(stmt, 1, ids.joined(separator: ","), -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
-        guard sqlite3_step(stmt) == SQLITE_ROW, let c = sqlite3_column_text(stmt, 0) else { return nil }
-        return String(cString: c).lowercased()
+        let sql = "select id from threads where cwd = ?1 and source = 'cli' and archived = 0 order by updated_at_ms desc limit 32"
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        sqlite3_bind_text(stmt, 1, cwd, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        var ids: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW, let c = sqlite3_column_text(stmt, 0) { ids.append(String(cString: c).lowercased()) }
+        return ids
     }
 
-    private static func childPIDs(_ pid: pid_t) -> [pid_t] {
-        var buf = [pid_t](repeating: 0, count: 256)
-        let n = proc_listchildpids(pid, &buf, Int32(buf.count * MemoryLayout<pid_t>.size))
-        return Array(buf.prefix(Int(max(n, 0))))
+    private static func processCwd(_ pid: pid_t) -> String? {
+        var info = proc_vnodepathinfo()
+        let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, size) == size else { return nil }
+        return withUnsafeBytes(of: info.pvi_cdir.vip_path) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
     }
 
-    private static func openFiles(_ pid: pid_t) -> [String] {
-        let stride = MemoryLayout<proc_fdinfo>.stride
-        let bytes = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
-        guard bytes > 0 else { return [] }
-        var fds = [proc_fdinfo](repeating: proc_fdinfo(), count: Int(bytes) / stride + 16)
-        let got = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, &fds, Int32(fds.count * stride))
-        return fds.prefix(Int(max(got, 0)) / stride).compactMap { fd in
-            guard fd.proc_fdtype == UInt32(PROX_FDTYPE_VNODE) else { return nil }
-            var info = vnode_fdinfowithpath()
-            let size = Int32(MemoryLayout<vnode_fdinfowithpath>.size)
-            guard proc_pidfdinfo(pid, fd.proc_fd, PROC_PIDFDVNODEPATHINFO, &info, size) == size else { return nil }
-            return withUnsafeBytes(of: info.pvip.vip_path) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
-        }
+    private static func startTime(_ pid: pid_t) -> Int {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        return proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size ? Int(info.pbi_start_tvsec) : 0
     }
 
     private static func sessionID(claudeDir: String, pid: pid_t) -> String? {
@@ -254,11 +248,11 @@ func agentsSelfCheck() {
     var db: OpaquePointer?
     sqlite3_open(dir + "/state_5.sqlite", &db)
     sqlite3_exec(db, """
-        create table threads (id text, source text, updated_at_ms int);
-        insert into threads values ('a', 'cli', 1), ('b', 'cli', 3), ('c', '{"subagent":1}', 9), ('e', 'cli', 9);
+        create table threads (id text, cwd text, source text, archived int, updated_at_ms int);
+        insert into threads values ('A', '/p', 'cli', 0, 1), ('B', '/p', 'cli', 0, 3), ('C', '/p', '{"subagent":1}', 0, 9),
+            ('D', '/p', 'cli', 1, 9), ('E', '/q', 'cli', 0, 9);
         """, nil, nil, nil)
     sqlite3_close(db)
-    assert(Agents.mainThread(among: ["a", "c", "b"], codexHome: dir) == "b")
-    assert(Agents.mainThread(among: ["c"], codexHome: dir) == nil && Agents.mainThread(among: [], codexHome: dir) == nil)
+    assert(Agents.recentThreads(codexHome: dir, cwd: "/p") == ["b", "a"])
 }
 #endif
