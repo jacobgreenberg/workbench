@@ -13,7 +13,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
     let box: SurfaceBox
     private(set) var surface: ghostty_surface_t?
     var onFocus: ((PaneID) -> Void)?
-    var contextMenu: ((PaneID) -> NSMenu?)?   // right-click, unless the terminal app captures the mouse (⇧ bypasses)
+    var contextMenu: ((PaneID) -> NSMenu?)?   // shown on every right-click
     static var isReservedShortcut: (NSEvent) -> Bool = { _ in false }
 
     private var markedText = NSMutableAttributedString()
@@ -336,7 +336,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         sizeDidChange(contentSize, force: true)
     }
 
-    override func menu(for event: NSEvent) -> NSMenu? { closed ? nil : contextMenu?(paneID) }
+    override func menu(for event: NSEvent) -> NSMenu? { nil }
 
     // MARK: - Mouse
 
@@ -366,22 +366,11 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GhosttyInput.mouseButton(event), mods)
     }
 
+    // Right-click always opens our menu (as in Superset), even when the terminal app captures the mouse:
+    // agent TUIs do, and Ghostty would hand them the click instead.
     override func rightMouseDown(with event: NSEvent) {
-        guard let surface, !closed else { return super.rightMouseDown(with: event) }
-        let mods = GhosttyInput.ghosttyMods(event.modifierFlags)
-        if ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_RIGHT, mods) {
-            return
-        }
-        super.rightMouseDown(with: event)
-    }
-
-    override func rightMouseUp(with event: NSEvent) {
-        guard let surface, !closed else { return super.rightMouseUp(with: event) }
-        let mods = GhosttyInput.ghosttyMods(event.modifierFlags)
-        if ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_RIGHT, mods) {
-            return
-        }
-        super.rightMouseUp(with: event)
+        guard !closed, let menu = contextMenu?(paneID) else { return super.rightMouseDown(with: event) }
+        menu.popUp(positioning: nil, at: convert(event.locationInWindow, from: nil), in: self)   // not popUpContextMenu: it adds AutoFill
     }
 
     override func mouseEntered(with event: NSEvent) {

@@ -766,6 +766,17 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             guard responds(to: sel) else { return #"{"error":"unknown action"}"# }
             perform(sel, with: nil)
             return "{}"
+        case "rclick":   // test harness: a real right-click event at the centre of a pane, through window.sendEvent
+            guard let id = pane, let v = views[id], let w = v.window else { return #"{"error":"pane not shown"}"# }
+            let at = v.convert(NSPoint(x: v.bounds.midX, y: v.bounds.midY), to: nil)
+            DispatchQueue.main.async {
+                for type in [NSEvent.EventType.rightMouseDown, .rightMouseUp] {
+                    w.sendEvent(NSEvent.mouseEvent(with: type, location: at, modifierFlags: [], timestamp: 0,
+                                                   windowNumber: w.windowNumber, context: nil, eventNumber: 0,
+                                                   clickCount: 1, pressure: 1)!)
+                }
+            }
+            return "{}"
         case "menu":     // test harness: pick a pane's "Move to Tab" entry by title
             guard let id = pane, let move = paneMenu(id)?.item(withTitle: "Move to Tab")?.submenu,
                   let item = move.item(withTitle: msg["item"] ?? ""), let action = item.action else { return #"{"error":"no item"}"# }
