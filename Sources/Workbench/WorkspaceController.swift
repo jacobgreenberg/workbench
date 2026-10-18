@@ -884,9 +884,10 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private func activate(_ p: Int) {
         store.layout.activeProject = p
         guard store.layout.projects[p].scratch != true else { return }   // not in either list: leave the list as is
-        let home = store.layout.projects[p].workspace
+        let home = store.layout.projects[p].workspace, id = store.layout.projects[p].id
         store.layout.activeWorkspace = home
-        if let w = workspaces.firstIndex(where: { $0.id == home }) { store.layout.workspaces?[w].lastProject = store.layout.projects[p].id }
+        // `workspaces?[w]` holds write access to store.layout while its RHS runs, so the RHS must not read store.layout.
+        if let w = workspaces.firstIndex(where: { $0.id == home }) { store.layout.workspaces?[w].lastProject = id }
         let hidden = store.layout.projects[p].hidden == true
         if hidden != showingHidden { store.layout.showHidden = hidden ? true : nil }
     }
