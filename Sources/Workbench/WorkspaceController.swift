@@ -77,7 +77,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered, defer: false)
         window.titleVisibility = .hidden
-        window.appearance = NSAppearance(named: .darkAqua)
+        window.appearance = theme.appearance
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
         super.init(window: window)
@@ -419,9 +419,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         runtime.reload(overrides: Self.overrides(theme))
         paintTheme()
         render()
+        NotificationCenter.default.post(name: .themeChanged, object: nil)
     }
 
     private func paintTheme() {
+        window?.appearance = theme.appearance
         window?.backgroundColor = theme.color("background")
         content.layer?.backgroundColor = theme.color("background").cgColor
         for v in views.values { (v as? FilePaneView)?.apply(theme: theme) }

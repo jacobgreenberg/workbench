@@ -1,5 +1,10 @@
 import AppKit
 
+extension Notification.Name {
+    /// Posted by applyTheme and whenever the theme list changes (Theme menu and Settings refresh on it).
+    static let themeChanged = Notification.Name("WorkbenchThemeChanged")
+}
+
 struct Theme: Decodable, Sendable {
     let id: String
     let name: String
@@ -11,34 +16,148 @@ struct Theme: Decodable, Sendable {
 extension Theme {
     typealias RGBA = (r: Double, g: Double, b: Double, a: Double)
 
-    /// Read once: the Theme menu is built at launch, so the set is fixed for the run.
-    static func all() -> [Theme] { cache }
-    private static let cache = scan()
+    static let ansiNames = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+                            "brightBlack", "brightRed", "brightGreen", "brightYellow", "brightBlue", "brightMagenta", "brightCyan", "brightWhite"]
+    /// Every key the app reads; a custom theme must provide all of them (extra keys are ignored).
+    static let requiredUI = ["background", "foreground", "cardForeground", "popover", "primary", "mutedForeground", "border", "chart2", "chart3", "chart4"]
+    static let requiredTerminal = ["background", "foreground", "cursor", "cursorAccent", "selectionBackground"] + ansiNames
 
-    private static func scan() -> [Theme] {
-        var dirs: [URL] = []
-        if let r = Bundle.main.resourceURL { dirs.append(r.appendingPathComponent("themes")) }
-        if let s = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
-            dirs.append(s.appendingPathComponent("Workbench/themes"))
-        }
+    /// Dark / Light (Apple's themes). The rest are custom: bundled (read-only) or user.
+    var isSystem: Bool { id.hasPrefix("system-") }
+    /// The window appearance follows the theme's type.
+    var appearance: NSAppearance? { NSAppearance(named: type == "light" ? .aqua : .darkAqua) }
+
+    /// System + bundled + user themes, sorted by name. Cached; `reload()` rescans.
+    @MainActor static func all() -> [Theme] { cache }
+    @MainActor private static var cache = scan()
+    /// id → file, for the themes loaded from Store.directory/themes (the editable ones).
+    @MainActor private(set) static var userFiles: [String: URL] = [:]
+    @MainActor static var userDirectory: URL { Store.directory.appendingPathComponent("themes") }
+    @MainActor static func reload() { cache = scan() }
+
+    @MainActor private static func scan() -> [Theme] {
+        var dirs: [(URL, Bool)] = [(userDirectory, true)]
+        if let r = Bundle.main.resourceURL { dirs.insert((r.appendingPathComponent("themes"), false), at: 0) }
         var byID: [String: Theme] = [:]
-        for dir in dirs {
+        for t in [system(dark: true), system(dark: false)] { byID[t.id] = t }
+        var user: [String: URL] = [:]
+        for (dir, isUser) in dirs {
             let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
             for f in files.filter({ $0.pathExtension == "json" }).sorted(by: { $0.path < $1.path }) {
                 guard let data = readFile(f, cap: 1 << 20),
-                      let t = try? JSONDecoder().decode(Theme.self, from: data) else { continue }
+                      let t = try? JSONDecoder().decode(Theme.self, from: data), !t.isSystem else { continue }
                 byID[t.id] = t
+                user[t.id] = isUser ? f : nil
             }
         }
+        userFiles = user
         return byID.values.sorted { $0.name < $1.name }
     }
 
-    static func named(_ id: String) -> Theme {
+    @MainActor static func named(_ id: String) -> Theme {
         let list = all()
         return list.first { $0.id == id }
             ?? list.first { $0.id == "oceanic-v2" }
             ?? list.first
             ?? Theme(id: "oceanic-v2", name: "Oceanic v2", type: "dark", ui: [:], terminal: [:])
+    }
+
+    /// Apple's themes: terminal colors modeled on Terminal.app's "Basic" profile; accents from system colors,
+    /// resolved (and flattened over the background) under the fixed appearance so they flow through plain hex strings.
+    @MainActor static func system(dark: Bool) -> Theme {
+        let ap = NSAppearance(named: dark ? .darkAqua : .aqua)!
+        let bg = dark ? "#1E1E1E" : "#FFFFFF", fg = dark ? "#D9D9D9" : "#000000"
+        let b = parse(bg)!
+        func css(_ color: NSColor) -> String {
+            var out = bg
+            ap.performAsCurrentDrawingAppearance {
+                let c = color.usingColorSpace(.sRGB) ?? color, a = c.alphaComponent
+                let v = [(c.redComponent, b.r), (c.greenComponent, b.g), (c.blueComponent, b.b)]
+                    .map { Int(max(0, min(255, $0.0 * 255 * a + $0.1 * (1 - a))).rounded()) }
+                out = String(format: "#%02X%02X%02X", v[0], v[1], v[2])
+            }
+            return out
+        }
+        var term = ["background": bg, "foreground": fg, "cursor": fg, "cursorAccent": bg, "selectionBackground": css(.selectedTextBackgroundColor)]
+        let ansi = ["#000000", "#990000", "#00A600", "#999900", "#0000B2", "#B200B2", "#00A6B2", "#BFBFBF",
+                    "#666666", "#E50000", "#00D900", "#E5E500", "#0000FF", "#E500E5", "#00E5E5", "#E5E5E5"]
+        for (n, v) in zip(ansiNames, ansi) { term[n] = v }
+        let ui = ["background": bg, "foreground": fg, "cardForeground": fg, "popover": css(.windowBackgroundColor),
+                  "primary": css(.controlAccentColor), "mutedForeground": css(.secondaryLabelColor), "border": css(.separatorColor),
+                  "chart2": css(.systemGreen), "chart3": css(.systemOrange), "chart4": css(.systemPurple)]
+        return Theme(id: dark ? "system-dark" : "system-light", name: dark ? "Dark" : "Light", type: dark ? "dark" : "light", ui: ui, terminal: term)
+    }
+
+    // MARK: - Custom themes: template, validation, saving
+
+    struct Invalid: Error { let message: String }
+
+    /// A complete theme file for the user to edit, seeded with this theme's colors.
+    func template(id: String = "my-theme", name: String = "My Theme") -> String {
+        func q(_ s: String) -> String {
+            let d = (try? JSONEncoder().encode([s])) ?? Data()
+            return String(decoding: d.dropFirst().dropLast(), as: UTF8.self)
+        }
+        func block(_ keys: [String], _ primary: [String: String], _ other: [String: String]) -> String {
+            keys.map { "    \(q($0)): \(q(primary[$0] ?? other[$0] ?? "#808080"))" }.joined(separator: ",\n")
+        }
+        return """
+        {
+          "id": \(q(id)),
+          "name": \(q(name)),
+          "type": \(q(type)),
+          "ui": {
+        \(block(Theme.requiredUI, ui, terminal))
+          },
+          "terminal": {
+        \(block(Theme.requiredTerminal, terminal, ui))
+          }
+        }
+
+        """
+    }
+
+    /// Parses and checks a theme file; the failure message is meant for the user.
+    static func validate(_ text: String) -> Result<Theme, Invalid> {
+        func fail(_ m: String) -> Result<Theme, Invalid> { .failure(Invalid(message: m)) }
+        let root: [String: Any]
+        do {
+            guard let r = try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else {
+                return fail("The top level must be a JSON object { ... }.")
+            }
+            root = r
+        } catch {
+            let why = (error as NSError).userInfo[NSDebugDescriptionErrorKey] as? String ?? error.localizedDescription
+            return fail("Not valid JSON: \(why)")
+        }
+        guard let id = root["id"] as? String, !id.isEmpty else { return fail("\"id\" is required (letters, digits, - _ .).") }
+        guard id.range(of: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", options: .regularExpression) != nil else {
+            return fail("\"id\" becomes the file name: use letters, digits, - _ . only (max 64, starting with a letter or digit).")
+        }
+        if id.hasPrefix("system-") { return fail("\"id\" can't start with \"system-\" (reserved for Dark and Light).") }
+        guard let name = root["name"] as? String, !name.trimmingCharacters(in: .whitespaces).isEmpty else { return fail("\"name\" is required.") }
+        guard let type = root["type"] as? String, type == "dark" || type == "light" else { return fail("\"type\" must be \"dark\" or \"light\".") }
+        var sections: [[String: String]] = []
+        for (key, required) in [("ui", requiredUI), ("terminal", requiredTerminal)] {
+            guard let obj = root[key] as? [String: Any] else { return fail("\"\(key)\" is required and must be an object.") }
+            let missing = required.filter { obj[$0] == nil }
+            if !missing.isEmpty { return fail("Missing in \"\(key)\": \(missing.joined(separator: ", "))") }
+            var strings: [String: String] = [:]
+            for (k, v) in obj.sorted(by: { $0.key < $1.key }) {
+                guard let s = v as? String, parse(s) != nil else { return fail("\(key).\(k): \(v) is not a color. Use #RRGGBB or rgba(r, g, b, a).") }
+                strings[k] = s
+            }
+            sections.append(strings)
+        }
+        return .success(Theme(id: id, name: name, type: type, ui: sections[0], terminal: sections[1]))
+    }
+
+    /// Writes Store.directory/themes/<id>.json atomically.
+    @MainActor static func save(_ t: Theme, text: String) throws -> URL {
+        try FileManager.default.createDirectory(at: userDirectory, withIntermediateDirectories: true)
+        let url = userDirectory.appendingPathComponent("\(t.id).json")
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        return url
     }
 
     static func parse(_ s: String) -> RGBA? {
@@ -95,9 +214,7 @@ extension Theme {
                 add("selection-background", Theme.hex(fg))
             }
         }
-        let names = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
-                     "brightBlack", "brightRed", "brightGreen", "brightYellow", "brightBlue", "brightMagenta", "brightCyan", "brightWhite"]
-        for (i, n) in names.enumerated() { add("palette", hex(terminal, n).map { "\(i)=\($0)" }) }
+        for (i, n) in Theme.ansiNames.enumerated() { add("palette", hex(terminal, n).map { "\(i)=\($0)" }) }
         add("split-divider-color", hex(ui, "border"))
         return lines.joined(separator: "\n") + "\n"
     }
@@ -125,5 +242,19 @@ func themeSelfCheck() {
     ])
     assert(t.ghosttyConfig.contains("selection-background = #394b53"))
     assert(t.ghosttyConfig.contains("palette = 0=#546e7a"))
+
+    // Custom theme validation: the template passes; a missing key, bad color, unsafe id, bad type, bad JSON fail.
+    let tpl = t.template()
+    guard case .success(let ok) = Theme.validate(tpl), ok.id == "my-theme", ok.terminal["brightWhite"] != nil else { fatalError("template rejected") }
+    guard case .failure(let e1) = Theme.validate(tpl.replacingOccurrences(of: "\"border\"", with: "\"borderX\"")), e1.message.contains("border") else { fatalError("missing key accepted") }
+    guard case .failure(let e2) = Theme.validate(tpl.replacingOccurrences(of: "\"cursor\": \"#808080\"", with: "\"cursor\": \"red\"")), e2.message.contains("cursor") else { fatalError("bad color accepted") }
+    guard case .failure = Theme.validate(tpl.replacingOccurrences(of: "my-theme", with: "../evil")) else { fatalError("unsafe id accepted") }
+    guard case .failure = Theme.validate(tpl.replacingOccurrences(of: "\"dark\"", with: "\"blue\"")) else { fatalError("bad type accepted") }
+    guard case .failure = Theme.validate("{") else { fatalError("bad JSON accepted") }
+    // The system themes carry every required key as a parseable color, so their template is a valid theme too.
+    for dark in [true, false] {
+        let s = MainActor.assumeIsolated { Theme.system(dark: dark) }
+        guard case .success = Theme.validate(s.template()), s.isSystem, s.type == (dark ? "dark" : "light") else { fatalError("system theme invalid") }
+    }
 }
 #endif

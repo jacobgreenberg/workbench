@@ -7,6 +7,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var runtime: Runtime!
     private var workspace: WorkspaceController!
     private var control: ControlServer?
+    private var settings: SettingsWindowController?
+    private let themeMenu = NSMenu(title: "Theme")
     private var reserved: [String: NSMenuItem] = [:]   // "key|mods" → item; looked up on every ⌘/⌃ keyDown in a terminal
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -14,6 +16,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         store = Store()
         runtime = Runtime(overrides: WorkspaceController.overrides(Theme.named(store.layout.theme)))
         NSApp.mainMenu = buildMenu()
+        rebuildThemeMenu()
+        NotificationCenter.default.addObserver(self, selector: #selector(rebuildThemeMenu), name: .themeChanged, object: nil)
         workspace = WorkspaceController(store: store, runtime: runtime)
         workspace.showWindow(nil)
 
@@ -106,6 +110,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return top
     }
 
+    @objc private func openSettings(_ sender: Any?) {
+        if settings == nil { settings = SettingsWindowController(workspace: workspace) }
+        settings?.showWindow(nil)
+        settings?.window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// Dark / Light, then the custom themes; the current one checked.
+    @objc private func rebuildThemeMenu() {
+        themeMenu.removeAllItems()
+        let current = store.layout.theme
+        let all = Theme.all()
+        for (i, group) in [all.filter(\.isSystem), all.filter { !$0.isSystem }].enumerated() where !group.isEmpty {
+            if i > 0 { themeMenu.addItem(.separator()) }
+            for theme in group {
+                let t = NSMenuItem(title: theme.name, action: #selector(WorkspaceController.selectTheme(_:)), keyEquivalent: "")
+                t.representedObject = theme.id
+                t.state = theme.id == current ? .on : .off
+                themeMenu.addItem(t)
+            }
+        }
+    }
+
     private func arrow(_ c: Int) -> String { String(Character(UnicodeScalar(c)!)) }
 
     private func buildMenu() -> NSMenu {
@@ -113,6 +139,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let w = WorkspaceController.self
         main.addItem(menu("Workbench", [
             NSMenuItem(title: "About Workbench", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: ""),
+            .separator(),
+            item("Settings…", #selector(openSettings(_:)), ","),
             .separator(),
             item("Hide Workbench", #selector(NSApplication.hide(_:)), "h"),
             item("Quit Workbench", #selector(NSApplication.terminate(_:)), "q"),
@@ -139,12 +167,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             item("Find Previous", #selector(w.findPrevious(_:)), "g", [.command, .shift]),
             item("Clear", #selector(w.clearScreen(_:)), "k"),
         ]))
-        var themeItems: [NSMenuItem] = []
-        for theme in Theme.all() {
-            let t = NSMenuItem(title: theme.name, action: #selector(w.selectTheme(_:)), keyEquivalent: "")
-            t.representedObject = theme.id
-            themeItems.append(t)
-        }
         main.addItem(menu("View", [
             item("Toggle Sidebar", #selector(w.toggleProjectSidebar(_:)), "b"),
             item("Toggle File Preview", #selector(w.togglePreview(_:)), "b", [.command, .option]),
@@ -154,7 +176,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             item("Smaller", #selector(w.decreaseFontSize(_:)), "-"),
             item("Actual Size", #selector(w.resetFontSize(_:)), "0"),
             .separator(),
-            menu("Theme", themeItems),
+            { let t = NSMenuItem(title: "Theme", action: nil, keyEquivalent: ""); t.submenu = themeMenu; return t }(),
         ]))
         var presetItems: [NSMenuItem] = []
         for p in store.layout.presets where (1...9).contains(p.key) {
