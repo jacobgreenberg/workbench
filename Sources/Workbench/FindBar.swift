@@ -11,7 +11,6 @@ import AppKit
     private let prev = HandButton.glass("chevron.up", "Previous Match", .small)
     private let next = HandButton.glass("chevron.down", "Next Match", .small)
     private let close = HandButton.glass("xmark", "Close Find", .small)
-    private var hideToken = 0
 
     override var intrinsicContentSize: NSSize { NSSize(width: 340, height: 40) }
 
@@ -19,27 +18,32 @@ import AppKit
     override var isHidden: Bool {
         get { super.isHidden }
         set {
-            guard newValue != super.isHidden else { return }
-            hideToken += 1
+            let fading = pendingHide != nil   // still visible, fading out
+            pendingHide?.cancel()
+            pendingHide = nil
+            guard newValue != super.isHidden || (!newValue && fading) else { return }
             guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion, window != nil else {
                 super.isHidden = newValue
                 alphaValue = 1
                 return
             }
             if newValue {
-                let token = hideToken
                 animate(from: 1, to: 0, scale: 0.97)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) { [self] in
-                    guard token == hideToken else { return }
+                let hide = DispatchWorkItem { [weak self] in
+                    guard let self else { return }
+                    pendingHide = nil
                     setHidden(true)
                     layer?.removeAllAnimations()
                 }
+                pendingHide = hide
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.14, execute: hide)
             } else {
                 super.isHidden = false
                 animate(from: 0, to: 1, scale: 0.96)
             }
         }
     }
+    private var pendingHide: DispatchWorkItem?
 
     private func setHidden(_ h: Bool) { super.isHidden = h }
 
