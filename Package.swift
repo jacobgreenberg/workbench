@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "Workbench",
-    platforms: [.macOS(.v15)],
+    platforms: [.macOS("27.0")],   // Liquid Glass (NSGlassEffectView, .glass bezels)
     dependencies: [
         .package(url: "https://github.com/swiftlang/swift-markdown.git", from: "0.6.0"),
         .package(url: "https://github.com/tree-sitter/swift-tree-sitter.git", from: "0.25.0"),

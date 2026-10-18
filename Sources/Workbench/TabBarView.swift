@@ -5,6 +5,16 @@ struct TabItem: Equatable, Sendable { let title: String; let status: PaneStatus 
 /// Borderless chrome button that shows the pointing-hand cursor on hover.
 final class HandButton: NSButton {
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
+
+    /// A round Liquid Glass icon button (new tab, add project, close preview).
+    static func glass(_ symbol: String, _ label: String, _ size: NSControl.ControlSize = .regular) -> HandButton {
+        let b = HandButton(image: NSImage(systemSymbolName: symbol, accessibilityDescription: label)!, target: nil, action: nil)
+        b.bezelStyle = .glass
+        b.borderShape = .circle
+        b.controlSize = size
+        b.refusesFirstResponder = true
+        return b
+    }
 }
 
 /// Double-click rename: makes a label an in-place text field. Return or clicking away commits, Esc cancels
@@ -61,7 +71,6 @@ final class HandButton: NSButton {
     private let dot = NSView()
     private let label = NSTextField(labelWithString: "")
     private let close = NSTextField(labelWithString: "×")
-    private let underline = NSView()
     private var status = PaneStatus.idle
     private var width: NSLayoutConstraint!
     private var selected = false
@@ -88,8 +97,8 @@ final class HandButton: NSButton {
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         close.font = .systemFont(ofSize: 13)
         close.isHidden = true
-        underline.wantsLayer = true
-        for v in [dot, label, close, underline] as [NSView] {
+        layer?.cornerRadius = height / 2
+        for v in [dot, label, close] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
@@ -103,10 +112,6 @@ final class HandButton: NSButton {
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
             close.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             close.centerYAnchor.constraint(equalTo: centerYAnchor),
-            underline.leadingAnchor.constraint(equalTo: leadingAnchor),
-            underline.trailingAnchor.constraint(equalTo: trailingAnchor),
-            underline.bottomAnchor.constraint(equalTo: bottomAnchor),
-            underline.heightAnchor.constraint(equalToConstant: 2),
         ])
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
     }
@@ -142,9 +147,9 @@ final class HandButton: NSButton {
         label.textColor = theme.color(selected ? "cardForeground" : hovering ? "foreground" : "mutedForeground")
         close.textColor = theme.color("mutedForeground")
         close.isHidden = !hovering
-        layer?.backgroundColor = selected ? theme.color("tertiaryActive").cgColor : nil
-        underline.layer?.backgroundColor = theme.color("primary").cgColor
-        underline.isHidden = !selected
+        // A lighter pill on the glass, like native segmented tabs.
+        let fg = theme.color("foreground")
+        layer?.backgroundColor = selected ? fg.withAlphaComponent(0.14).cgColor : hovering ? fg.withAlphaComponent(0.06).cgColor : nil
         styleStatusDot(dot, status, theme: theme)
     }
 
@@ -171,7 +176,8 @@ final class HandButton: NSButton {
     /// Empty band above the tabs: it is the window's title bar (drag, double-click to minimize, traffic lights),
     /// kept apart so double-clicking a tab can only rename it.
     static let titleStrip: CGFloat = 28
-    static let tabHeight: CGFloat = 34
+    static let tabHeight: CGFloat = 34   // the glass capsule row; tabs are pills inset in it
+    private static let pill: CGFloat = 26
 
     var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
@@ -180,45 +186,38 @@ final class HandButton: NSButton {
     var onMove: ((Int, Int) -> Void)?   // from, to
 
     private let stack = NSStackView()
-    private let plus = HandButton(title: "+", target: nil, action: nil)
-    private let border = NSView()
-    private let strip = NSView()
+    private let plus = HandButton.glass("plus", "New Tab", .large)
+    private let glass = NSGlassEffectView()
     private var buttons: [TabButton] = []
     private let reorder = Reorder(.x)
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        border.wantsLayer = true
-        strip.wantsLayer = true
         stack.orientation = .horizontal
-        stack.spacing = 0
+        stack.spacing = 2
         stack.alignment = .centerY
         stack.distribution = .gravityAreas
-        stack.edgeInsets = NSEdgeInsets()
-        plus.isBordered = false
-        plus.refusesFirstResponder = true
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 4, bottom: 0, right: 4)
+        glass.cornerRadius = Self.pill / 2 + 4
         plus.target = self
         plus.action = #selector(newTapped)
-        plus.translatesAutoresizingMaskIntoConstraints = false
-        plus.widthAnchor.constraint(equalToConstant: 30).isActive = true
-        for v in [strip, stack, border] as [NSView] {
+        for v in [glass, stack, plus] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
+        // The capsule hugs the tabs; + floats beside it. Above them (titleStrip) is bare title bar.
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            strip.topAnchor.constraint(equalTo: topAnchor),
-            strip.leadingAnchor.constraint(equalTo: leadingAnchor),
-            strip.trailingAnchor.constraint(equalTo: trailingAnchor),
-            strip.heightAnchor.constraint(equalToConstant: Self.titleStrip),
-            stack.heightAnchor.constraint(equalToConstant: Self.tabHeight),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
-            border.leadingAnchor.constraint(equalTo: leadingAnchor),
-            border.trailingAnchor.constraint(equalTo: trailingAnchor),
-            border.bottomAnchor.constraint(equalTo: bottomAnchor),
-            border.heightAnchor.constraint(equalToConstant: 1),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+            stack.heightAnchor.constraint(equalToConstant: Self.pill + 8),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
+            glass.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
+            glass.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
+            glass.topAnchor.constraint(equalTo: stack.topAnchor),
+            glass.bottomAnchor.constraint(equalTo: stack.bottomAnchor),
+            plus.leadingAnchor.constraint(equalTo: stack.trailingAnchor, constant: 8),
+            plus.centerYAnchor.constraint(equalTo: stack.centerYAnchor),
+            plus.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -8),
         ])
     }
 
@@ -244,9 +243,8 @@ final class HandButton: NSButton {
         last = state
         if buttons.count != newItems.count {
             buttons.forEach { $0.removeFromSuperview() }
-            plus.removeFromSuperview()
             buttons = newItems.indices.map { i in
-                let b = TabButton(height: Self.tabHeight)
+                let b = TabButton(height: Self.pill)
                 // Looked up at call time: dragging reorders the buttons.
                 let index = { [unowned self, unowned b] in buttons.firstIndex { $0 === b } ?? i }
                 b.onSelect = { [weak self] in self?.onSelect?(index()) }
@@ -264,15 +262,8 @@ final class HandButton: NSButton {
                 stack.addArrangedSubview(b)
                 return b
             }
-            stack.addArrangedSubview(plus)
+            glass.isHidden = buttons.isEmpty
         }
-        layer?.backgroundColor = theme.color("tertiary").cgColor
-        border.layer?.backgroundColor = theme.color("border").cgColor
-        strip.layer?.backgroundColor = theme.color("tertiary").cgColor   // same as the sidebar and tab row
-        plus.attributedTitle = NSAttributedString(string: "+", attributes: [
-            .font: NSFont.systemFont(ofSize: 13),
-            .foregroundColor: theme.color("mutedForeground"),
-        ])
         for (i, b) in buttons.enumerated() { b.apply(item: newItems[i], selected: i == selected, theme: theme) }
     }
 }

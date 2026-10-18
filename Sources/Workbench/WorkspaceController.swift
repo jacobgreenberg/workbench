@@ -57,6 +57,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private let previewEdge = ResizeEdge()
     private var previewFile: FilePaneView?
     private var previewWidth: NSLayoutConstraint!
+    private var previewGap: NSLayoutConstraint!   // content's trailing edge to the panel's leading edge
 
     init(store: Store, runtime: Runtime) {
         self.store = store
@@ -105,12 +106,18 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         findBar.isHidden = true
         content.addSubview(findBar)
         preview.wantsLayer = true
+        preview.layer?.cornerRadius = 16   // a floating glass panel, like the project sidebar
+        preview.layer?.masksToBounds = true
         preview.isHidden = true
+        let glass = NSGlassEffectView(frame: preview.bounds)
+        glass.cornerRadius = 16
+        glass.autoresizingMask = [.width, .height]
+        preview.addSubview(glass)
         previewTitle.font = .systemFont(ofSize: 12, weight: .medium)
         previewTitle.lineBreakMode = .byTruncatingMiddle
-        let close = HandButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close Preview")!,
-                             target: self, action: #selector(closePreview(_:)))
-        close.isBordered = false
+        let close = HandButton.glass("xmark", "Close Preview")
+        close.target = self
+        close.action = #selector(closePreview(_:))
         for v in [previewTitle, close, previewEdge] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             preview.addSubview(v)
@@ -121,6 +128,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
 
         sidebarWidth = sidebar.widthAnchor.constraint(equalToConstant: store.layout.sidebarVisible ? 220 : 0)
         previewWidth = preview.widthAnchor.constraint(equalToConstant: 0)
+        previewGap = content.trailingAnchor.constraint(equalTo: preview.leadingAnchor, constant: 8)   // hidden: past the 8 pt inset
         NSLayoutConstraint.activate([
             sidebar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             sidebar.topAnchor.constraint(equalTo: root.topAnchor),
@@ -131,10 +139,10 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             tabBar.topAnchor.constraint(equalTo: root.topAnchor),
             tabBar.heightAnchor.constraint(equalToConstant: TabBarView.titleStrip + TabBarView.tabHeight),
             content.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
-            content.trailingAnchor.constraint(equalTo: preview.leadingAnchor),
-            preview.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            preview.topAnchor.constraint(equalTo: tabBar.bottomAnchor),
-            preview.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            previewGap,
+            preview.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
+            preview.topAnchor.constraint(equalTo: tabBar.bottomAnchor, constant: 4),
+            preview.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -8),
             previewWidth,
             previewEdge.leadingAnchor.constraint(equalTo: preview.leadingAnchor),
             previewEdge.topAnchor.constraint(equalTo: preview.topAnchor),
@@ -142,8 +150,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             previewEdge.widthAnchor.constraint(equalToConstant: 5),
             previewTitle.leadingAnchor.constraint(equalTo: preview.leadingAnchor, constant: 14),
             previewTitle.trailingAnchor.constraint(lessThanOrEqualTo: close.leadingAnchor, constant: -8),
-            previewTitle.centerYAnchor.constraint(equalTo: preview.topAnchor, constant: 14),
-            close.trailingAnchor.constraint(equalTo: preview.trailingAnchor, constant: -10),
+            previewTitle.centerYAnchor.constraint(equalTo: preview.topAnchor, constant: 18),
+            close.trailingAnchor.constraint(equalTo: preview.trailingAnchor, constant: -8),
             close.centerYAnchor.constraint(equalTo: previewTitle.centerYAnchor),
             content.topAnchor.constraint(equalTo: tabBar.bottomAnchor),
             content.bottomAnchor.constraint(equalTo: root.bottomAnchor),
@@ -387,9 +395,6 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         findBar.apply(theme: theme)
         for v in views.values { (v as? FilePaneView)?.apply(theme: theme) }
         previewFile?.apply(theme: theme)
-        preview.layer?.backgroundColor = theme.color("background").cgColor
-        preview.layer?.borderColor = theme.color("border").cgColor
-        preview.layer?.borderWidth = 1
         previewTitle.textColor = theme.color("mutedForeground")
     }
 
@@ -757,27 +762,30 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         f.translatesAutoresizingMaskIntoConstraints = false
         preview.addSubview(f, positioned: .below, relativeTo: previewEdge)
         NSLayoutConstraint.activate([
-            f.leadingAnchor.constraint(equalTo: preview.leadingAnchor, constant: 1),
+            f.leadingAnchor.constraint(equalTo: preview.leadingAnchor),
             f.trailingAnchor.constraint(equalTo: preview.trailingAnchor),
-            f.topAnchor.constraint(equalTo: preview.topAnchor, constant: 28),
+            f.topAnchor.constraint(equalTo: preview.topAnchor, constant: 34),
             f.bottomAnchor.constraint(equalTo: preview.bottomAnchor),
         ])
         previewFile = f
         previewTitle.stringValue = (path as NSString).abbreviatingWithTildeInPath
         previewTitle.toolTip = path
-        if preview.isHidden { togglePreview(nil) }
+        if preview.isHidden { showPreview(true) }
     }
     @objc func togglePreview(_ sender: Any?) {
-        guard previewFile != nil, let root = window?.contentView else { return NSSound.beep() }
-        preview.isHidden.toggle()
-        previewWidth.constant = preview.isHidden ? 0 : (root.bounds.width * 0.4).rounded()
+        guard previewFile != nil else { return NSSound.beep() }
+        showPreview(preview.isHidden)
     }
     @objc func closePreview(_ sender: Any?) {
         previewFile?.close()
         previewFile?.removeFromSuperview()
         previewFile = nil
-        preview.isHidden = true
-        previewWidth.constant = 0
+        showPreview(false)
+    }
+    private func showPreview(_ show: Bool) {
+        preview.isHidden = !show
+        previewWidth.constant = show ? ((window?.contentView?.bounds.width ?? 1000) * 0.4).rounded() : 0
+        previewGap.constant = show ? -6 : 8
     }
 
     /// Something would be lost by quitting: a process other than an idle shell, or an agent mid-turn.

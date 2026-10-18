@@ -17,13 +17,10 @@ import AppKit
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        wantsLayer = true
-        layer?.cornerRadius = 8
-        layer?.borderWidth = 1
-        layer?.shadowOpacity = 0.3
-        layer?.shadowRadius = 8
-        layer?.shadowOffset = CGSize(width: 0, height: -2)
-        layer?.masksToBounds = false
+        let glass = NSGlassEffectView(frame: bounds)
+        glass.cornerRadius = 18
+        glass.autoresizingMask = [.width, .height]
+        addSubview(glass)
 
         field.placeholderString = "Find"
         field.delegate = self
@@ -76,8 +73,6 @@ import AppKit
 
     func apply(theme: Theme) {
         self.theme = theme
-        layer?.backgroundColor = theme.color("popover").cgColor
-        layer?.borderColor = theme.color("border").cgColor
         field.textColor = theme.color("popoverForeground")
         count.textColor = theme.color("mutedForeground")
         for b in [prev, next, close] {

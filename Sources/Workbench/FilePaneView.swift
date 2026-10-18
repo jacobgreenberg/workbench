@@ -221,7 +221,8 @@ private struct Renderer: Sendable {
         scrollView.frame = bounds
         scrollView.autoresizingMask = [.width, .height]
         scrollView.hasVerticalScroller = true
-        scrollView.drawsBackground = true
+        scrollView.drawsBackground = false   // the pane or the preview's glass behind it shows through
+        textView.drawsBackground = false
         textView.isEditable = false
         textView.delegate = self
         textView.isSelectable = true
@@ -239,8 +240,6 @@ private struct Renderer: Sendable {
 
     func apply(theme: Theme) {
         palette = Palette(theme)
-        scrollView.backgroundColor = theme.color("background")
-        textView.backgroundColor = theme.color("background")
         textView.linkTextAttributes = [.foregroundColor: theme.color("primary")]
         reload()
     }

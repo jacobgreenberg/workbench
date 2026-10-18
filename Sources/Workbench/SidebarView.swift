@@ -25,7 +25,7 @@ private final class SidebarRowView: NSTableRowView {
     override func drawBackground(in dirtyRect: NSRect) {
         guard isCurrent else { return }
         accent.setFill()
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 10, dy: 0), xRadius: 6, yRadius: 6).fill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 0), xRadius: 8, yRadius: 8).fill()
     }
 
     override var isEmphasized: Bool { get { false } set {} }
@@ -72,16 +72,13 @@ private final class SidebarCell: NSTableCellView {
     private var theme: Theme?
     private var needsReload = false   // rows changed while a name was being edited
     private let table = SidebarTable()
-    private let addButton = HandButton()
+    private let addButton = HandButton.glass("plus", "Add Project", .large)
     private let reorder = Reorder(.y)
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
 
-        addButton.isBordered = false
-        addButton.title = "+"
-        addButton.font = .systemFont(ofSize: 14)
         addButton.target = self
         addButton.action = #selector(addTapped)
 
@@ -115,19 +112,24 @@ private final class SidebarCell: NSTableCellView {
         scroll.autohidesScrollers = true
         scroll.documentView = table
 
-        for v in [addButton, scroll] as [NSView] {
+        // Floating glass panel, inset from the window edges like a native sidebar; the traffic lights sit on it.
+        let glass = NSGlassEffectView()
+        glass.cornerRadius = 16
+        for v in [glass, addButton, scroll] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
         NSLayoutConstraint.activate([
+            glass.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            glass.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            glass.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
+            glass.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             scroll.topAnchor.constraint(equalTo: topAnchor, constant: 46),
-            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: addButton.topAnchor, constant: -4),
-            addButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            addButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
-            addButton.widthAnchor.constraint(equalToConstant: 30),
-            addButton.heightAnchor.constraint(equalToConstant: 30),
+            scroll.leadingAnchor.constraint(equalTo: glass.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: glass.trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: addButton.topAnchor, constant: -6),
+            addButton.leadingAnchor.constraint(equalTo: glass.leadingAnchor, constant: 10),
+            addButton.bottomAnchor.constraint(equalTo: glass.bottomAnchor, constant: -10),
         ])
     }
 
@@ -169,11 +171,6 @@ private final class SidebarCell: NSTableCellView {
         self.selected = selected
         self.theme = theme
 
-        layer?.backgroundColor = theme.color("tertiary").cgColor   // a shade off the terminal area
-        addButton.attributedTitle = NSAttributedString(string: "+", attributes: [
-            .font: NSFont.systemFont(ofSize: 16, weight: .light),
-            .foregroundColor: theme.color("mutedForeground"),
-        ])
 
         // Reloading would destroy a name field mid-edit; the rename's end reloads instead.
         if changed { if InlineRename.isEditing { needsReload = true } else { table.reloadData() } }
