@@ -168,6 +168,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         sidebar.onRemove = { [unowned self] i in project(atRow: i).map(removeProject) }
         sidebar.onShowHidden = { [unowned self] on in setShowHidden(on) }
         sidebar.onToggleHidden = { [unowned self] i in toggleHidden(row: i) }
+        sidebar.onSelectScratch = { [unowned self] i in scratch(atRow: i).map(selectProject) }
+        sidebar.onCloseScratch = { [unowned self] i in scratch(atRow: i).map(closeScratch) }
+        sidebar.onNewScratch = { [unowned self] in newScratchTerminal(nil) }
         tabBar.onSelect = { [unowned self] i in selectTab(i) }
         tabBar.onClose = { [unowned self] i in closeTab(at: i) }
         tabBar.onNew = { [unowned self] in newTab(nil) }
@@ -197,6 +200,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private var showingHidden: Bool { store.layout.showHidden ?? false }
     private var visibleProjects: [Int] { visibleProjectIndices(store.layout.projects, hidden: showingHidden) }
     private func project(atRow r: Int) -> Int? { let v = visibleProjects; return v.indices.contains(r) ? v[r] : nil }
+    private func scratch(atRow r: Int) -> Int? { let v = scratchProjectIndices(store.layout.projects); return v.indices.contains(r) ? v[r] : nil }
 
     private var activeProjectIndex: Int? {
         store.layout.projects.indices.contains(store.layout.activeProject) ? store.layout.activeProject : nil
@@ -365,7 +369,14 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                               terminals: leaves.count { if case .terminal = $0.kind { true } else { false } },
                               agents: leaves.count { if case .terminal(_, _?) = $0.kind { true } else { false } })
         }, selected: visible.firstIndex(of: store.layout.activeProject) ?? -1,
-           hiddenCount: projects.count { $0.hidden == true }, showingHidden: showingHidden, theme: theme)
+           hiddenCount: projects.count { $0.scratch != true && $0.hidden == true }, showingHidden: showingHidden, theme: theme)
+        let scratches = scratchProjectIndices(projects)
+        sidebar.updateScratch(rows: scratches.map { projects[$0] }.map { p in
+            let leaves = p.tabs.flatMap { $0.root.leaves }
+            return SidebarRow(name: p.tabs.indices.contains(p.activeTab) ? title(of: p.tabs[p.activeTab]) : p.name,
+                              path: p.path, status: leaves.map { status[$0.id] ?? .idle }.max() ?? .idle,
+                              terminals: leaves.count, agents: 0)
+        }, selected: scratches.firstIndex(of: store.layout.activeProject) ?? -1, theme: theme)
         if let p = activeProjectIndex {
             let project = projects[p]
             tabBar.update(items: project.tabs.map { tab in
@@ -845,6 +856,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     /// Makes `p` the active project and switches the sidebar to the list it is in.
     private func activate(_ p: Int) {
         store.layout.activeProject = p
+        guard store.layout.projects[p].scratch != true else { return }   // not in either list: leave the list as is
         let hidden = store.layout.projects[p].hidden == true
         if hidden != showingHidden { store.layout.showHidden = hidden ? true : nil }
     }
@@ -892,9 +904,23 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         }
     }
 
+    /// Closes a scratch terminal: no project sheet, only the usual running-process confirmation.
+    private func closeScratch(_ index: Int) {
+        guard store.layout.projects.indices.contains(index) else { return }
+        let id = store.layout.projects[index].id
+        let panes = store.layout.projects[index].tabs.flatMap { $0.root.leaves.map(\.id) }
+        if needsConfirm(panes), !confirm("Close this scratch terminal?") { return }
+        guard let i = store.layout.projects.firstIndex(where: { $0.id == id }) else { return }   // the modal may have changed things
+        store.layout.projects[i].tabs.flatMap { $0.root.leaves.map(\.id) }.forEach(destroy)
+        dropProject(i)
+        store.changed()
+        render()
+    }
+
     /// Removes a project; if it was the active one, the next project in the list shown takes over.
     private func dropProject(_ i: Int) {
-        let pos = i == store.layout.activeProject ? visibleProjects.firstIndex(of: i) : nil
+        // A closed scratch (never in the list) hands over to the first project shown.
+        let pos = i == store.layout.activeProject ? visibleProjects.firstIndex(of: i) ?? (store.layout.projects[i].scratch == true ? 0 : nil) : nil
         store.layout.projects.remove(at: i)
         if let pos { selectVisible(near: pos); return }
         var active = store.layout.activeProject
