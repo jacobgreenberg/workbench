@@ -42,21 +42,20 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private var titles: [PaneID: String] = [:]
     private var searchCounts: (total: Int, selected: Int) = (-1, -1)
     private var findPane: PaneID?
+    /// Find on an agent pane searches its session transcript (the terminal only holds the screen; the agent scrolls internally),
+    /// shown in the right sidebar. `transcript` is the file while that mode is on; `findResolving` while we look for it.
+    private var transcript: URL?
+    private var transcriptView: TranscriptSearchView?
+    private var transcriptDebounce: DispatchWorkItem?
+    private var findResolving = false
+    private var inspectorWasCollapsed = true
+    private var savedPreviewTitle: (text: String, tip: String?) = ("", nil)
     private var activity: NSObjectProtocol?
 
     private let sidebar = SidebarView(frame: .zero)
     private let tabBar = TabBarView(frame: .zero)
     private let content = NSView()
-    /// Toolbar search (⌘F): collapses to a magnifier, expands with the native morph. Drives libghostty's search on `findPane`.
-    private lazy var searchItem: NSSearchToolbarItem = {
-        let item = NSSearchToolbarItem(itemIdentifier: .search)
-        let f = FindField(frame: .zero)
-        f.delegate = self
-        item.searchField = f
-        item.preferredWidthForSearchField = 260
-        return item
-    }()
-    private var findField: FindField { searchItem.searchField as! FindField }
+    private let findBar = FindBar(frame: .zero)
     private let emptyLabel = NSTextField(labelWithString: "")
     private lazy var tree = SplitTreeView { [unowned self] spec in self.view(for: spec) }
     /// Native split: glass sidebar (projects) | terminals | inspector (the file ⌘-clicked last). AppKit owns the
@@ -107,7 +106,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
 
         let main = NSView()
         main.wantsLayer = true
-        for v in [content, emptyLabel] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false }
+        for v in [content, findBar, emptyLabel] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false }
         main.addSubview(content)
         content.wantsLayer = true
         tree.frame = content.bounds
@@ -117,6 +116,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         emptyLabel.textColor = .secondaryLabelColor
         emptyLabel.alignment = .center
         content.addSubview(emptyLabel)
+        findBar.isHidden = true
+        content.addSubview(findBar)
 
         previewTitle.font = .systemFont(ofSize: 12, weight: .medium)
         previewTitle.textColor = .secondaryLabelColor
@@ -131,6 +132,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             content.bottomAnchor.constraint(equalTo: main.bottomAnchor),
             emptyLabel.centerXAnchor.constraint(equalTo: content.centerXAnchor),
             emptyLabel.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            findBar.topAnchor.constraint(equalTo: content.topAnchor, constant: 8),
+            findBar.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
             previewTitle.topAnchor.constraint(equalTo: preview.safeAreaLayoutGuide.topAnchor, constant: 6),
             previewTitle.leadingAnchor.constraint(equalTo: preview.leadingAnchor, constant: 16),
             previewTitle.trailingAnchor.constraint(lessThanOrEqualTo: preview.trailingAnchor, constant: -16),
@@ -180,6 +183,12 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             render()
         }
         tree.onHeaderClick = { [unowned self] id in focus(id) }
+        findBar.onChange = { [unowned self] text in
+            if transcript != nil { scheduleTranscriptSearch() } else { findSurface?.perform("search:\(text)") }
+        }
+        findBar.onNext = { [unowned self] in findNext(nil) }
+        findBar.onPrevious = { [unowned self] in findPrevious(nil) }
+        findBar.onClose = { [unowned self] in closeFind() }
     }
 
     // MARK: - Model access
@@ -288,7 +297,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     }
 
     private func render() {
-        if let f = findPane, !(activeTab?.root.contains(f) ?? false) { endFind(refocus: false) }
+        if let f = findPane, !(activeTab?.root.contains(f) ?? false) { closeFind(refocus: false) }
         var rebuilt = false
         if let tab = activeTab {
             tree.isHidden = false
@@ -403,12 +412,13 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         content.layer?.backgroundColor = theme.color("background").cgColor
         for v in views.values { (v as? FilePaneView)?.apply(theme: theme) }
         previewFile?.apply(theme: theme)
+        findBar.apply(theme: theme)
     }
 
     // MARK: - Focus & status
 
     private func paneFocused(_ id: PaneID) {
-        if let f = findPane, f != id { endFind(refocus: false) }
+        if let f = findPane, f != id, transcript != nil || findResolving { closeFind(refocus: false) }   // the transcript list belongs to one pane
         if let (p, t) = locate(id), store.layout.projects[p].tabs[t].focused != id {
             store.layout.projects[p].tabs[t].focused = id
             store.changed()
@@ -495,36 +505,120 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             openURL(url, from: id)
         case .closeRequested:
             closePane(id, confirm: false)
+        case .startSearch, .endSearch, .searchTotal, .searchSelected:
+            if transcript == nil { terminalSearchEvent(id, event) }
+        }
+    }
+
+    private func terminalSearchEvent(_ id: PaneID, _ event: PaneEvent) {
+        switch event {
         case let .startSearch(needle):
             if let old = findPane, old != id { surfaceView(for: old)?.perform("end_search") }
             findPane = id
             searchCounts = (-1, -1)
-            findField.setCounts(total: -1, selected: -1)
-            findField.stringValue = needle
-            searchItem.beginSearchInteraction()
-            findField.selectText(nil)
+            findBar.isHidden = false
+            findBar.setCounts(total: -1, selected: -1)
+            findBar.show(needle: needle)
         case .endSearch:
-            if findPane == id { endFind(send: false) }
+            if findPane == id { hideFind() }
         case let .searchTotal(n):
             searchCounts.total = n
-            findField.setCounts(total: searchCounts.total, selected: searchCounts.selected)
+            findBar.setCounts(total: searchCounts.total, selected: searchCounts.selected)
         case let .searchSelected(n):
             searchCounts.selected = n
-            findField.setCounts(total: searchCounts.total, selected: searchCounts.selected)
+            findBar.setCounts(total: searchCounts.total, selected: searchCounts.selected)
+        default:
+            break
         }
     }
 
     private var findSurface: SurfaceView? { findPane.flatMap { surfaceView(for: $0) } }
 
-    /// Ends the search: libghostty (`send`), the toolbar field (cleared, collapsed), and keyboard focus back to the terminal (`refocus`).
-    private func endFind(send: Bool = true, refocus: Bool = true) {
+    /// Closes the find bar (and the transcript list, restoring the sidebar); focus goes back to the terminal (`refocus`).
+    private func hideFind(refocus: Bool = true) {
         let v = findSurface
+        findBar.isHidden = true
         findPane = nil
-        if send { v?.perform("end_search") }
-        findField.stringValue = ""
-        findField.setCounts(total: -1, selected: -1)
-        searchItem.endSearchInteraction()
+        findResolving = false
+        endTranscript()
         if refocus, let v { window?.makeFirstResponder(v) }
+    }
+
+    /// The user ended the search: also ends libghostty's.
+    private func closeFind(refocus: Bool = true) {
+        if transcript == nil { findSurface?.perform("end_search") }
+        hideFind(refocus: refocus)
+    }
+
+    /// Find is on an agent pane: list matches from its transcript in the right sidebar until the search ends.
+    private func beginTranscriptFind(_ id: PaneID, _ url: URL) {
+        transcript = url
+        findBar.isHidden = false
+        findBar.setCounts(total: -1, selected: -1)
+        findBar.show(needle: "")
+        let v = TranscriptSearchView()
+        v.onSelect = { [unowned self] _ in transcriptCounts() }
+        v.onCancel = { [unowned self] in closeFind() }
+        v.translatesAutoresizingMaskIntoConstraints = false
+        preview.addSubview(v)
+        NSLayoutConstraint.activate([
+            v.leadingAnchor.constraint(equalTo: preview.leadingAnchor),
+            v.trailingAnchor.constraint(equalTo: preview.trailingAnchor),
+            v.topAnchor.constraint(equalTo: previewTitle.bottomAnchor, constant: 4),
+            v.bottomAnchor.constraint(equalTo: preview.bottomAnchor),
+        ])
+        previewFile?.isHidden = true
+        savedPreviewTitle = (previewTitle.stringValue, previewTitle.toolTip)
+        previewTitle.stringValue = "Session transcript"
+        previewTitle.toolTip = url.path
+        inspectorWasCollapsed = inspectorItem.isCollapsed
+        if inspectorWasCollapsed { togglePreview(nil) }
+        transcriptView = v
+    }
+
+    /// Puts the sidebar back as it was: the previous file (or nothing, collapsed).
+    private func endTranscript() {
+        guard transcript != nil else { return }
+        transcript = nil
+        transcriptDebounce?.cancel()
+        transcriptDebounce = nil
+        TranscriptSearch.cancel()
+        transcriptView?.removeFromSuperview()
+        transcriptView = nil
+        previewFile?.isHidden = false
+        previewTitle.stringValue = savedPreviewTitle.text
+        previewTitle.toolTip = savedPreviewTitle.tip
+        if inspectorWasCollapsed, !inspectorItem.isCollapsed { togglePreview(nil) }
+    }
+
+    private func scheduleTranscriptSearch() {
+        transcriptDebounce?.cancel()
+        let work = DispatchWorkItem { [weak self] in MainActor.assumeIsolated { self?.runTranscriptSearch() } }
+        transcriptDebounce = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+    }
+
+    private func runTranscriptSearch() {
+        guard let url = transcript else { return }
+        transcriptDebounce?.cancel()
+        transcriptDebounce = nil
+        let query = findBar.text
+        TranscriptSearch.search(url, query) { [weak self] result in
+            guard let self, transcript == url, let v = transcriptView else { return }
+            v.show(result, query: query)
+            transcriptCounts()
+        }
+    }
+
+    private func transcriptCounts() {
+        guard let v = transcriptView else { return }
+        findBar.setCounts(total: findBar.text.isEmpty ? -1 : v.count, selected: v.selected)
+    }
+
+    private func stepTranscript(_ d: Int) {
+        if transcriptDebounce != nil { runTranscriptSearch(); return }   // typed just now: results first
+        guard let v = transcriptView, v.count > 0 else { return }
+        v.select((max(v.selected, 0) + d + v.count) % v.count)
     }
 
     private func openURL(_ url: String, from id: PaneID) {
@@ -669,7 +763,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         views[id] = nil
         status[id] = nil
         titles[id] = nil
-        if findPane == id { endFind(send: false, refocus: false) }
+        if findPane == id { hideFind(refocus: false) }
     }
 
     // Close paths resolve their target by id only after any confirm dialog: the modal run loop keeps
@@ -810,6 +904,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
 
     /// Shows `path` in the right sidebar, replacing the file shown there.
     func openFile(_ path: String) {
+        if transcript != nil { closeFind(refocus: false) }
         previewFile?.close()
         previewFile?.removeFromSuperview()
         let f = FilePaneView(id: UUID(), path: path, theme: theme)
@@ -1110,12 +1205,23 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     }
     @objc func clearScreen(_ sender: Any?) { focusedPane.flatMap { surfaceView(for: $0) }?.perform("clear_screen") }
     @objc func find(_ sender: Any?) {
-        guard let v = focusedPane.flatMap({ surfaceView(for: $0) }) else { return }
-        searchItem.beginSearchInteraction()
-        v.perform("start_search")
+        guard let id = focusedPane, let v = surfaceView(for: id) else { return }
+        if findPane == id {
+            if transcript != nil { findBar.show(needle: findBar.text) } else if !findResolving { v.perform("start_search") }
+            return
+        }
+        if findPane != nil { closeFind(refocus: false) }
+        // An agent pane searches its transcript; finding it scans processes and disk, so off the main thread.
+        findPane = id
+        findResolving = true
+        TranscriptSearch.locate(id) { [weak self] url in
+            guard let self, findResolving, findPane == id else { return }
+            findResolving = false
+            if let url { beginTranscriptFind(id, url) } else { surfaceView(for: id)?.perform("start_search") }
+        }
     }
-    @objc func findNext(_ sender: Any?) { findSurface?.perform("navigate_search:next") }
-    @objc func findPrevious(_ sender: Any?) { findSurface?.perform("navigate_search:previous") }
+    @objc func findNext(_ sender: Any?) { if transcript != nil { stepTranscript(1) } else { findSurface?.perform("navigate_search:next") } }
+    @objc func findPrevious(_ sender: Any?) { if transcript != nil { stepTranscript(-1) } else { findSurface?.perform("navigate_search:previous") } }
     @objc func increaseFontSize(_ sender: Any?) { focusedPane.flatMap { surfaceView(for: $0) }?.perform("increase_font_size:1") }
     @objc func decreaseFontSize(_ sender: Any?) { focusedPane.flatMap { surfaceView(for: $0) }?.perform("decrease_font_size:1") }
     @objc func resetFontSize(_ sender: Any?) { focusedPane.flatMap { surfaceView(for: $0) }?.perform("reset_font_size") }
@@ -1158,18 +1264,16 @@ extension WorkspaceController {
 
 extension NSToolbarItem.Identifier {
     static let tabs = NSToolbarItem.Identifier("tabs")
-    static let search = NSToolbarItem.Identifier("search")
     static let addProject = NSToolbarItem.Identifier("addProject")
 }
 
 /// Unified toolbar: sidebar toggle over the sidebar, the tab capsule over the terminals, inspector toggle over the preview.
 extension WorkspaceController: NSToolbarDelegate {
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .addProject, .sidebarTrackingSeparator, .tabs, .flexibleSpace, .search, .inspectorTrackingSeparator, .flexibleSpace, .toggleInspector]
+        [.toggleSidebar, .addProject, .sidebarTrackingSeparator, .tabs, .flexibleSpace, .inspectorTrackingSeparator, .flexibleSpace, .toggleInspector]
     }
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(toolbar) }
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier, willBeInsertedIntoToolbar: Bool) -> NSToolbarItem? {
-        if id == .search { return searchItem }
         let item = NSToolbarItem(itemIdentifier: id)
         if id == .addProject {
             item.label = "Add Project"
@@ -1184,25 +1288,5 @@ extension WorkspaceController: NSToolbarDelegate {
         item.isBordered = false   // the tab bar draws its own glass capsule
         item.visibilityPriority = .high
         return item
-    }
-}
-
-/// Typing searches, Return / ⇧Return step through matches, Esc or the cancel button ends the search.
-extension WorkspaceController: NSSearchFieldDelegate {
-    func controlTextDidChange(_ obj: Notification) { findSurface?.perform("search:\(findField.stringValue)") }
-    func controlTextDidEndEditing(_ obj: Notification) {
-        if findPane != nil, findField.stringValue.isEmpty { endFind() }   // collapsed while empty
-    }
-    func searchFieldDidEndSearching(_ sender: NSSearchField) { if findPane != nil { endFind() } }   // cancel button
-    func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
-        switch sel {
-        case #selector(NSResponder.insertNewline(_:)):
-            if NSApp.currentEvent?.modifierFlags.contains(.shift) == true { findPrevious(nil) } else { findNext(nil) }
-        case #selector(NSResponder.cancelOperation(_:)):
-            endFind()
-        default:
-            return false
-        }
-        return true
     }
 }

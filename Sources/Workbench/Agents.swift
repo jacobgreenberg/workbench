@@ -82,12 +82,39 @@ enum Agents {
 
     // MARK: process scan
 
+    /// An agent found in a pane: its resume command (nil when the session id can't be read yet), the profile dir it
+    /// runs with, and the Claude session id / Codex thread id (nil = not known).
+    struct Session { let cmd: String?; let claude: Bool; let home: String; let id: String? }
+
     /// Every pane with an agent running in it → its resume command; nil when the session id can't be read yet (Claude
     /// writes it shortly after starting), so the pane's saved command, typically the exact resume it launched with, stands.
-    static func running() -> [PaneID: String?] {
+    static func running() -> [PaneID: String?] { sessions().mapValues { $0.cmd } }
+
+    /// The pane's session transcript (Claude `projects/*/<session>.jsonl`, Codex `sessions/Y/M/D/rollout-*-<thread>.jsonl`),
+    /// nil if no agent runs there or the file can't be found. Scans processes and the disk: call off the main thread.
+    static func transcript(for pane: PaneID) -> URL? {
+        guard let s = sessions()[pane], let id = s.id?.lowercased() else { return nil }
+        let fm = FileManager.default
+        if s.claude {   // the folder is a slug of the cwd; find the file by name instead
+            let root = s.home + "/projects"
+            return ((try? fm.contentsOfDirectory(atPath: root)) ?? []).map { URL(fileURLWithPath: "\(root)/\($0)/\(id).jsonl") }
+                .first { fm.fileExists(atPath: $0.path) }
+        }
+        func newestFirst(_ dir: URL) -> [URL] {
+            ((try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []).sorted { $0.lastPathComponent > $1.lastPathComponent }
+        }
+        for y in newestFirst(URL(fileURLWithPath: s.home + "/sessions").resolvingSymlinksInPath()) {
+            for m in newestFirst(y) { for d in newestFirst(m) {
+                if let f = newestFirst(d).first(where: { $0.lastPathComponent.hasPrefix("rollout-") && $0.lastPathComponent.lowercased().hasSuffix("-\(id).jsonl") }) { return f }
+            } }
+        }
+        return nil
+    }
+
+    private static func sessions() -> [PaneID: Session] {
         let map = launchers.withLock { $0 }
         let home = NSHomeDirectory()
-        var result: [PaneID: String?] = [:]
+        var result: [PaneID: Session] = [:]
         var unresolved: [(pane: PaneID, cmd: String, home: String, cwd: String, started: Int)] = []
         var claimed: Set<String> = []
         for pid in allPIDs() {
@@ -104,7 +131,7 @@ enum Agents {
                 var cmd = map["claude:" + dir] ?? (env["CLAUDE_CONFIG_DIR"] == nil ? "claude" : "CLAUDE_CONFIG_DIR=\(Runtime.shellEscape(dir)) claude")
                 if argv.contains(where: { $0.hasSuffix("/claude-hooks.json") }) { cmd += " " + claudeHookArgs }
                 let session = sessionID(claudeDir: dir, pid: pid)
-                result[pane] = .some(session.map { cmd + " --resume \($0)" })
+                result[pane] = Session(cmd: session.map { cmd + " --resume \($0)" }, claude: true, home: dir, id: session)
             } else if words.contains("codex") {
                 let dir = env["CODEX_HOME"].map { ($0 as NSString).standardizingPath } ?? home + "/.codex"
                 var cmd = map["codex:" + dir] ?? (env["CODEX_HOME"] == nil ? "codex" : "CODEX_HOME=\(Runtime.shellEscape(dir)) codex")
@@ -114,7 +141,7 @@ enum Agents {
                 // same thread, which Codex then refuses as open elsewhere.
                 if let i = argv.firstIndex(of: "resume"), i + 1 < argv.count, UUID(uuidString: argv[i + 1]) != nil {
                     claimed.insert(argv[i + 1].lowercased())
-                    result[pane] = cmd + " resume " + argv[i + 1]
+                    result[pane] = Session(cmd: cmd + " resume " + argv[i + 1], claude: false, home: dir, id: argv[i + 1])
                 } else if let cwd = processCwd(pid) {
                     unresolved.append((pane, cmd, dir, cwd, startTime(pid)))
                 }
@@ -125,7 +152,8 @@ enum Agents {
         for group in Dictionary(grouping: unresolved, by: { $0.home + "\0" + $0.cwd }).values {
             var threads = recentThreads(codexHome: group[0].home, cwd: group[0].cwd).filter { !claimed.contains($0) }.makeIterator()
             for p in group.sorted(by: { $0.started > $1.started }) {
-                result[p.pane] = threads.next().map { p.cmd + " resume " + $0 } ?? p.cmd
+                let thread = threads.next()
+                result[p.pane] = Session(cmd: thread.map { p.cmd + " resume " + $0 } ?? p.cmd, claude: false, home: p.home, id: thread)
             }
         }
         return result

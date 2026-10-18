@@ -4,7 +4,7 @@ Native macOS terminal IDE for running many Claude Code / Codex sessions. Swift 6
 
 Build: `swift build -c release`, then `scripts/bundle.sh` → `build.noindex/Workbench.app`. Run: `open build.noindex/Workbench.app`.
 
-Rules: AppKit only (no SwiftUI). macOS 27+. Chrome is Liquid Glass (NSGlassEffectView panels/capsules, `HandButton.glass` round buttons) floating over the solid theme background; never put glass over a terminal surface since glass over changing content recomposites every frame. No polling timers. Every C callback is a nonisolated `@convention(c)` function that copies data into owned Swift values and hops to main with `DispatchQueue.main.async`. Never touch a SurfaceView's `wantsLayer`/`layer` before `ghostty_surface_new`. Import GhosttyKit as `@preconcurrency import GhosttyKit`.
+Rules: AppKit only (no SwiftUI). macOS 27+. Chrome is Liquid Glass (NSGlassEffectView panels/capsules, `HandButton.glass` round buttons) floating over the solid theme background; never put glass over a terminal surface except transient overlays (find bar), since glass over changing content recomposites every frame. No polling timers. Every C callback is a nonisolated `@convention(c)` function that copies data into owned Swift values and hops to main with `DispatchQueue.main.async`. Never touch a SurfaceView's `wantsLayer`/`layer` before `ghostty_surface_new`. Import GhosttyKit as `@preconcurrency import GhosttyKit`.
 
 ## Contract (cross-file interfaces — keep exact)
 
@@ -108,6 +108,7 @@ enum Agents {
     static let claudeHookArgs: String; static let codexHookArgs: String
     static func discoverLaunchers()                       // once at launch, background
     static func running() -> [PaneID: String?]           // pane → resume command; nil = agent running but id unknown yet (keep the saved command), e.g. "cc2 --resume <id>", "gpt1 resume <thread id>" (id from argv, else a distinct recent CLI thread of its folder from CODEX_HOME/state_*.sqlite)
+    static func transcript(for pane: PaneID) -> URL?    // the pane agent's session jsonl: Claude <config dir>/projects/*/<sessionId>.jsonl (globbed by name), Codex <CODEX_HOME>/sessions/Y/M/D/rollout-*-<threadId>.jsonl (newest dirs first); nil = no agent / not found. Scans processes + disk: off main
 }
 
 // SplitTreeView.swift
@@ -159,7 +160,34 @@ struct TabItem: Equatable, Sendable { let title: String; let status: PaneStatus 
 
 // InlineRename (TabBarView.swift): makes a label editable in place; Return/click away commits, Esc cancels. static var isEditing (render() skips refocusing the terminal while true)
 
-// FindField.swift + WorkspaceController — find lives in the toolbar: an NSSearchToolbarItem (.search, before the inspector separator) holding a FindField (NSSearchField with the "2/7" counter inside). ⌘F → beginSearchInteraction + start_search; typing → search:<text>; Return/⇧Return (and ⌘G/⇧⌘G) → navigate_search; Esc/cancel/collapse empty → end_search and focus back to the terminal. Nothing floats over output.
+// FindBar.swift
+@MainActor final class FindBar: NSView {   // glass capsule, NSSearchField, glass chevron/xmark buttons; fades+scales when isHidden toggles; apply(theme:) is a no-op (system colors)
+    var onChange: ((String) -> Void)?; var onNext: (() -> Void)?; var onPrevious: (() -> Void)?; var onClose: (() -> Void)?
+    var text: String
+    func show(needle: String); func setCounts(total: Int, selected: Int); func apply(theme: Theme)
+}
+// Find (WorkspaceController): ⌘F → find(). Agent pane (Agents.transcript resolved, off main) → transcript mode: the bar's typing (debounced 120 ms) / Return / ⇧Return / ⌘G / ⇧⌘G / counter drive the transcript matches, listed in the right preview sidebar by TranscriptSearchView (previous inspector content + collapsed state restored by hideFind/endTranscript; opening a file, Esc/close, or focusing another pane ends it). Any other pane, or no transcript found → libghostty search (start_search / search:<text> / navigate_search / end_search), as before.
+
+// Transcript.swift — session jsonl → searchable entries; the terminal of a fullscreen-TUI agent only holds the visible screen
+struct TranscriptEntry: Sendable, Equatable { enum Kind { case user, assistant, toolCall, toolOutput }; let kind: Kind; let text: String; let time: Date? }
+struct TranscriptMatch: Sendable, Equatable { let entry: Int; let range: NSRange }   // one per occurrence; UTF-16 range in the entry's text
+struct TranscriptResult: Sendable { let entries: [TranscriptEntry]; let matches: [TranscriptMatch] }   // matches in file order
+enum TranscriptParser {
+    static func entries(_ line: Data, codex: Bool) -> [TranscriptEntry]   // one jsonl line; Claude: user/assistant text, tool_use "<name> <compact json>", tool_result; Codex: response_item message/function_call/custom_tool_call (+ outputs); everything else, isMeta and injected context skipped
+    static func matches(in entries: [TranscriptEntry], _ query: String) -> [TranscriptMatch]   // case- and diacritic-insensitive substring
+}
+final class TranscriptIndex: @unchecked Sendable { init(_ url: URL); var entries: [TranscriptEntry]; func update() }   // reads only appended complete lines since the last call; confined to TranscriptSearch's queue
+enum TranscriptSearch {   // background queue; per-file index cache; a newer call supersedes older ones (stale results dropped)
+    static func locate(_ pane: PaneID, done: @escaping @Sendable @MainActor (URL?) -> Void)
+    static func search(_ url: URL, _ query: String, done: @escaping @Sendable @MainActor (TranscriptResult) -> Void)
+    static func cancel()
+}
+// TranscriptSearchView.swift — right-sidebar results: NSTableView of matches (kind SF Symbol, relative time, snippet with the hit bold) above an NSTextView with the selected entry's full text, hit highlighted + showFindIndicator
+@MainActor final class TranscriptSearchView: NSView {
+    var onSelect: ((Int) -> Void)?; var onCancel: (() -> Void)?; private(set) var selected: Int; var count: Int
+    func show(_ r: TranscriptResult, query: String)   // selects the newest (last) match
+    func select(_ i: Int)                              // table selection drives the text and onSelect
+}
 
 // Control.swift — unix socket at Store.directory/pane.sock, one JSON object per line ([String: String]), one reply line
 final class ControlServer: @unchecked Sendable { init(path: String, handler: @escaping @MainActor ([String: String]) -> String); func start(); func stop() }

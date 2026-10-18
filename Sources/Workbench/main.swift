@@ -7,14 +7,24 @@ if CommandLine.arguments.contains("--selfcheck") {
     themeSelfCheck()
     controlSelfCheck()
     agentsSelfCheck()
+    transcriptSelfCheck()
     print("selfcheck ok")
     exit(0)
 }
 if CommandLine.arguments.contains("--agents") {   // what quit would record for each pane's running agent
     Agents.loadLaunchers()
     let t0 = Date()
-    for (pane, cmd) in Agents.running() { print(pane, cmd ?? "(id not known yet; keeps saved command)") }
+    for (pane, cmd) in Agents.running() { print(pane, cmd ?? "(id not known yet; keeps saved command)", Agents.transcript(for: pane)?.path ?? "(no transcript)") }
     FileHandle.standardError.write(Data("scan: \(Int(Date().timeIntervalSince(t0) * 1000)) ms\n".utf8))
+    exit(0)
+}
+if let i = CommandLine.arguments.firstIndex(of: "--transcript"), i + 2 < CommandLine.arguments.count {   // --transcript <file> <query>: parse + search timing
+    let t0 = Date()
+    let index = TranscriptIndex(URL(fileURLWithPath: CommandLine.arguments[i + 1]))
+    index.update()
+    let t1 = Date()
+    let m = TranscriptParser.matches(in: index.entries, CommandLine.arguments[i + 2])
+    print("\(index.entries.count) entries, \(m.count) matches; parse \(Int(t1.timeIntervalSince(t0) * 1000)) ms, search \(Int(Date().timeIntervalSince(t1) * 1000)) ms")
     exit(0)
 }
 #endif
