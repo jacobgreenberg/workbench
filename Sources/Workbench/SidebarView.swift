@@ -255,7 +255,7 @@ private final class FlatRowView: NSTableRowView {
 /// The workspace's name as a large title, then a segmented control that switches between active and hidden
 /// projects; project indices here are rows of the list being shown (the controller maps them to projects).
 /// Two lines per project; selection is the active project. Reordering is native table drag and drop.
-/// Pinned below the list: a separator and the scratch terminals (not projects; the first row is also the button).
+/// Pinned below the list: the scratch terminals (not projects; the first row is also the button).
 @MainActor final class SidebarView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
     var onSelect: ((Int) -> Void)?
     var onShowHidden: ((Bool) -> Void)?   // segment picked: true = Hidden
@@ -315,8 +315,6 @@ private final class FlatRowView: NSTableRowView {
         scroll.autohidesScrollers = true
         scroll.documentView = table
 
-        let separator = NSBox()
-        separator.boxType = .separator
         scratchList.onSelect = { [unowned self] i in onSelectScratch?(i) }
         scratchList.onNew = { [unowned self] in onNewScratch?() }
         scratchList.onClose = { [unowned self] i in onCloseScratch?(i) }
@@ -327,12 +325,12 @@ private final class FlatRowView: NSTableRowView {
 
         let content = NSLayoutGuide()   // everything right of the rail
         addLayoutGuide(content)
-        for v in [rail, title, scroll, filter, separator, scratchList.scroll] as [NSView] {
+        for v in [rail, title, scroll, filter, scratchList.scroll] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
         NSLayoutConstraint.activate([
-            rail.topAnchor.constraint(equalTo: topAnchor),   // full height; its icons clear the toolbar themselves
+            rail.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 6),   // below the toolbar
             rail.bottomAnchor.constraint(equalTo: bottomAnchor),
             rail.leadingAnchor.constraint(equalTo: leadingAnchor),
             content.leadingAnchor.constraint(equalTo: rail.trailingAnchor),
@@ -346,10 +344,7 @@ private final class FlatRowView: NSTableRowView {
             scroll.topAnchor.constraint(equalTo: filter.bottomAnchor, constant: 10),
             scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: separator.topAnchor, constant: -4),
-            separator.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 4),
-            separator.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            separator.bottomAnchor.constraint(equalTo: scratchList.scroll.topAnchor, constant: -6),
+            scroll.bottomAnchor.constraint(equalTo: scratchList.scroll.topAnchor, constant: -8),
             scratchList.scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             scratchList.scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
             scratchList.scroll.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),

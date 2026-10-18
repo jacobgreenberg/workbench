@@ -131,16 +131,6 @@ private let tints: [(name: String, top: NSColor, bottom: NSColor)] = [
         super.init(frame: frame)
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.withAlphaComponent(0.16).cgColor   // darker strip, reads in light and dark
-        let divider = NSBox()
-        divider.boxType = .separator
-        divider.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(divider)
-        NSLayoutConstraint.activate([
-            divider.trailingAnchor.constraint(equalTo: trailingAnchor),
-            divider.topAnchor.constraint(equalTo: topAnchor),
-            divider.bottomAnchor.constraint(equalTo: bottomAnchor),
-            divider.widthAnchor.constraint(equalToConstant: 1),
-        ])
         stack.orientation = .vertical
         stack.spacing = 12
         let add = HandButton.glass("plus", "New Workspace")
@@ -157,7 +147,7 @@ private let tints: [(name: String, top: NSColor, bottom: NSColor)] = [
         }
         NSLayoutConstraint.activate([
             widthAnchor.constraint(equalToConstant: Self.width),
-            stack.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 10),   // below the toolbar
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 4),
             stack.centerXAnchor.constraint(equalTo: centerXAnchor),
             marker.leadingAnchor.constraint(equalTo: leadingAnchor),
             marker.widthAnchor.constraint(equalToConstant: 4),
