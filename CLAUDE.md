@@ -115,7 +115,7 @@ enum FocusDirection: Sendable { case left, right, up, down }
     var onRatiosChanged: ((SplitNode) -> Void)?           // user dragged a divider; tree with updated ratios
     var onMove: ((PaneID, PaneID, FocusDirection) -> Void)?   // pane dragged by its header (shown when the tab has 2+ panes) onto a side of another
     var onHeaderClick: ((PaneID) -> Void)?
-    func updateHeaders(focused: PaneID?, theme: Theme, title: (PaneID) -> String)   // called from updateChrome
+    func updateHeaders(focused: PaneID?, theme: Theme, status: (PaneID) -> PaneStatus, title: (PaneID) -> String)   // called from updateChrome; each header is a strip (theme background) above the pane with a glass capsule pill (status dot + title)
     init(provider: @escaping (PaneSpec) -> NSView)        // returns the existing leaf view for a pane (never creates duplicates)
     @discardableResult func render(_ root: SplitNode, dividerColor: NSColor) -> Bool   // false = unchanged, nothing rebuilt
     func clear()                                          // drop the tree and every view it retains

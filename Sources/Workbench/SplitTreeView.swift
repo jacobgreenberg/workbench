@@ -8,13 +8,16 @@ private final class DividerSplitView: NSSplitView {
     override var dividerThickness: CGFloat { 1 }
 }
 
-/// Title bar over each pane of a split tab; dragging it moves the pane (see SplitTreeView.drag).
+/// Strip above each pane of a split tab, holding a glass pill with the pane's status dot and title; dragging the strip
+/// or pill moves the pane (see SplitTreeView.drag). The glass sits in the strip, never over the terminal.
 @MainActor private final class PaneHeader: NSView {
-    static let height: CGFloat = 22
+    static let height: CGFloat = 36
+    private static let pillHeight: CGFloat = 24, inset: CGFloat = 10
     let id: PaneID
     let label = NSTextField(labelWithString: "")
-    let grip = NSTextField(labelWithString: "⠿")   // marks the bar as a handle, not another row of tabs
-    let line = NSView()
+    let dot = NSView()
+    let pill = NSGlassEffectView()
+    private let row = NSStackView()
     var onClick: (() -> Void)?
     var onDrag: ((NSPoint, _ done: Bool) -> Void)?   // window point; done = mouse released
 
@@ -22,28 +25,39 @@ private final class DividerSplitView: NSSplitView {
         self.id = id
         super.init(frame: .zero)
         wantsLayer = true
-        label.font = .systemFont(ofSize: 11)
+        label.font = .systemFont(ofSize: 11.5)
         label.lineBreakMode = .byTruncatingTail
-        grip.font = .systemFont(ofSize: 11)
-        line.wantsLayer = true
-        for v in [label, grip, line] {
-            v.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(v)
-        }
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        dot.wantsLayer = true
+        dot.layer?.cornerRadius = 3.5
+        dot.isHidden = true
+        row.spacing = 6
+        row.edgeInsets = NSEdgeInsets(top: 0, left: Self.inset, bottom: 0, right: Self.inset)
+        row.setViews([dot, label], in: .leading)
+        row.translatesAutoresizingMaskIntoConstraints = false
+        dot.translatesAutoresizingMaskIntoConstraints = false
+        let inner = NSView()
+        inner.addSubview(row)
         NSLayoutConstraint.activate([
-            grip.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            grip.centerYAnchor.constraint(equalTo: centerYAnchor),
-            line.leadingAnchor.constraint(equalTo: leadingAnchor),
-            line.trailingAnchor.constraint(equalTo: trailingAnchor),
-            line.bottomAnchor.constraint(equalTo: bottomAnchor),
-            line.heightAnchor.constraint(equalToConstant: 1),
-            label.leadingAnchor.constraint(equalTo: grip.trailingAnchor, constant: 6),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -10),
-            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            dot.widthAnchor.constraint(equalToConstant: 7),
+            dot.heightAnchor.constraint(equalToConstant: 7),
+            row.leadingAnchor.constraint(equalTo: inner.leadingAnchor),
+            row.trailingAnchor.constraint(equalTo: inner.trailingAnchor),
+            row.centerYAnchor.constraint(equalTo: inner.centerYAnchor),
         ])
+        pill.contentView = inner
+        pill.cornerRadius = Self.pillHeight / 2
+        addSubview(pill)
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// The pill hugs its content, up to the strip width minus the insets.
+    override func layout() {
+        super.layout()
+        let w = min(row.fittingSize.width, max(0, bounds.width - 2 * Self.inset))
+        pill.frame = NSRect(x: Self.inset, y: (bounds.height - Self.pillHeight) / 2, width: w, height: Self.pillHeight)
+    }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override var mouseDownCanMoveWindow: Bool { false }
@@ -224,16 +238,18 @@ private final class DividerSplitView: NSSplitView {
         proposedMaximumPosition - 60
     }
 
-    /// Header titles and colours; cheap to call on every title change (only differences are applied).
-    func updateHeaders(focused: PaneID?, theme: Theme, title: (PaneID) -> String) {
+    /// Header titles, status dots and colours; cheap to call on every title change (only differences are applied).
+    func updateHeaders(focused: PaneID?, theme: Theme, status: (PaneID) -> PaneStatus, title: (PaneID) -> String) {
         for (id, h) in headers {
-            let t = title(id)
-            if h.label.stringValue != t { h.label.stringValue = t }
-            // The terminal's own background, not the tab bar's: the bar reads as part of its pane.
-            h.label.textColor = theme.color(id == focused ? "foreground" : "mutedForeground")
-            h.grip.textColor = theme.color(id == focused ? "primary" : "mutedForeground")
+            let t = title(id), isFocused = id == focused
+            if h.label.stringValue != t { h.label.stringValue = t; h.needsLayout = true }
+            if h.dot.isHidden != (status(id) == .idle) { h.needsLayout = true }
+            styleStatusDot(h.dot, status(id), theme: theme)
+            h.label.textColor = isFocused ? .labelColor : .secondaryLabelColor
+            h.pill.tintColor = isFocused ? theme.color("primary").withAlphaComponent(0.35) : nil
+            h.pill.alphaValue = isFocused ? 1 : 0.8
+            // The terminal's own background, not the tab bar's: the strip reads as part of its pane.
             h.layer?.backgroundColor = theme.color("background").cgColor
-            h.line.layer?.backgroundColor = theme.color("border").cgColor
         }
         dropIndicator.wantsLayer = true
         dropIndicator.layer?.backgroundColor = theme.color("primary").withAlphaComponent(0.2).cgColor

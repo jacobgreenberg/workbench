@@ -147,6 +147,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         // Collapsing from the toolbar button bypasses our actions; persist whatever AppKit did.
         collapseObservation = sidebarItem.observe(\.isCollapsed) { [weak self] _, _ in
             MainActor.assumeIsolated {
+                self?.updateWindowTitle()
                 guard let self, self.store.layout.sidebarVisible == self.sidebarItem.isCollapsed else { return }
                 self.store.layout.sidebarVisible = !self.sidebarItem.isCollapsed
                 self.store.changed()
@@ -332,7 +333,17 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         render()
     }
 
+    /// With the sidebar collapsed the toolbar names the active project (and its path); expanded, the sidebar does.
+    private func updateWindowTitle() {
+        guard let window else { return }
+        let project = sidebarItem.isCollapsed ? activeProjectIndex.map { store.layout.projects[$0] } : nil
+        window.title = project?.name ?? ""
+        window.subtitle = (project?.path as NSString?)?.abbreviatingWithTildeInPath ?? ""
+        window.titleVisibility = project == nil ? .hidden : .visible
+    }
+
     private func updateChrome() {
+        updateWindowTitle()
         let projects = store.layout.projects
         sidebar.update(rows: projects.map { p in
             let leaves = p.tabs.flatMap { $0.root.leaves }
@@ -347,7 +358,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                 TabItem(title: title(of: tab),
                                status: tab.root.leaves.map { status[$0.id] ?? .idle }.max() ?? .idle)
             }, selected: project.activeTab, theme: theme)
-            tree.updateHeaders(focused: focusedPane, theme: theme) { [titles] id in
+            tree.updateHeaders(focused: focusedPane, theme: theme, status: { [status] in status[$0] ?? .idle }) { [titles] id in
                 if let t = titles[id] { return t }
                 if case let .file(path)? = spec(id)?.kind { return (path as NSString).lastPathComponent }
                 return "Terminal"
