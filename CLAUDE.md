@@ -137,6 +137,7 @@ struct TabItem: Equatable, Sendable { let title: String; let status: PaneStatus 
 @MainActor final class TabBarView: NSView {
     var onSelect: ((Int) -> Void)?; var onClose: ((Int) -> Void)?; var onNew: (() -> Void)?
     var onRename: ((Int, String?) -> Void)?              // double-click a tab; nil = cancelled
+    var onMove: ((Int, Int) -> Void)?                    // drag a tab: from, to (the bar reorders live; model follows on release)
     func update(items: [TabItem], selected: Int, theme: Theme)
 }
 

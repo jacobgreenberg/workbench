@@ -113,6 +113,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         tabBar.onNew = { [unowned self] in newTab(nil) }
         sidebar.onRename = { [unowned self] i, name in renameProject(i, name) }
         tabBar.onRename = { [unowned self] i, name in renameTab(i, name) }
+        tabBar.onMove = { [unowned self] from, to in moveTab(from, to) }
         tree.onRatiosChanged = { [unowned self] newRoot in
             mutateActiveTab { $0.root = $0.root.withRatios(from: newRoot) }
         }
@@ -632,6 +633,18 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         store.layout.projects[p].activeTab = max(0, min(active, count - 1))
     }
 
+    private func moveTab(_ from: Int, _ to: Int) {
+        guard let p = activeProjectIndex else { return }
+        var project = store.layout.projects[p]
+        guard project.tabs.indices.contains(from), project.tabs.indices.contains(to) else { return }
+        let active = project.tabs[project.activeTab].id
+        project.tabs.insert(project.tabs.remove(at: from), at: to)
+        project.activeTab = project.tabs.firstIndex { $0.id == active } ?? 0
+        store.layout.projects[p] = project
+        store.changed()
+        render()
+    }
+
     private func selectTab(_ index: Int) {
         guard let p = activeProjectIndex, store.layout.projects[p].tabs.indices.contains(index) else { return }
         store.layout.projects[p].activeTab = index
@@ -807,6 +820,21 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                 NSApp.postEvent(ev(.leftMouseDragged, to), atStart: false)
                 NSApp.postEvent(ev(.leftMouseUp, to), atStart: false)
                 w.sendEvent(ev(.leftMouseDown, from))
+            }
+            return "{}"
+        case "tabdrag":  // test harness: drag tab `from` onto tab `to`'s position
+            guard let a = msg["from"].flatMap(Int.init).flatMap(tabBar.tabCenter), let b = msg["to"].flatMap(Int.init).flatMap(tabBar.tabCenter),
+                  let w = tabBar.window else { return #"{"error":"no tab"}"# }
+            func ev(_ t: NSEvent.EventType, _ p: NSPoint) -> NSEvent {
+                NSEvent.mouseEvent(with: t, location: p, modifierFlags: [], timestamp: 0, windowNumber: w.windowNumber,
+                                   context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+            }
+            let to = NSPoint(x: b.x + (b.x > a.x ? 10 : -10), y: b.y)
+            DispatchQueue.main.async {
+                NSApp.postEvent(ev(.leftMouseDragged, NSPoint(x: (a.x + to.x) / 2, y: a.y)), atStart: false)
+                NSApp.postEvent(ev(.leftMouseDragged, to), atStart: false)
+                NSApp.postEvent(ev(.leftMouseUp, to), atStart: false)
+                w.sendEvent(ev(.leftMouseDown, a))
             }
             return "{}"
         case "menu":     // test harness: pick a pane's "Move to Tab" entry by title

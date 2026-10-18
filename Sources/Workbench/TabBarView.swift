@@ -57,6 +57,7 @@ final class HandButton: NSButton {
     var onSelect: (() -> Void)?
     var onClose: (() -> Void)?
     var onRename: ((String?) -> Void)?
+    var onDrag: ((NSPoint, Bool) -> Void)?   // window point, done
     private let dot = NSView()
     private let label = NSTextField(labelWithString: "")
     private let close = NSTextField(labelWithString: "×")
@@ -154,7 +155,22 @@ final class HandButton: NSButton {
         let p = convert(event.locationInWindow, from: nil)
         if !close.isHidden && p.x >= close.frame.minX - 6 { onClose?() }
         else if event.clickCount == 2 { InlineRename(label) { [weak self] in self?.onRename?($0) } }
-        else { onSelect?() }
+        else { onSelect?(); trackDrag(from: event) }
+    }
+
+    private func trackDrag(from event: NSEvent) {
+        guard let window else { return }
+        let start = event.locationInWindow
+        var dragging = false
+        window.trackEvents(matching: [.leftMouseDragged, .leftMouseUp], timeout: .infinity, mode: .eventTracking) { e, stop in
+            guard let e else { return }
+            let up = e.type == .leftMouseUp
+            if up { stop.pointee = true }
+            if !dragging, abs(e.locationInWindow.x - start.x) < 4 { return }
+            if !dragging { dragging = true; self.alphaValue = 0.6 }
+            self.onDrag?(e.locationInWindow, up)
+            if up { self.alphaValue = 1 }
+        }
     }
 
     override func otherMouseDown(with event: NSEvent) {
@@ -172,6 +188,7 @@ final class HandButton: NSButton {
     var onClose: ((Int) -> Void)?
     var onNew: (() -> Void)?
     var onRename: ((Int, String?) -> Void)?
+    var onMove: ((Int, Int) -> Void)?   // from, to
 
     private let stack = NSStackView()
     private let plus = HandButton(title: "+", target: nil, action: nil)
@@ -222,6 +239,22 @@ final class HandButton: NSButton {
 
     @objc private func newTapped() { onNew?() }
 
+    /// Live reorder while dragging: the tab takes the slot the cursor is over; the model follows on release.
+    private func slide(_ b: TabButton, to window: NSPoint) {
+        let x = stack.convert(window, from: nil).x
+        let to = buttons.filter { $0 !== b && $0.frame.midX < x }.count
+        guard let from = buttons.firstIndex(where: { $0 === b }), from != to else { return }
+        buttons.remove(at: from)
+        buttons.insert(b, at: to)
+        stack.insertArrangedSubview(b, at: to)
+    }
+
+    #if DEBUG
+    func tabCenter(_ i: Int) -> NSPoint? {
+        buttons.indices.contains(i) ? buttons[i].convert(NSPoint(x: buttons[i].bounds.midX, y: buttons[i].bounds.midY), to: nil) : nil
+    }
+    #endif
+
     private var last: (items: [TabItem], selected: Int, theme: String)?
 
     func update(items newItems: [TabItem], selected: Int, theme: Theme) {
@@ -234,9 +267,20 @@ final class HandButton: NSButton {
             plus.removeFromSuperview()
             buttons = newItems.indices.map { i in
                 let b = TabButton(height: Self.tabHeight)
-                b.onSelect = { [weak self] in self?.onSelect?(i) }
-                b.onClose = { [weak self] in self?.onClose?(i) }
-                b.onRename = { [weak self] in self?.onRename?(i, $0) }
+                // Looked up at call time: dragging reorders the buttons.
+                let index = { [unowned self, unowned b] in buttons.firstIndex { $0 === b } ?? i }
+                b.onSelect = { [weak self] in self?.onSelect?(index()) }
+                b.onClose = { [weak self] in self?.onClose?(index()) }
+                b.onRename = { [weak self] in self?.onRename?(index(), $0) }
+                var from: Int?
+                b.onDrag = { [weak self] point, done in
+                    guard let self else { return }
+                    if from == nil { from = index() }
+                    slide(b, to: point)
+                    guard done, let f = from else { return }
+                    from = nil
+                    if f != index() { onMove?(f, index()) }
+                }
                 stack.addArrangedSubview(b)
                 return b
             }
