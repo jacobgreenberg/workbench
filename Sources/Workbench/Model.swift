@@ -121,6 +121,21 @@ struct Project: Codable, Identifiable, Equatable, Sendable {
     var tabs: [Tab]
     var activeTab: Int
     var scratch: Bool? = nil   // temporary home-folder project: gone when its last tab closes, never restored
+    var hidden: Bool? = nil    // off the Active list, shown under Hidden; its terminals and agents keep running
+}
+
+/// Project indices shown in the sidebar for the Active (`hidden == false`) or Hidden list, in order.
+func visibleProjectIndices(_ projects: [Project], hidden: Bool) -> [Int] {
+    projects.indices.filter { (projects[$0].hidden ?? false) == hidden }
+}
+
+/// Dragging visible row `from` to visible row `to` (`map`: visible row -> project index) moves that project to the
+/// other row's position in the full list; hidden projects in between keep their places.
+func reorderedProjects(_ projects: [Project], map: [Int], from: Int, to: Int) -> [Project]? {
+    guard map.indices.contains(from), map.indices.contains(to) else { return nil }
+    var p = projects
+    p.insert(p.remove(at: map[from]), at: map[to])
+    return p
 }
 
 struct Preset: Codable, Equatable, Sendable {
@@ -136,6 +151,7 @@ struct Layout: Codable, Equatable, Sendable {
     var sidebarVisible: Bool
     var theme: String
     var presets: [Preset]
+    var showHidden: Bool? = nil   // sidebar lists the hidden projects instead of the active ones (nil = active)
 
     static let `default` = Layout(
         projects: [],
@@ -264,6 +280,16 @@ func modelSelfCheck() {
         return []
     }
     assert(ratios(tree.equalized()) == [0.5, 0.5])
+    // hidden projects: absent in an old layout.json = active; reorder within the filtered list
+    let oldProject = "{\"id\":\"\(UUID().uuidString)\",\"path\":\"/a\",\"name\":\"a\",\"tabs\":[],\"activeTab\":0}"
+    assert(try! JSONDecoder().decode(Project.self, from: Data(oldProject.utf8)).hidden == nil)
+    func proj(_ n: String, _ h: Bool?) -> Project { Project(id: UUID(), path: "/" + n, name: n, tabs: [], activeTab: 0, hidden: h) }
+    let projs = [proj("A", nil), proj("h1", true), proj("B", false), proj("h2", true), proj("C", nil)]
+    assert(visibleProjectIndices(projs, hidden: false) == [0, 2, 4] && visibleProjectIndices(projs, hidden: true) == [1, 3])
+    let act = [0, 2, 4]
+    assert(reorderedProjects(projs, map: act, from: 0, to: 2)?.map(\.name) == ["h1", "B", "h2", "C", "A"])
+    assert(reorderedProjects(projs, map: act, from: 2, to: 0)?.map(\.name) == ["C", "A", "h1", "B", "h2"])
+    assert(reorderedProjects(projs, map: act, from: 0, to: 3) == nil)
     // p2 over p3, drag p3 to p2's right: they become side by side
     assert(tree.moving(p3.id, to: p2.id, .right) == .split(axis: .horizontal, ratio: 0.3, a: .leaf(p1),
                                                             b: .split(axis: .horizontal, ratio: 0.5, a: .leaf(p2), b: .leaf(p3))))

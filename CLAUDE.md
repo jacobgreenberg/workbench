@@ -33,10 +33,11 @@ extension SplitNode {
     func moving(_ id: PaneID, to target: PaneID, _ edge: FocusDirection) -> SplitNode   // id re-split beside target on edge; self if same/missing
 }
 struct Tab: Codable, Identifiable, Equatable, Sendable { var id: UUID; var title: String; var root: SplitNode; var focused: PaneID?; var customTitle: String? = nil /* user rename; wins over the terminal title */ }
-struct Project: Codable, Identifiable, Equatable, Sendable { var id: UUID; var path: String; var name: String; var tabs: [Tab]; var activeTab: Int; var scratch: Bool? = nil /* ⇧⌘N temp project in ~: dropped when its last tab closes and at load */ }
+struct Project: Codable, Identifiable, Equatable, Sendable { var id: UUID; var path: String; var name: String; var tabs: [Tab]; var activeTab: Int; var scratch: Bool? = nil /* ⇧⌘N temp project in ~: dropped when its last tab closes and at load */; var hidden: Bool? = nil /* off the Active list, listed under Hidden; terminals and agents keep running; nil/absent = active */ }
 struct Preset: Codable, Equatable, Sendable { var key: Int; var name: String; var command: String; var scrollbackLimit: Int? }
 struct Layout: Codable, Equatable, Sendable {
-    var projects: [Project]; var activeProject: Int; var sidebarVisible: Bool; var theme: String; var presets: [Preset]
+    var projects: [Project]; var activeProject: Int /* -1 = none (the last active project was hidden) */; var sidebarVisible: Bool; var theme: String; var presets: [Preset]
+    var showHidden: Bool? = nil   // sidebar shows the Hidden list instead of Active (view state; nil = Active)
     static let `default`: Layout
 }
 @MainActor final class Store {
@@ -136,11 +137,13 @@ enum Syntax {
 struct SidebarRow: Equatable, Sendable { let name: String; let path: String; let status: PaneStatus; let terminals: Int; let agents: Int }   // agents: terminals whose launch is set (an agent runs there)
 enum PaneStatus: Int, Comparable, Sendable { case idle = 0, busy = 1, done = 2, attention = 3 }   // Comparable by rawValue
 @MainActor final class SidebarView: NSView {   // native .sourceList table: selection = active project, native drag-and-drop reorder
-    var onSelect: ((Int) -> Void)?; var onAdd: (() -> Void)?; var onRemove: ((Int) -> Void)?
+    var onSelect: ((Int) -> Void)?; var onRemove: ((Int) -> Void)?         // all indices are rows of the list shown; WorkspaceController maps rows to projects (visibleProjectIndices / reorderedProjects in Model.swift)
+    var onShowHidden: ((Bool) -> Void)?                  // Active/Hidden segmented control above the list
+    var onToggleHidden: ((Int) -> Void)?                 // context menu Hide Project (Active view) / Show Project (Hidden view)
     var onRename: ((Int, String?) -> Void)?              // double-click a row; nil = cancelled
     var onMove: ((Int, Int) -> Void)?                    // drag a project: from, to (final index after removal)
-    func update(rows: [SidebarRow], selected: Int, theme: Theme)
-}
+    func update(rows: [SidebarRow], selected: Int, hiddenCount: Int, showingHidden: Bool, theme: Theme)   // selected -1 = none
+}   // Add Project is a toolbar item (WorkspaceController), not a sidebar button
 
 // TabBarView.swift
 struct TabItem: Equatable, Sendable { let title: String; let status: PaneStatus }
