@@ -31,7 +31,7 @@ Update later with `scripts/update.sh` (pull, rebuild, install).
 | ⌘1–9, ⌘⌥↑ ⌘⌥↓ | Jump to project / previous, next project |
 | ⇧⌘O / ⌘B | Add project / toggle sidebar |
 | ⌘[ ⌘], ⌘⌥hjkl | Move focus between panes |
-| ⌃1–9 | Open a preset (Claude, Codex) in a new split |
+| ⌃1–9, ⌃⌘↑ ⌃⌘↓ | Jump to workspace / previous, next workspace |
 | ⌘K / ⌘F / ⌘= ⌘- ⌘0 | Clear / find / font size |
 
 ## Control CLI

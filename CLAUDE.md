@@ -148,6 +148,7 @@ enum Syntax {
 }
 
 // Model.swift sidebar helpers: visibleProjectIndices(_:hidden:workspace:) is the active workspace's list and excludes scratch (so ⌘1–9, next/previous project, reorder and the Hidden count only see real projects); scratchProjectIndices(_:) -> [Int]. The sidebar table is one row per project (table row == visible project index).
+// Workspace navigation (Go menu, reserved shortcuts): ⌃1–9 selectWorkspaceByTag (no-op past the count), ⌃⌘↑/↓ previous/next workspace, wrapping (WorkspaceController.cycleWorkspace).
 
 // SidebarView.swift
 struct SidebarRow: Equatable, Sendable { let id: UUID; let name: String; let path: String; let status: PaneStatus; var tabCount = 0 }   // status = busiest pane of the project; tabCount = its tabs (shown right of the row, omitted when 0; a project with none is dimmed unless selected)

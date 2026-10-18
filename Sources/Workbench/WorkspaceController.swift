@@ -943,6 +943,16 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
 
     // MARK: - Workspaces
 
+    @objc func selectWorkspaceByTag(_ sender: NSMenuItem) { selectWorkspace(sender.tag - 1) }
+    @objc func nextWorkspace(_ sender: Any?) { cycleWorkspace(1) }
+    @objc func previousWorkspace(_ sender: Any?) { cycleWorkspace(-1) }
+    private func cycleWorkspace(_ d: Int) {
+        let n = workspaces.count
+        guard n > 1 else { return }
+        let cur = workspaces.firstIndex { $0.id == store.layout.activeWorkspace } ?? (d > 0 ? -1 : 0)
+        selectWorkspace((cur + d + n) % n)
+    }
+
     /// Shows workspace `i`'s projects and reselects the one last used there (or its first, or none).
     private func selectWorkspace(_ i: Int) {
         guard workspaces.indices.contains(i) else { return }

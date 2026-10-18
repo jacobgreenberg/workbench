@@ -178,7 +178,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             .separator(),
             { let t = NSMenuItem(title: "Theme", action: nil, keyEquivalent: ""); t.submenu = themeMenu; return t }(),
         ]))
-        var projectItems: [NSMenuItem] = (1...9).map { item("Project \($0)", #selector(w.selectProjectByTag(_:)), "\($0)", tag: $0) }
+        // Static titles (no workspace-change hook); items past the workspace count are no-ops.
+        var projectItems: [NSMenuItem] = (1...9).map { item("Workspace \($0)", #selector(w.selectWorkspaceByTag(_:)), "\($0)", [.control], tag: $0) }
+        projectItems += [
+            item("Previous Workspace", #selector(w.previousWorkspace(_:)), arrow(NSUpArrowFunctionKey), [.command, .control]),
+            item("Next Workspace", #selector(w.nextWorkspace(_:)), arrow(NSDownArrowFunctionKey), [.command, .control]),
+            .separator(),
+        ]
+        projectItems += (1...9).map { item("Project \($0)", #selector(w.selectProjectByTag(_:)), "\($0)", tag: $0) }
         projectItems += [
             .separator(),
             item("Previous Project", #selector(w.previousProject(_:)), arrow(NSUpArrowFunctionKey), [.command, .option]),
