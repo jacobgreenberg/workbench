@@ -135,10 +135,10 @@ enum Syntax {
 // SidebarView.swift
 struct SidebarRow: Equatable, Sendable { let name: String; let path: String; let status: PaneStatus }
 enum PaneStatus: Int, Comparable, Sendable { case idle = 0, busy = 1, done = 2, attention = 3 }   // Comparable by rawValue
-@MainActor final class SidebarView: NSView {
+@MainActor final class SidebarView: NSView {   // native .sourceList table: selection = active project, native drag-and-drop reorder
     var onSelect: ((Int) -> Void)?; var onAdd: (() -> Void)?; var onRemove: ((Int) -> Void)?
     var onRename: ((Int, String?) -> Void)?              // double-click a row; nil = cancelled
-    var onMove: ((Int, Int) -> Void)?                    // drag a project: from, to (Reorder, like tabs)
+    var onMove: ((Int, Int) -> Void)?                    // drag a project: from, to (final index after removal)
     func update(rows: [SidebarRow], selected: Int, theme: Theme)
 }
 
@@ -151,8 +151,8 @@ struct TabItem: Equatable, Sendable { let title: String; let status: PaneStatus 
     func update(items: [TabItem], selected: Int, theme: Theme)
 }
 
-// Reorder.swift — the one drag gesture: trackDrag(from:in:_:) (4 pt threshold, closed hand; tabs, pane headers, sidebar rows),
-// and Reorder(.x / .y).drag(views, from, by: offset, done:, commit:) for pick-up, drag and snap in a row or column of views.
+// Reorder.swift — the one drag gesture: trackDrag(from:in:_:) (4 pt threshold, closed hand; tabs, pane headers),
+// and Reorder().drag(views, from, by: offset, done:, commit:) for pick-up, drag and snap in a row of views (x axis only).
 
 // InlineRename (TabBarView.swift): makes a label editable in place; Return/click away commits, Esc cancels. static var isEditing (render() skips refocusing the terminal while true)
 

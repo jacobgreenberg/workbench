@@ -189,7 +189,7 @@ final class HandButton: NSButton {
     private let plus = HandButton.glass("plus", "New Tab", .large)
     private let glass = NSGlassEffectView()
     private var buttons: [TabButton] = []
-    private let reorder = Reorder(.x)
+    private let reorder = Reorder()
 
     override init(frame: NSRect) {
         super.init(frame: frame)

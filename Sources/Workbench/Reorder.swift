@@ -17,22 +17,19 @@ import AppKit
     }
 }
 
-/// Pick up, drag and snap for a row or column of sibling views (tabs, sidebar projects). The dragged view follows the
+/// Pick up, drag and snap for a row of sibling views (tabs). The dragged view follows the
 /// pointer, lifted; the others slide aside to open the slot it would drop into; on release it snaps there. Everything
 /// moves by layer transforms, so autolayout never runs mid-drag. Then `commit(from, to)` reorders for real, with
 /// actions disabled and before the transforms reset, so nothing jumps.
 @MainActor final class Reorder {
-    enum Axis { case x, y }   // y: index grows with frame.minY (a flipped superview, like a table)
-    private let axis: Axis
     private var slot: Int?
 
-    init(_ axis: Axis) { self.axis = axis }
 
-    private func lo(_ v: NSView) -> CGFloat { axis == .x ? v.frame.minX : v.frame.minY }
-    private func hi(_ v: NSView) -> CGFloat { axis == .x ? v.frame.maxX : v.frame.maxY }
+    private func lo(_ v: NSView) -> CGFloat { v.frame.minX }
+    private func hi(_ v: NSView) -> CGFloat { v.frame.maxX }
     private func mid(_ v: NSView) -> CGFloat { (lo(v) + hi(v)) / 2 }
 
-    /// `offset`: pointer movement since the press along the axis, in the views' superview coordinates.
+    /// `offset`: pointer movement since the press, in the views' superview coordinates.
     func drag(_ views: [NSView], _ from: Int, by offset: CGFloat, done: Bool, commit: @escaping (Int, Int) -> Void) {
         guard views.indices.contains(from), let first = views.first, let last = views.last else { return }
         let b = views[from]
@@ -63,7 +60,7 @@ import AppKit
 
     private func shift(_ v: NSView, _ d: CGFloat, animated: Bool) {
         guard let l = v.layer else { return }
-        let t = axis == .x ? CATransform3DMakeTranslation(d, 0, 0) : CATransform3DMakeTranslation(0, d, 0)
+        let t = CATransform3DMakeTranslation(d, 0, 0)
         if animated {
             let a = CABasicAnimation(keyPath: "transform")
             a.fromValue = l.presentation()?.transform ?? l.transform
