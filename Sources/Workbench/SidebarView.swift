@@ -549,7 +549,7 @@ private final class ScratchCell: NSTableCellView {
             let r = rows[p], header = p == expanded
             if !cell.label.isEditable { cell.label.stringValue = r.name }
             cell.label.font = .systemFont(ofSize: 13, weight: header ? .semibold : .regular)
-            cell.label.textColor = r.tabs.isEmpty ? .tertiaryLabelColor : .labelColor
+            cell.label.textColor = r.tabs.isEmpty && p != selected ? .tertiaryLabelColor : .labelColor   // dim only unselected empty projects
             cell.chevron.isHidden = r.tabs.isEmpty
             cell.chevron.image = NSImage(systemSymbolName: header ? "chevron.down" : "chevron.right", accessibilityDescription: nil)
             cell.contentCenter = header ? 19 : 17
