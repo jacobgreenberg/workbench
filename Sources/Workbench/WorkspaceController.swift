@@ -833,7 +833,13 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             DispatchQueue.main.async {
                 NSApp.postEvent(ev(.leftMouseDragged, NSPoint(x: (a.x + to.x) / 2, y: a.y)), atStart: false)
                 NSApp.postEvent(ev(.leftMouseDragged, to), atStart: false)
-                NSApp.postEvent(ev(.leftMouseUp, to), atStart: false)
+                // hold: stay mid-drag for that many seconds (for screenshots); control commands can't run until release
+                nonisolated(unsafe) let up = ev(.leftMouseUp, to)
+                if let hold = msg["hold"].flatMap(Double.init) {
+                    DispatchQueue.global().asyncAfter(deadline: .now() + hold) { NSApp.postEvent(up, atStart: false) }
+                } else {
+                    NSApp.postEvent(up, atStart: false)
+                }
                 w.sendEvent(ev(.leftMouseDown, a))
             }
             return "{}"
