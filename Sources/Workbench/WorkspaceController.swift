@@ -108,7 +108,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         preview.isHidden = true
         previewTitle.font = .systemFont(ofSize: 12, weight: .medium)
         previewTitle.lineBreakMode = .byTruncatingMiddle
-        let close = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close Preview")!,
+        let close = HandButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close Preview")!,
                              target: self, action: #selector(closePreview(_:)))
         close.isBordered = false
         for v in [previewTitle, close, previewEdge] as [NSView] {
