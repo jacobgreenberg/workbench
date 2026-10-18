@@ -144,7 +144,7 @@ enum PaneStatus: Int, Comparable, Sendable { case idle = 0, busy = 1, done = 2, 
 
 // TabBarView.swift
 struct TabItem: Equatable, Sendable { let title: String; let status: PaneStatus }
-@MainActor final class TabBarView: NSView {
+@MainActor final class TabBarView: NSView {   // a toolbar item view: fixed 34 pt height, intrinsic width hugs the tabs (cap 760, tabs then shrink); system colors; selection pill slides (reduce-motion respected)
     var onSelect: ((Int) -> Void)?; var onClose: ((Int) -> Void)?; var onNew: (() -> Void)?
     var onRename: ((Int, String?) -> Void)?              // double-click a tab; nil = cancelled
     var onMove: ((Int, Int) -> Void)?                    // drag a tab: from, to (lifted tab follows the cursor, others slide aside, snaps on release; then the model follows)
@@ -157,7 +157,7 @@ struct TabItem: Equatable, Sendable { let title: String; let status: PaneStatus 
 // InlineRename (TabBarView.swift): makes a label editable in place; Return/click away commits, Esc cancels. static var isEditing (render() skips refocusing the terminal while true)
 
 // FindBar.swift
-@MainActor final class FindBar: NSView {
+@MainActor final class FindBar: NSView {   // glass capsule, NSSearchField, glass chevron/xmark buttons; fades+scales when isHidden toggles; apply(theme:) is a no-op (system colors)
     var onChange: ((String) -> Void)?; var onNext: (() -> Void)?; var onPrevious: (() -> Void)?; var onClose: (() -> Void)?
     func show(needle: String); func setCounts(total: Int, selected: Int); func apply(theme: Theme)
 }

@@ -63,6 +63,17 @@ final class HandButton: NSButton {
     }
 }
 
+@MainActor private var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+
+extension NSView {
+    /// Resolves a dynamic system color for this view's current appearance.
+    @MainActor func cg(_ c: NSColor) -> CGColor {
+        var out = c.cgColor
+        effectiveAppearance.performAsCurrentDrawingAppearance { out = c.cgColor }
+        return out
+    }
+}
+
 @MainActor private final class TabButton: NSView {
     var onSelect: (() -> Void)?
     var onClose: (() -> Void)?
@@ -70,12 +81,15 @@ final class HandButton: NSButton {
     var onDrag: ((CGFloat, Bool) -> Void)?   // x moved since mouse-down, done
     private let dot = NSView()
     private let label = NSTextField(labelWithString: "")
-    private let close = NSTextField(labelWithString: "×")
+    private let close = NSImageView(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close Tab")!)
     private var status = PaneStatus.idle
     private var width: NSLayoutConstraint!
+    var preferredWidth: CGFloat { width.constant }
     private var selected = false
     private var hovering = false
     private var theme: Theme?
+    /// While dragged, the tab paints its own selected fill (the shared selection indicator stays behind).
+    var lifted = false { didSet { refresh() } }
 
     static func width(for title: String) -> CGFloat {
         let w = (title as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 12)]).width
@@ -87,7 +101,9 @@ final class HandButton: NSButton {
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
         width = widthAnchor.constraint(equalToConstant: frame.width)
+        width.priority = .defaultHigh   // tabs give way (down to 48) when the bar runs out of room
         width.isActive = true
+        widthAnchor.constraint(greaterThanOrEqualToConstant: 48).isActive = true
         heightAnchor.constraint(equalToConstant: height).isActive = true
 
         dot.wantsLayer = true
@@ -95,8 +111,9 @@ final class HandButton: NSButton {
         label.font = .systemFont(ofSize: 12)
         label.lineBreakMode = .byTruncatingTail
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        close.font = .systemFont(ofSize: 13)
-        close.isHidden = true
+        close.symbolConfiguration = .init(pointSize: 9, weight: .bold)
+        close.contentTintColor = .secondaryLabelColor
+        close.alphaValue = 0
         layer?.cornerRadius = height / 2
         for v in [dot, label, close] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
@@ -108,7 +125,7 @@ final class HandButton: NSButton {
             dot.widthAnchor.constraint(equalToConstant: 7),
             dot.heightAnchor.constraint(equalToConstant: 7),
             label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 26),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -28),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -26),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
             close.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             close.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -122,9 +139,10 @@ final class HandButton: NSButton {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override var mouseDownCanMoveWindow: Bool { false }
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); refresh() }
 
-    /// The tab takes every click itself: the label and dot are window-draggable, so a double-click landing on them
-    /// reached the title bar (the tab bar sits in it) and minimized the window. The label gets clicks only mid-rename.
+    /// The tab takes every click itself (the toolbar would otherwise treat label/dot clicks as window drags and a
+    /// double-click as a title-bar zoom). The label gets clicks only mid-rename.
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard let hit = super.hitTest(point) else { return nil }
         return label.isEditable ? hit : self
@@ -144,12 +162,22 @@ final class HandButton: NSButton {
 
     private func refresh() {
         guard let theme else { return }
-        label.textColor = theme.color(selected ? "cardForeground" : hovering ? "foreground" : "mutedForeground")
-        close.textColor = theme.color("mutedForeground")
-        close.isHidden = !hovering
-        // A lighter pill on the glass, like native segmented tabs.
-        let fg = theme.color("foreground")
-        layer?.backgroundColor = selected ? fg.withAlphaComponent(0.14).cgColor : hovering ? fg.withAlphaComponent(0.06).cgColor : nil
+        label.textColor = selected || hovering ? .labelColor : .secondaryLabelColor
+        let fill: CGColor? = (selected && lifted) ? cg(.tertiarySystemFill) : (hovering && !selected) ? cg(.quaternarySystemFill) : nil
+        if let layer, layer.backgroundColor != fill {
+            if !reduceMotion, window != nil {
+                let a = CABasicAnimation(keyPath: "backgroundColor")
+                a.fromValue = layer.presentation()?.backgroundColor ?? layer.backgroundColor ?? cg(.clear)
+                a.toValue = fill ?? cg(.clear)
+                a.duration = 0.15
+                layer.add(a, forKey: "fill")
+            }
+            layer.backgroundColor = fill
+        }
+        let target: CGFloat = hovering ? 1 : 0
+        if close.alphaValue != target {
+            if reduceMotion { close.alphaValue = target } else { NSAnimationContext.runAnimationGroup { $0.duration = 0.15; close.animator().alphaValue = target } }
+        }
         styleStatusDot(dot, status, theme: theme)
     }
 
@@ -158,7 +186,7 @@ final class HandButton: NSButton {
 
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
-        if !close.isHidden && p.x >= close.frame.minX - 6 { onClose?() }
+        if hovering && p.x >= close.frame.minX - 6 { onClose?() }
         else if event.clickCount == 2 { InlineRename(label) { [weak self] in self?.onRename?($0) } }
         else {
             onSelect?()
@@ -172,12 +200,12 @@ final class HandButton: NSButton {
     }
 }
 
+/// A toolbar item's view: a glass capsule of tab pills plus a round glass +. Fixed height; the width hugs the tabs
+/// up to `maxWidth`, past which tabs shrink and truncate.
 @MainActor final class TabBarView: NSView {
-    /// Empty band above the tabs: it is the window's title bar (drag, double-click to minimize, traffic lights),
-    /// kept apart so double-clicking a tab can only rename it.
-    static let titleStrip: CGFloat = 28
-    static let tabHeight: CGFloat = 34   // the glass capsule row; tabs are pills inset in it
     private static let pill: CGFloat = 26
+    private static let height: CGFloat = 34   // pill + 4pt glass inset each side
+    private static let maxWidth: CGFloat = 760
 
     var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
@@ -188,7 +216,11 @@ final class HandButton: NSButton {
     private let stack = NSStackView()
     private let plus = HandButton.glass("plus", "New Tab", .large)
     private let glass = NSGlassEffectView()
+    private let indicator = NSView()   // the selected pill; one view that slides between tabs
+    private var indicatorTarget = NSRect.zero
+    private var animateNext = false
     private var buttons: [TabButton] = []
+    private var selectedIndex = -1
     private let reorder = Reorder()
 
     override init(frame: NSRect) {
@@ -197,27 +229,37 @@ final class HandButton: NSButton {
         stack.orientation = .horizontal
         stack.spacing = 2
         stack.alignment = .centerY
-        stack.distribution = .gravityAreas
+        stack.distribution = .fill
         stack.edgeInsets = NSEdgeInsets(top: 0, left: 4, bottom: 0, right: 4)
-        glass.cornerRadius = Self.pill / 2 + 4
+        glass.cornerRadius = Self.height / 2
+        indicator.wantsLayer = true
+        indicator.layer?.cornerRadius = Self.pill / 2
+        indicator.isHidden = true
         plus.target = self
         plus.action = #selector(newTapped)
         for v in [glass, stack, plus] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(v)
         }
-        // The capsule hugs the tabs; + floats beside it. Above them (titleStrip) is bare title bar.
+        setContentHuggingPriority(.required, for: .horizontal)
+        let inner = NSView()   // glass content: selection pill under the tabs
+        inner.addSubview(indicator)   // positioned by hand in layout()
+        inner.addSubview(stack)
+        glass.contentView = inner
+        addSubview(glass)
+        addSubview(plus)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
-            stack.heightAnchor.constraint(equalToConstant: Self.pill + 8),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
-            glass.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
-            glass.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
-            glass.topAnchor.constraint(equalTo: stack.topAnchor),
-            glass.bottomAnchor.constraint(equalTo: stack.bottomAnchor),
-            plus.leadingAnchor.constraint(equalTo: stack.trailingAnchor, constant: 8),
-            plus.centerYAnchor.constraint(equalTo: stack.centerYAnchor),
-            plus.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -8),
+            heightAnchor.constraint(equalToConstant: Self.height),
+            widthAnchor.constraint(lessThanOrEqualToConstant: Self.maxWidth),
+            stack.leadingAnchor.constraint(equalTo: inner.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: inner.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: inner.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: inner.bottomAnchor),
+            glass.leadingAnchor.constraint(equalTo: leadingAnchor),
+            glass.topAnchor.constraint(equalTo: topAnchor),
+            glass.bottomAnchor.constraint(equalTo: bottomAnchor),
+            plus.leadingAnchor.constraint(equalTo: glass.trailingAnchor, constant: 8),
+            plus.centerYAnchor.constraint(equalTo: centerYAnchor),
+            plus.trailingAnchor.constraint(equalTo: trailingAnchor),
         ])
     }
 
@@ -225,6 +267,10 @@ final class HandButton: NSButton {
 
     override var acceptsFirstResponder: Bool { false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        indicator.layer?.backgroundColor = cg(.tertiarySystemFill)
+    }
 
     @objc private func newTapped() { onNew?() }
 
@@ -234,6 +280,51 @@ final class HandButton: NSButton {
     }
     #endif
 
+    /// What NSToolbarItem measures: hugs the tabs (plus), capped at `maxWidth`.
+    override var intrinsicContentSize: NSSize {
+        let tabs = buttons.reduce(CGFloat(8)) { $0 + $1.preferredWidth + 2 } - (buttons.isEmpty ? 0 : 2)
+        let w = (buttons.isEmpty ? 0 : tabs + 8) + plus.fittingSize.width
+        return NSSize(width: min(w, Self.maxWidth), height: Self.height)
+    }
+
+    override func layout() {
+        super.layout()
+        placeIndicator()
+    }
+
+    /// Moves the selection pill under the selected tab (slides when the selection changed, snaps otherwise).
+    private func placeIndicator() {
+        guard buttons.indices.contains(selectedIndex), !buttons[selectedIndex].lifted else {
+            indicator.isHidden = true
+            indicatorTarget = .zero
+            return
+        }
+        let f = stack.convert(buttons[selectedIndex].frame, to: indicator.superview)
+        let animate = animateNext && !indicator.isHidden && !reduceMotion
+        animateNext = false
+        indicator.isHidden = false
+        guard f != indicatorTarget else { return }
+        indicatorTarget = f
+        indicator.layer?.backgroundColor = cg(.tertiarySystemFill)
+        if animate {
+            NSAnimationContext.runAnimationGroup { c in
+                c.duration = 0.28
+                c.timingFunction = CAMediaTimingFunction(controlPoints: 0.3, 0, 0.2, 1)
+                c.allowsImplicitAnimation = true
+                indicator.animator().frame = f
+            }
+        } else {
+            indicator.frame = f
+        }
+    }
+
+    private func endLift() {
+        guard buttons.contains(where: \.lifted) else { return }
+        buttons.forEach { $0.lifted = false }
+        indicatorTarget = .zero
+        placeIndicator()
+    }
+
     private var last: (items: [TabItem], selected: Int, theme: String)?
 
     func update(items newItems: [TabItem], selected: Int, theme: Theme) {
@@ -241,7 +332,9 @@ final class HandButton: NSButton {
         let state = (newItems, selected, theme.id)
         if let last, last == state { return }
         last = state
-        if buttons.count != newItems.count {
+        let grew = buttons.count > 0 && newItems.count == buttons.count + 1
+        let rebuilt = buttons.count != newItems.count
+        if rebuilt {
             buttons.forEach { $0.removeFromSuperview() }
             buttons = newItems.indices.map { i in
                 let b = TabButton(height: Self.pill)
@@ -252,19 +345,41 @@ final class HandButton: NSButton {
                 b.onRename = { [weak self] in self?.onRename?(index(), $0) }
                 b.onDrag = { [weak self, unowned b] dx, done in
                     guard let self, let from = buttons.firstIndex(where: { $0 === b }) else { return }
+                    if !done, !b.lifted { b.lifted = true; placeIndicator() }
                     reorder.drag(buttons, from, by: dx, done: done) { [self] from, to in
                         buttons.insert(buttons.remove(at: from), at: to)
                         stack.insertArrangedSubview(b, at: to)
                         stack.layoutSubtreeIfNeeded()
                         onMove?(from, to)
                     }
+                    if done { DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.endLift() } }
                 }
                 stack.addArrangedSubview(b)
                 return b
             }
             glass.isHidden = buttons.isEmpty
+            indicatorTarget = .zero
         }
+        animateNext = !rebuilt && selected != selectedIndex
+        selectedIndex = selected
         for (i, b) in buttons.enumerated() { b.apply(item: newItems[i], selected: i == selected, theme: theme) }
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+        layoutSubtreeIfNeeded()
+        placeIndicator()
+        if grew, !reduceMotion, let b = buttons.last, let l = b.layer {
+            // New tab: fade and scale in about its center.
+            let s: CGFloat = 0.8
+            let g = CABasicAnimation(keyPath: "transform")
+            g.fromValue = CATransform3DScale(CATransform3DMakeTranslation(b.bounds.width * (1 - s) / 2, b.bounds.height * (1 - s) / 2, 0), s, s, 1)
+            g.toValue = CATransform3DIdentity
+            let f = CABasicAnimation(keyPath: "opacity")
+            f.fromValue = 0
+            f.toValue = 1
+            for a in [g, f] { a.duration = 0.25; a.timingFunction = CAMediaTimingFunction(name: .easeOut) }
+            l.add(g, forKey: "appear")
+            l.add(f, forKey: "appearFade")
+        }
     }
 }
 
