@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 import Synchronization
 
-/// Finds the Claude Code / Codex process running in each pane, however it was started (preset, `cc2`, plain
+/// Finds the Claude Code / Codex process running in each pane, however it was started (`cc1`, `cc2`, plain
 /// `claude`), and turns it into the command that resumes it through the same launcher.
 ///
 /// A pane's processes inherit its PANE_ID, so agents are found by reading process environments; the agent is the

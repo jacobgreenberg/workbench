@@ -171,9 +171,6 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         sidebar.onSelectScratch = { [unowned self] i in scratch(atRow: i).map(selectProject) }
         sidebar.onCloseScratch = { [unowned self] i in scratch(atRow: i).map(closeScratch) }
         sidebar.onNewScratch = { [unowned self] in newScratchTerminal(nil) }
-        sidebar.onSelectTab = { [unowned self] i in selectTab(i) }
-        sidebar.onRenameTab = { [unowned self] i, name in renameTab(i, name) }
-        sidebar.onCloseTab = { [unowned self] i in closeTab(at: i) }
         tabBar.onSelect = { [unowned self] i in selectTab(i) }
         tabBar.onClose = { [unowned self] i in closeTab(at: i) }
         tabBar.onNew = { [unowned self] in newTab(nil) }
@@ -368,14 +365,14 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         sidebar.update(rows: visible.map { projects[$0] }.map { p in
             let items = tabItems(p)
             return SidebarRow(id: p.id, name: p.name, path: p.path, status: items.map(\.status).max() ?? .idle,
-                              tabs: items, selectedTab: p.activeTab)
+                              tabCount: items.count)
         }, selected: visible.firstIndex(of: store.layout.activeProject) ?? -1,
            hiddenCount: projects.count { $0.scratch != true && $0.hidden == true }, showingHidden: showingHidden, theme: theme)
         let scratches = scratchProjectIndices(projects)
-        sidebar.updateScratch(rows: scratches.map { projects[$0] }.map { p in
-            let leaves = p.tabs.flatMap { $0.root.leaves }
-            return SidebarRow(id: p.id, name: p.tabs.indices.contains(p.activeTab) ? title(of: p.tabs[p.activeTab]) : p.name,
-                              path: p.path, status: leaves.map { status[$0.id] ?? .idle }.max() ?? .idle)
+        sidebar.updateScratch(rows: scratches.enumerated().map { n, i in
+            let p = projects[i]
+            return SidebarRow(id: p.id, name: scratches.count > 1 ? "Scratch Terminal \(n + 1)" : "Scratch Terminal", path: p.path,
+                              status: tabItems(p).map(\.status).max() ?? .idle, tabCount: p.tabs.count)
         }, selected: scratches.firstIndex(of: store.layout.activeProject) ?? -1, theme: theme)
         if let p = activeProjectIndex {
             let project = projects[p]
@@ -495,7 +492,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             // Agents animate a spinner glyph at the front of their title (Claude Code: ⠋⠙⠹…, ✳ when idle).
             // The status dot already shows busy/idle, so drop it; that also stops a chrome redraw per frame.
             // A braille spinner means the agent is mid-turn: that drives the status dot for agents started any way,
-            // not only through presets with hooks. Spinner gone means the turn ended.
+            // not only through hooked launchers. Spinner gone means the turn ended.
             let spinning = raw.unicodeScalars.first.map { (0x2800...0x28FF).contains($0.value) } ?? false
             let t = Self.displayTitle(raw)
             let titleChanged = titles[id] != t
@@ -1258,13 +1255,6 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     @objc func increaseFontSize(_ sender: Any?) { focusedPane.flatMap { surfaceView(for: $0) }?.perform("increase_font_size:1") }
     @objc func decreaseFontSize(_ sender: Any?) { focusedPane.flatMap { surfaceView(for: $0) }?.perform("decrease_font_size:1") }
     @objc func resetFontSize(_ sender: Any?) { focusedPane.flatMap { surfaceView(for: $0) }?.perform("reset_font_size") }
-    @objc func launchPreset(_ sender: NSMenuItem) {
-        guard let preset = store.layout.presets.first(where: { $0.key == sender.tag }) else { return }
-        let launch = Launch(command: preset.command, scrollbackLimit: preset.scrollbackLimit)
-        let kind = PaneKind.terminal(cwd: activeProjectIndex.map { store.layout.projects[$0].path } ?? NSHomeDirectory(),
-                                     launch: launch)
-        if activeTab == nil { newTab(kind: kind) } else { split(.horizontal, kind: kind) }
-    }
     @objc func openFileDialog(_ sender: Any?) {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.text]

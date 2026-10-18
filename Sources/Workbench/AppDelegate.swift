@@ -178,10 +178,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             .separator(),
             { let t = NSMenuItem(title: "Theme", action: nil, keyEquivalent: ""); t.submenu = themeMenu; return t }(),
         ]))
-        var presetItems: [NSMenuItem] = []
-        for p in store.layout.presets where (1...9).contains(p.key) {
-            presetItems.append(item(p.name, #selector(w.launchPreset(_:)), "\(p.key)", [.control], tag: p.key))
-        }
         var projectItems: [NSMenuItem] = (1...9).map { item("Project \($0)", #selector(w.selectProjectByTag(_:)), "\($0)", tag: $0) }
         projectItems += [
             .separator(),
@@ -202,7 +198,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             item("Focus Up", #selector(w.focusUp(_:)), "k", [.command, .option]),
             item("Focus Right", #selector(w.focusRight(_:)), "l", [.command, .option]),
         ]))
-        main.addItem(menu("Agents", presetItems))
         let window = menu("Window", [
             item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"),
             NSMenuItem(title: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: ""),

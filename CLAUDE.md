@@ -34,9 +34,8 @@ extension SplitNode {
 }
 struct Tab: Codable, Identifiable, Equatable, Sendable { var id: UUID; var title: String; var root: SplitNode; var focused: PaneID?; var customTitle: String? = nil /* user rename; wins over the terminal title */ }
 struct Project: Codable, Identifiable, Equatable, Sendable { var id: UUID; var path: String; var name: String; var tabs: [Tab]; var activeTab: Int; var scratch: Bool? = nil /* ⇧⌘N scratch terminal in ~ (reused: each press adds a tab): never listed as a project, shown in the sidebar's bottom area; dropped when its last tab closes and at load */; var hidden: Bool? = nil /* off the Active list, listed under Hidden; terminals and agents keep running; nil/absent = active */ }
-struct Preset: Codable, Equatable, Sendable { var key: Int; var name: String; var command: String; var scrollbackLimit: Int? }
 struct Layout: Codable, Equatable, Sendable {
-    var projects: [Project]; var activeProject: Int /* -1 = none (the last active project was hidden) */; var sidebarVisible: Bool; var theme: String; var presets: [Preset]
+    var projects: [Project]; var activeProject: Int /* -1 = none (the last active project was hidden) */; var sidebarVisible: Bool; var theme: String
     var showHidden: Bool? = nil   // sidebar shows the Hidden list instead of Active (view state; nil = Active)
     static let `default`: Layout
 }
@@ -144,17 +143,16 @@ enum Syntax {
     static func highlights(_ text: String, key: String) -> [(range: NSRange, name: String)]?   // thread-safe; UTF-16 ranges, less specific first
 }
 
-// Model.swift sidebar helpers: visibleProjectIndices(_:hidden:) excludes scratch (so ⌘1–9, next/previous project, reorder and the Hidden count only see real projects); scratchProjectIndices(_:) -> [Int]. The sidebar table is flattened: one row per project, with the active project's tab rows right after its own row. sidebarRowKind(forTableRow:expanded:tabs:) -> SidebarRowKind? (.project(i) / .tab(project:tab:); `expanded` = that project's row in the list shown, -1 none; `tabs` its tab count), projectRow(forTableRow:expanded:tabs:) -> Int? (nil for tab rows), tableRow(forProjectRow:expanded:tabs:), tableRow(forTab:inProject:), projectInsertion(forTableRow:expanded:tabs:) (drop boundary -> project insertion index); the last four default to no expansion.
+// Model.swift sidebar helpers: visibleProjectIndices(_:hidden:) excludes scratch (so ⌘1–9, next/previous project, reorder and the Hidden count only see real projects); scratchProjectIndices(_:) -> [Int]. The sidebar table is one row per project (table row == visible project index).
 
 // SidebarView.swift
-struct SidebarRow: Equatable, Sendable { let id: UUID; let name: String; let path: String; let status: PaneStatus; var tabs: [TabItem] = []; var selectedTab = 0 }   // status = busiest pane of the project; tabs/selectedTab: all its tabs (listed only while it is the active project); the scratch list leaves them empty
+struct SidebarRow: Equatable, Sendable { let id: UUID; let name: String; let path: String; let status: PaneStatus; var tabCount = 0 }   // status = busiest pane of the project; tabCount = its tabs (shown right of the row, omitted when 0; a project with none is dimmed unless selected)
 enum PaneStatus: Int, Comparable, Sendable { case idle = 0, busy = 1, done = 2, attention = 3 }   // Comparable by rawValue
-@MainActor final class SidebarView: NSView {   // a large bold "Projects" title, the Active/Hidden GlassSegments under it, then a native .sourceList table. Single-line rows: other projects are 34 pt (right chevron, name, status dot = max of their panes, hidden when idle); the active project (selected >= 0, has tabs) is a rounded group (GlassRowView.position top/mid/bottom): header row (down chevron, semibold, no dot) + one child row per tab (status dot, title; the selected tab is the glass capsule). Zero-tab projects: tertiary label, no chevron. Selection = the active project's selected tab row (its own row if no tabs). A click on another project selects it on mouse-up; the old tab rows slide out and the new ones in as NSTableView removeRows/insertRows in begin/endUpdates (no reload, none under Reduce Motion); a status/title change restyles cells in place. Native drag-and-drop reorders PROJECTS only (tab rows are not draggable; a drop between a project's tab rows retargets to the nearer project boundary). Pinned below the list: separator, scratch terminal rows (own small source-list table), "Scratch Terminal" button
+@MainActor final class SidebarView: NSView {   // a large bold "Projects" title, the Active/Hidden GlassSegments under it, then a native .sourceList table. One 34 pt line per project (ProjectCell): name (13 pt, semibold when selected), then on the right the status dot (max of its panes, hidden when idle) and the tab count; no chevrons or tab rows. Selection = the active project (the single glass capsule). update() restyles cells in place and reloads only when the row ids change. Native drag-and-drop reorders projects. Pinned below the list: separator, scratch terminal rows (own small source-list table, same ProjectCell/row view, named "Scratch Terminal [n]", cwd as tooltip), a content-hugging "Scratch Terminal" glass button at the leading edge
     var onSelect: ((Int) -> Void)?; var onRemove: ((Int) -> Void)?         // project indices are rows of the list shown; WorkspaceController maps rows to projects (visibleProjectIndices / reorderedProjects in Model.swift)
-    var onSelectTab: ((Int) -> Void)?; var onRenameTab: ((Int, String?) -> Void)?; var onCloseTab: ((Int) -> Void)?   // tab rows of the active project: tab index (same paths as the tab bar's selectTab / renameTab / closeTab)
     var onShowHidden: ((Bool) -> Void)?                  // Active/Hidden segmented control above the list
     var onToggleHidden: ((Int) -> Void)?                 // context menu Hide Project (Active view) / Show Project (Hidden view)
-    var onRename: ((Int, String?) -> Void)?              // double-click a project row (or context menu Rename); nil = cancelled. Tab rows: onRenameTab
+    var onRename: ((Int, String?) -> Void)?              // double-click a project row (or context menu Rename); nil = cancelled
     var onMove: ((Int, Int) -> Void)?                    // drag a project: from, to (final index after removal)
     var onSelectScratch: ((Int) -> Void)?; var onCloseScratch: ((Int) -> Void)?   // indices are rows of the scratch list; right-click Close
     var onNewScratch: (() -> Void)?                      // the Scratch Terminal button (same as ⇧⌘N)
@@ -162,7 +160,7 @@ enum PaneStatus: Int, Comparable, Sendable { case idle = 0, busy = 1, done = 2, 
     func updateScratch(rows: [SidebarRow], selected: Int, theme: Theme)   // scratch terminals; selected -1 = none (a project is active)
 }   // Add Project is a toolbar item (WorkspaceController), not a sidebar button
 
-// GlassSegments.swift — `GlassSegments(labels:)`: the tab bar's toggle look as a standalone view (glass capsule + sliding tertiary-fill selection pill, same 0.28 s curve, Reduce Motion snaps); `onSelect: ((Int) -> Void)?`, `setLabel(_:at:)`, `select(_:animated:)`. Used by the sidebar's Active/Hidden switch. Sidebar rows are GlassRowView (selection = NSGlassEffectView capsule inset 6 pt (10 pt for tab rows), hover fill; no flat source-list fill).
+// GlassSegments.swift — `GlassSegments(labels:)`: the tab bar's toggle look as a standalone view (glass capsule + sliding tertiary-fill selection pill, same 0.28 s curve, Reduce Motion snaps); `onSelect: ((Int) -> Void)?`, `setLabel(_:at:)`, `select(_:animated:)`. Used by the sidebar's Active/Hidden switch. Sidebar rows are GlassRowView (selection = NSGlassEffectView capsule inset 6 pt, hover fill; no flat source-list fill).
 
 // TabBarView.swift
 struct TabItem: Equatable, Sendable { let title: String; let status: PaneStatus }
