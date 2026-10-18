@@ -507,6 +507,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         guard let (p, t) = locate(id) else { return nil }
         let tabs = store.layout.projects[p].tabs
         let move = NSMenu()
+        move.autoenablesItems = false   // "New Tab" is disabled by having no action
+        move.addItem(.sectionHeader(title: "Move to Tab"))   // the menu is just the targets: copy/paste are ⌘C/⌘V
         for (i, tab) in tabs.enumerated() where i != t {
             let item = NSMenuItem(title: title(of: tab), action: #selector(movePaneToTab(_:)), keyEquivalent: "")
             item.target = self
@@ -519,13 +521,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         new.target = self
         new.representedObject = [id]
         move.addItem(new)
-        let menu = NSMenu()
-        menu.autoenablesItems = false   // "New Tab" is disabled by having no action
-        menu.addItem(withTitle: "Copy", action: #selector(SurfaceView.copy(_:)), keyEquivalent: "").target = views[id]
-        menu.addItem(withTitle: "Paste", action: #selector(SurfaceView.paste(_:)), keyEquivalent: "").target = views[id]
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "Move to Tab", action: nil, keyEquivalent: "").submenu = move
-        return menu
+        return move
     }
 
     /// Moves a pane into another tab of its project (`target` nil: a new tab), split to the right of what is there.
@@ -847,7 +843,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             }
             return "{}"
         case "menu":     // test harness: pick a pane's "Move to Tab" entry by title
-            guard let id = pane, let move = paneMenu(id)?.item(withTitle: "Move to Tab")?.submenu,
+            guard let id = pane, let move = paneMenu(id),
                   let item = move.item(withTitle: msg["item"] ?? ""), let action = item.action else { return #"{"error":"no item"}"# }
             NSApp.sendAction(action, to: item.target, from: item)
             return "{}"

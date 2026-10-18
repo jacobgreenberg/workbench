@@ -73,7 +73,7 @@ final class SurfaceBox: Sendable { let id: PaneID; init(id: PaneID) }   // C use
     let box: SurfaceBox
     private(set) var surface: ghostty_surface_t?
     var onFocus: ((PaneID) -> Void)?                     // called from becomeFirstResponder
-    var contextMenu: ((PaneID) -> NSMenu?)?              // right-click menu (Copy, Paste, Move to Tab ▸); set by WorkspaceController
+    var contextMenu: ((PaneID) -> NSMenu?)?              // right-click menu: the "Move to Tab" targets (other tabs, New Tab); set by WorkspaceController
     static var isReservedShortcut: (NSEvent) -> Bool = { _ in false }   // set by AppDelegate; performs the matching Pane menu action and returns true, else false
     init(app: ghostty_app_t, id: PaneID, cwd: String, initialInput: String?, env: [String: String], scrollbackLimit: Int?)
     @discardableResult func setVisible(_ visible: Bool) -> Bool   // hide: occlusion(false), realized(false); show: realized(true), occlusion(true), refresh. Realize state is kept only when libghostty accepts it, so a refused one retries on the next call. True = just shown (already refreshed).
