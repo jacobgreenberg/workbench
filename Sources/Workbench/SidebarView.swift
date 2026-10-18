@@ -85,6 +85,16 @@ private final class GlassRowView: NSTableRowView {
         hover.frame = glass.frame
     }
 
+    /// A quiet resting card, so rows read as separate items without any glass; selection is the glass over it.
+    override func drawBackground(in dirtyRect: NSRect) {
+        let card = NSBezierPath(roundedRect: bounds.insetBy(dx: Self.inset, dy: 1), xRadius: 10, yRadius: 10)
+        NSColor.labelColor.withAlphaComponent(0.05).setFill()
+        card.fill()
+        NSColor.labelColor.withAlphaComponent(0.08).setStroke()
+        card.lineWidth = 0.5
+        card.stroke()
+    }
+
     override func drawSelection(in dirtyRect: NSRect) {}   // the glass is the selection
     override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }   // keep label colors on glass
 
