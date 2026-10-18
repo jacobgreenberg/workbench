@@ -247,6 +247,8 @@ func controlSelfCheck() {
     assert(d.last == 10)
     let back = try! JSONSerialization.jsonObject(with: d.dropLast()) as! [String: String]
     assert(back == msg)
+    assert(Jira.url("MER-2565")?.absoluteString == "https://kwimpos.atlassian.net/browse/MER-2565")
+    assert(Jira.url("UTF-8") == nil && Jira.url("SHA-256") == nil && Jira.url("MER-2565x") == nil && Jira.url("xMER-1") == nil)
 }
 #endif
 

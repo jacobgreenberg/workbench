@@ -2,6 +2,19 @@ import AppKit
 @preconcurrency import GhosttyKit
 import UserNotifications
 
+/// Jira tickets of the kwimpos projects active in the last 30 days (not a generic KEY-123 shape, which would hit UTF-8, SHA-256, ISO-8601).
+/// The one list: libghostty highlights the pattern on ⌘-hover (`link` override) and `openURL` maps a click to `browse`.
+enum Jira {
+    static let browse = "https://kwimpos.atlassian.net/browse/"
+    static let projects = ["IN", "OPS", "MER", "ECOM", "MPOS", "PLAT", "BOP", "WS", "STOR", "MOD", "TES", "OMS", "CS", "CRISIS", "MS",
+        "HELPDESK", "AIR", "PMI", "DS", "KIT", "BOSS", "MFA", "BIJA", "SHOP"]
+    static let pattern = "\\b(?:\(projects.joined(separator: "|")))-[0-9]+\\b"
+    /// The browse URL if `text` is exactly one ticket key, else nil.
+    static func url(_ text: String) -> URL? {
+        text.range(of: pattern, options: .regularExpression) == text.startIndex..<text.endIndex ? URL(string: browse + text) : nil
+    }
+}
+
 @MainActor
 final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDelegate {
     /// Idle cost: blink's 600 ms timer, and vsync's CVDisplayLink, which ticks at the display rate per visible
@@ -15,6 +28,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         window-padding-x = 8
         window-padding-y = 4
         window-padding-balance = true
+        link = regex:\(Jira.pattern),action:open,highlight:hover_mods
 
         """ + theme.ghosttyConfig
     }
@@ -492,6 +506,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     }
 
     private func openURL(_ url: String, from id: PaneID) {
+        if let u = Jira.url(url) { open(u); return }
         if let u = URL(string: url), u.scheme != nil { open(u); return }
         var path = (url as NSString).expandingTildeInPath
         if !path.hasPrefix("/"), let spec = spec(id), case let .terminal(cwd, _) = spec.kind {
