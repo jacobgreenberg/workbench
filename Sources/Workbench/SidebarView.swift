@@ -154,11 +154,6 @@ private final class SidebarCell: NSTableCellView {
         styleStatusDot(cell.dot, r.status, theme: theme)
     }
 
-    #if DEBUG
-    func rowCenter(_ i: Int) -> NSPoint? {
-        rows.indices.contains(i) ? table.convert(NSPoint(x: table.rect(ofRow: i).midX, y: table.rect(ofRow: i).midY), to: nil) : nil
-    }
-    #endif
 
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 

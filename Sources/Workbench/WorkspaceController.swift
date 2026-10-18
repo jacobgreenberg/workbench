@@ -902,17 +902,16 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                 w.sendEvent(ev(.leftMouseDown, from))
             }
             return "{}"
-        case "tabdrag":  // test harness: drag tab (or with in=sidebar, project) `from` onto `to`'s position
-            let center = msg["in"] == "sidebar" ? sidebar.rowCenter : tabBar.tabCenter
-            guard let a = msg["from"].flatMap(Int.init).flatMap(center), let b = msg["to"].flatMap(Int.init).flatMap(center),
+        case "tabdrag":  // test harness: drag tab `from` onto tab `to`'s position
+            guard let a = msg["from"].flatMap(Int.init).flatMap(tabBar.tabCenter), let b = msg["to"].flatMap(Int.init).flatMap(tabBar.tabCenter),
                   let w = tabBar.window else { return #"{"error":"no tab"}"# }
             func ev(_ t: NSEvent.EventType, _ p: NSPoint) -> NSEvent {
                 NSEvent.mouseEvent(with: t, location: p, modifierFlags: [], timestamp: 0, windowNumber: w.windowNumber,
                                    context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
             }
-            let to = NSPoint(x: b.x + (b.x - a.x).sign(10), y: b.y + (b.y - a.y).sign(6))
+            let to = NSPoint(x: b.x + (b.x > a.x ? 10 : -10), y: b.y)
             DispatchQueue.main.async {
-                NSApp.postEvent(ev(.leftMouseDragged, NSPoint(x: (a.x + to.x) / 2, y: (a.y + to.y) / 2)), atStart: false)
+                NSApp.postEvent(ev(.leftMouseDragged, NSPoint(x: (a.x + to.x) / 2, y: a.y)), atStart: false)
                 NSApp.postEvent(ev(.leftMouseDragged, to), atStart: false)
                 // hold: stay mid-drag for that many seconds (for screenshots); control commands can't run until release
                 nonisolated(unsafe) let up = ev(.leftMouseUp, to)
@@ -1063,10 +1062,6 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         if let id = sender.representedObject as? String { applyTheme(id) }
     }
 }
-
-#if DEBUG
-private extension CGFloat { func sign(_ m: CGFloat) -> CGFloat { self > 0 ? m : self < 0 ? -m : 0 } }
-#endif
 
 extension SplitNode {
     func withRatios(from other: SplitNode) -> SplitNode {
