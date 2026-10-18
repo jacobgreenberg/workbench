@@ -72,7 +72,8 @@ private final class ProjectCell: NSTableCellView {
 private final class GlassRowView: NSTableRowView {
     private let glass = NSGlassEffectView()
     private let hover = NSView()
-    private static let inset: CGFloat = 6
+    private static let inset: CGFloat = 8
+    private static let gap: CGFloat = 3   // half the space between cards: rows fill their full height, so spacing is drawn here
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -90,8 +91,15 @@ private final class GlassRowView: NSTableRowView {
 
     override func layout() {
         super.layout()
-        glass.frame = bounds.insetBy(dx: Self.inset, dy: 1)
+        glass.frame = bounds.insetBy(dx: Self.inset, dy: Self.gap)
         hover.frame = glass.frame
+    }
+
+    /// Each row rests on its own soft rounded card, so they read as separate items; selection is the glass over it.
+    override func drawBackground(in dirtyRect: NSRect) {
+        guard !isSelected else { return }   // the glass replaces the card; no edge peeking out
+        NSColor.labelColor.withAlphaComponent(0.07).setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: Self.inset, dy: Self.gap), xRadius: 10, yRadius: 10).fill()
     }
 
     override func drawSelection(in dirtyRect: NSRect) {}   // the glass is the selection
@@ -101,6 +109,7 @@ private final class GlassRowView: NSTableRowView {
         didSet {
             guard isSelected != oldValue else { return }
             hover.isHidden = true
+            needsDisplay = true
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.15
                 glass.animator().alphaValue = isSelected ? 1 : 0
@@ -126,10 +135,12 @@ private final class FlatRowView: NSTableRowView {
     override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }
 }
 
-/// The scratch terminals under the project list: a small source-list table (native selection look) that hugs its rows.
+/// The scratch terminals under the project list: one "Scratch Terminal" row that is also the button. With none open,
+/// clicking it makes one; otherwise it selects it. A flat table (no glass) that hugs its rows.
 @MainActor private final class ScratchList: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
+    var onNew: (() -> Void)?
     let scroll = NSScrollView()
     private let table = SidebarTable()
     private let height: NSLayoutConstraint
@@ -175,21 +186,27 @@ private final class FlatRowView: NSTableRowView {
         self.rows = rows
         self.selected = selected
         self.theme = theme
-        height.constant = CGFloat(min(rows.count, Self.maxRows)) * (Self.rowHeight + Self.spacing)
+        height.constant = CGFloat(min(max(rows.count, 1), Self.maxRows)) * (Self.rowHeight + Self.spacing)
         if changed { table.reloadData() }
         syncing = true
         if selected >= 0, selected < rows.count { table.selectRowIndexes([selected], byExtendingSelection: false) } else { table.deselectAll(nil) }
         syncing = false
-        for r in 0..<rows.count {
+        for r in 0..<max(rows.count, 1) {
             if let cell = table.view(atColumn: 0, row: r, makeIfNecessary: false) as? ProjectCell { style(cell, row: r) }
         }
     }
 
+    private static let placeholder = SidebarRow(id: UUID(), name: "Scratch Terminal", path: "New scratch terminal (⇧⌘N)", status: .idle)
+
     private func style(_ cell: ProjectCell, row: Int) {
-        if let theme, rows.indices.contains(row) { cell.style(rows[row], selected: row == selected, theme: theme) }
+        guard let theme else { return }
+        if rows.indices.contains(row) { cell.style(rows[row], selected: row == selected, theme: theme); return }
+        cell.style(Self.placeholder, selected: false, theme: theme)   // none open: the same row, not dimmed
+        cell.label.textColor = .labelColor
+        cell.icon.contentTintColor = .secondaryLabelColor
     }
 
-    func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+    func numberOfRows(in tableView: NSTableView) -> Int { max(rows.count, 1) }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { FlatRowView() }
 
@@ -202,7 +219,7 @@ private final class FlatRowView: NSTableRowView {
     func tableViewSelectionDidChange(_ notification: Notification) {
         let r = table.selectedRow
         guard !syncing, r >= 0, r != selected else { return }
-        onSelect?(r)
+        if rows.isEmpty { table.deselectAll(nil); onNew?() } else { onSelect?(r) }
     }
 }
 
@@ -245,8 +262,8 @@ private final class FlatRowView: NSTableRowView {
         table.headerView = nil
         table.style = .sourceList
         table.floatsGroupRows = false
-        table.rowHeight = 36
-        table.intercellSpacing = NSSize(width: 0, height: 4)
+        table.rowHeight = 38
+        table.intercellSpacing = .zero
         table.selectionHighlightStyle = .regular
         table.allowsEmptySelection = true
         table.draggingDestinationFeedbackStyle = .gap
@@ -268,17 +285,8 @@ private final class FlatRowView: NSTableRowView {
 
         let separator = NSBox()
         separator.boxType = .separator
-        let newScratch = NSButton(title: "Scratch Terminal", image: NSImage(systemSymbolName: "plus", accessibilityDescription: "New Scratch Terminal")!,
-                                  target: self, action: #selector(newScratchTapped))
-        newScratch.bezelStyle = .glass   // a glass capsule hugging its content
-        newScratch.borderShape = .capsule
-        newScratch.controlSize = .large
-        newScratch.imagePosition = .imageLeading
-        newScratch.imageHugsTitle = true
-        newScratch.font = .systemFont(ofSize: 13, weight: .medium)
-        newScratch.refusesFirstResponder = true
-        newScratch.toolTip = "New Scratch Terminal (⇧⌘N)"
         scratchList.onSelect = { [unowned self] i in onSelectScratch?(i) }
+        scratchList.onNew = { [unowned self] in onNewScratch?() }
         scratchList.onClose = { [unowned self] i in onCloseScratch?(i) }
 
         let title = NSTextField(labelWithString: "Projects")   // a large title, like Mail's or Notes' sidebar
@@ -287,7 +295,7 @@ private final class FlatRowView: NSTableRowView {
         title.setAccessibilityRole(.staticText)
         title.setAccessibilityLabel("Projects")
 
-        for v in [title, scroll, filter, separator, scratchList.scroll, newScratch] as [NSView] {
+        for v in [title, scroll, filter, separator, scratchList.scroll] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
@@ -307,16 +315,12 @@ private final class FlatRowView: NSTableRowView {
             separator.bottomAnchor.constraint(equalTo: scratchList.scroll.topAnchor, constant: -6),
             scratchList.scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scratchList.scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scratchList.scroll.bottomAnchor.constraint(equalTo: newScratch.topAnchor, constant: -6),
-            newScratch.centerXAnchor.constraint(equalTo: centerXAnchor),
-            newScratch.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+            scratchList.scroll.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
         ])
     }
 
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    @objc private func newScratchTapped() { onNewScratch?() }
 
     // MARK: Menu and clicks
 
