@@ -11,6 +11,7 @@ APP=build.noindex/Workbench.app   # .noindex: Spotlight/launchers list only the 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/ghostty"
 cp .build/release/Workbench "$APP/Contents/MacOS/Workbench"
+cp -R .build/release/TreeSitter*.bundle "$APP/Contents/Resources/"   # grammar highlight queries (Syntax.swift)
 mkdir -p "$APP/Contents/Helpers"; ln -s ../MacOS/Workbench "$APP/Contents/Helpers/pane"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp -R Resources/themes "$APP/Contents/Resources/themes"

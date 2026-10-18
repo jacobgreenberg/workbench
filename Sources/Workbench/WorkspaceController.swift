@@ -188,8 +188,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             s.onFocus = { [unowned self] id in paneFocused(id) }
             s.contextMenu = { [unowned self] id in paneMenu(id) }
             v = s
-        case let .markdown(path):
-            let m = MarkdownPaneView(id: spec.id, path: path, theme: theme)
+        case let .file(path):
+            let m = FilePaneView(id: spec.id, path: path, theme: theme)
             m.onOpenLink = { [unowned self, id = spec.id] url in open(url, from: id) }
             v = m
         }
@@ -298,7 +298,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             }, selected: project.activeTab, theme: theme)
             tree.updateHeaders(focused: focusedPane, theme: theme) { [titles] id in
                 if let t = titles[id] { return t }
-                if case let .markdown(path)? = spec(id)?.kind { return (path as NSString).lastPathComponent }
+                if case let .file(path)? = spec(id)?.kind { return (path as NSString).lastPathComponent }
                 return "Terminal"
             }
         } else {
@@ -336,7 +336,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         content.layer?.backgroundColor = theme.color("background").cgColor
         emptyLabel.textColor = theme.color("mutedForeground")
         findBar.apply(theme: theme)
-        for v in views.values { (v as? MarkdownPaneView)?.apply(theme: theme) }
+        for v in views.values { (v as? FilePaneView)?.apply(theme: theme) }
     }
 
     // MARK: - Focus & status
@@ -467,8 +467,12 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private func open(_ url: URL, from id: PaneID) {
         if url.isFileURL {
             let file = url.resolvingSymlinksInPath()
-            if ["md", "markdown"].contains(file.pathExtension.lowercased()) { openMarkdown(file.path, from: id); return }
             let v = try? file.resourceValues(forKeys: [.contentTypeKey, .isDirectoryKey, .isPackageKey])
+            if v?.isDirectory != true, ["md", "markdown"].contains(file.pathExtension.lowercased()) || Syntax.key(for: file.path) != nil
+                || v?.contentType.map({ $0.conforms(to: .text) }) == true {
+                openFile(file.path, from: id)
+                return
+            }
             let passive = v?.contentType.map {
                 ($0.conforms(to: .text) || $0.conforms(to: .image) || $0.conforms(to: .pdf))
                     && !$0.conforms(to: .script) && !$0.conforms(to: .propertyList)
@@ -584,7 +588,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
 
     private func destroy(_ id: PaneID) {
         if let s = views[id] as? SurfaceView { s.close() }
-        if let m = views[id] as? MarkdownPaneView { m.close() }
+        if let m = views[id] as? FilePaneView { m.close() }
         views[id]?.removeFromSuperview()
         views[id] = nil
         status[id] = nil
@@ -678,8 +682,19 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         store.layout.activeProject = max(0, min(active, store.layout.projects.count - 1))
     }
 
-    func openMarkdown(_ path: String, from source: PaneID?) {
-        split(.horizontal, kind: .markdown(path: path), from: source)
+    /// Shows `path` beside `source`. A tab has one file pane: a later open replaces its file instead of splitting again.
+    func openFile(_ path: String, from source: PaneID?) {
+        guard let source, let (p, t) = locate(source),
+              let old = store.layout.projects[p].tabs[t].root.leaves.first(where: { if case .file = $0.kind { true } else { false } })
+        else { return split(.horizontal, kind: .file(path: path), from: source) }
+        if old.kind != .file(path: path) {
+            destroy(old.id)
+            let new = PaneSpec(id: UUID(), kind: .file(path: path))
+            store.layout.projects[p].tabs[t].root = store.layout.projects[p].tabs[t].root.replacing(old.id, with: .leaf(new))
+            if store.layout.projects[p].tabs[t].focused == old.id { store.layout.projects[p].tabs[t].focused = new.id }
+            store.changed()
+        }
+        render()
     }
 
     /// Something would be lost by quitting: a process other than an idle shell, or an agent mid-turn.
@@ -750,7 +765,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                 for tab in project.tabs {
                     for leaf in tab.root.leaves {
                         var kind = "terminal"
-                        if case .markdown = leaf.kind { kind = "markdown" }
+                        if case .file = leaf.kind { kind = "file" }
                         rows.append(["pane": leaf.id.uuidString, "project": project.name, "kind": kind,
                                      "title": tab.customTitle ?? titles[leaf.id] ?? tab.title,
                                      "status": "\(status[leaf.id] ?? .idle)"])
@@ -780,7 +795,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             return "{}"
         case "open":
             guard let path = msg["path"] else { return #"{"error":"no path"}"# }
-            openMarkdown(path, from: pane.flatMap { locate($0) != nil ? $0 : nil })
+            openFile(path, from: pane.flatMap { locate($0) != nil ? $0 : nil })
             return "{}"
         #if DEBUG
         case "action":   // test harness: run a menu action, e.g. "newTab:", without needing keyboard focus
@@ -976,11 +991,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                                      launch: launch)
         if activeTab == nil { newTab(kind: kind) } else { split(.horizontal, kind: kind) }
     }
-    @objc func openMarkdownFile(_ sender: Any?) {
+    @objc func openFileDialog(_ sender: Any?) {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.init(filenameExtension: "md")!, .plainText]
+        panel.allowedContentTypes = [.text]
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        openMarkdown(url.path, from: focusedPane)
+        openFile(url.path, from: focusedPane)
     }
     @objc func selectTheme(_ sender: NSMenuItem) {
         if let id = sender.representedObject as? String { applyTheme(id) }

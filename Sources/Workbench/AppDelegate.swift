@@ -124,7 +124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             item("Split Down", #selector(w.splitDown(_:)), "d", [.command, .shift]),
             .separator(),
             item("Add Project…", #selector(w.addProject(_:)), "o", [.command, .shift]),
-            item("Open Markdown…", #selector(w.openMarkdownFile(_:)), "o", [.command, .option]),
+            item("Open File…", #selector(w.openFileDialog(_:)), "o", [.command, .option]),
             .separator(),
             item("Close Pane", #selector(w.closePane(_:)), "w"),
             item("Close Tab", #selector(w.closeTab(_:)), "w", [.command, .shift]),

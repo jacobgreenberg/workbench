@@ -64,6 +64,12 @@ extension Theme {
         return NSColor(srgbRed: c.r / 255, green: c.g / 255, blue: c.b / 255, alpha: c.a)
     }
 
+    /// terminal[key] (the ANSI palette: "red", "brightBlack", ...); the UI foreground if missing.
+    func terminalColor(_ key: String) -> NSColor {
+        guard let s = terminal[key], let c = Theme.parse(s) else { return color("foreground") }
+        return NSColor(srgbRed: c.r / 255, green: c.g / 255, blue: c.b / 255, alpha: c.a)
+    }
+
     private static func hex(_ c: RGBA) -> String {
         func b(_ x: Double) -> Int { max(0, min(255, Int(x.rounded()))) }
         return String(format: "#%02x%02x%02x", b(c.r), b(c.g), b(c.b))

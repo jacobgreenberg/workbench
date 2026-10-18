@@ -9,7 +9,9 @@ struct Launch: Codable, Equatable, Sendable {
 
 enum PaneKind: Codable, Equatable, Sendable {
     case terminal(cwd: String, launch: Launch?)
-    case markdown(path: String)
+    case file(path: String)   // markdown preview, or highlighted code
+
+    private enum CodingKeys: String, CodingKey { case terminal, file = "markdown" }   // saved layouts predate code files
 }
 
 struct PaneSpec: Codable, Equatable, Sendable {
@@ -229,10 +231,24 @@ func modelSelfCheck() {
     defer { try? FileManager.default.removeItem(at: dir) }
     let md = dir.appendingPathComponent("a.md"), empty = dir.appendingPathComponent("e.md"), fifo = dir.appendingPathComponent("f.md")
     try! Data("# hi".utf8).write(to: md); try! Data().write(to: empty); mkfifo(fifo.path, 0o600)
-    assert(MarkdownPaneView.load(md.path) == "# hi" && MarkdownPaneView.load(empty.path) == "")
-    assert(MarkdownPaneView.load(fifo.path).hasPrefix("Cannot preview"))   // must not block
+    assert(FilePaneView.load(md.path) == "# hi" && FilePaneView.load(empty.path) == "")
+    assert(FilePaneView.load(fifo.path).hasPrefix("Cannot preview"))   // must not block
 
-    func leaf() -> PaneSpec { PaneSpec(id: UUID(), kind: .markdown(path: "/x")) }
+    // Every grammar's query compiles (queries come from resource bundles beside the binary), and highlights land.
+    for ext in ["ex", "exs", "heex", "py", "js", "jsx", "ts", "tsx", "go", "rs", "rb", "java", "c", "cpp", "cs", "json", "sh",
+                "html", "css", "swift", "yaml", "toml", "lua", "kt", "dockerfile"] {
+        assert(Syntax.highlights("x", key: ext) != nil, "no highlight query for .\(ext)")
+    }
+    let ex = "defmodule A do\n  def f, do: \"s\"\nend\n"
+    let spans = Syntax.highlights(ex, key: "ex") ?? []
+    assert(spans.contains { $0.name.hasPrefix("keyword") && $0.range == NSRange(location: 0, length: 9) })
+    assert(spans.contains { $0.name.hasPrefix("string") })
+    assert(Syntax.key(for: "/a/Dockerfile") == "dockerfile" && Syntax.key(for: "/a/b.EXS") == "exs" && Syntax.key(for: "/a/b.zzz") == nil)
+    assert(Syntax.key(fence: "elixir") == "ex" && Syntax.key(fence: "ts title=x") == "ts")
+    let oldKind = #"{"markdown":{"path":"/m.md"}}"#   // layouts saved before code files
+    assert(try! JSONDecoder().decode(PaneKind.self, from: Data(oldKind.utf8)) == .file(path: "/m.md"))
+
+    func leaf() -> PaneSpec { PaneSpec(id: UUID(), kind: .file(path: "/x")) }
     let p1 = leaf(), p2 = leaf(), p3 = leaf()
     let tree = SplitNode.split(axis: .horizontal, ratio: 0.3, a: .leaf(p1),
                                b: .split(axis: .vertical, ratio: 0.7, a: .leaf(p2), b: .leaf(p3)))
@@ -254,8 +270,8 @@ func modelSelfCheck() {
     assert(tree.moving(p1.id, to: p3.id, .up) == .split(axis: .vertical, ratio: 0.7, a: .leaf(p2),
                                                          b: .split(axis: .vertical, ratio: 0.5, a: .leaf(p1), b: .leaf(p3))))
     assert(tree.moving(p1.id, to: p1.id, .left) == tree && tree.moving(p1.id, to: UUID(), .left) == tree)
-    let mapped = tree.mapLeaves { $0.kind = .markdown(path: "/y") }
-    assert(mapped.leaves.map(\.id) == tree.leaves.map(\.id) && mapped.leaves.allSatisfy { $0.kind == .markdown(path: "/y") })
+    let mapped = tree.mapLeaves { $0.kind = .file(path: "/y") }
+    assert(mapped.leaves.map(\.id) == tree.leaves.map(\.id) && mapped.leaves.allSatisfy { $0.kind == .file(path: "/y") })
     let old = #"{"command":"c","resume":"r {id}","agent":"claude","sessionID":"S"}"#
     assert(try! JSONDecoder().decode(Launch.self, from: Data(old.utf8)) == Launch(command: "c", scrollbackLimit: nil))
     let layout = Layout(

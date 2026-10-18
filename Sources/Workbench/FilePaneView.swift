@@ -13,23 +13,62 @@ private struct RGBA: Sendable {
 
 private struct Palette: Sendable {
     let body, heading, codeBackground, link, inlineCode, muted, border, background: RGBA
+    let syntax: [(prefix: String, color: RGBA)]
     init(_ t: Theme) {
         body = RGBA(t.color("foreground")); heading = RGBA(t.color("cardForeground"))
         codeBackground = RGBA(t.color("popover")); link = RGBA(t.color("primary"))
         inlineCode = RGBA(t.color("chart4")); muted = RGBA(t.color("mutedForeground"))
         border = RGBA(t.color("border")); background = RGBA(t.color("background"))
+        // Capture names → the theme's ANSI palette, so code reads like agents' diffs in the terminal. First match wins,
+        // so more specific prefixes come first.
+        syntax = [
+            ("comment", "brightBlack"), ("string.escape", "cyan"), ("string.regex", "cyan"), ("string.special", "cyan"),
+            ("escape", "cyan"), ("string", "green"), ("character", "green"), ("keyword", "magenta"),
+            ("conditional", "magenta"), ("repeat", "magenta"), ("include", "magenta"), ("import", "magenta"),
+            ("exception", "magenta"), ("preproc", "magenta"), ("function", "blue"), ("method", "blue"),
+            ("constructor", "yellow"), ("type", "yellow"), ("module", "yellow"), ("namespace", "yellow"),
+            ("attribute", "yellow"), ("tag", "red"), ("number", "red"), ("float", "red"), ("boolean", "red"),
+            ("constant", "red"), ("variable.builtin", "red"), ("label", "cyan"), ("property", "cyan"),
+            ("field", "cyan"), ("operator", "cyan"), ("punctuation", "white"),
+        ].map { ($0.0, RGBA(t.terminalColor($0.1))) }
+    }
+
+    func color(capture: String) -> RGBA? {
+        syntax.first { capture == $0.prefix || capture.hasPrefix($0.prefix + ".") }?.color
+    }
+}
+
+/// Colors `text` (already in `out` at `offset`) by its tree-sitter highlights; later, more specific captures win.
+private func highlight(_ out: NSMutableAttributedString, at offset: Int, _ text: String, key: String, _ p: Palette) {
+    guard text.utf16.count <= 2 << 20, let spans = Syntax.highlights(text, key: key) else { return }   // ponytail: big files stay plain
+    for s in spans {
+        guard let c = p.color(capture: s.name), NSMaxRange(s.range) <= text.utf16.count else { continue }
+        out.addAttribute(.foregroundColor, value: c.ns, range: NSRange(location: offset + s.range.location, length: s.range.length))
     }
 }
 
 private struct Renderer: Sendable {
-    let markdown: String
-    let baseDir: URL
+    let text: String
+    let path: String
     let palette: Palette
 
+    /// Markdown is previewed; anything else is shown as code, highlighted when its language is known.
     func render() -> NSAttributedString {
-        var w = Walker(palette: palette, baseDir: baseDir)
-        w.visit(Document(parsing: markdown))
-        return w.out
+        let url = URL(fileURLWithPath: path)
+        guard !["md", "markdown"].contains(url.pathExtension.lowercased()) else {
+            var w = Walker(palette: palette, baseDir: url.deletingLastPathComponent())
+            w.visit(Document(parsing: text))
+            return w.out
+        }
+        let style = NSMutableParagraphStyle()
+        style.lineSpacing = 2
+        let out = NSMutableAttributedString(string: text, attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular),
+            .foregroundColor: palette.body.ns,
+            .paragraphStyle: style,
+        ])
+        if let key = Syntax.key(for: path) { highlight(out, at: 0, text, key: key, palette) }
+        return out
     }
 
     struct Walker: MarkupWalker {
@@ -98,12 +137,15 @@ private struct Renderer: Sendable {
             let s = NSMutableParagraphStyle()
             s.lineSpacing = 2; s.paragraphSpacing = 0
             s.headIndent = 12; s.firstLineHeadIndent = 12; s.tailIndent = -12
-            add(c.code.trimmingCharacters(in: .newlines) + "\n", [
+            let code = c.code.trimmingCharacters(in: .newlines)
+            let start = out.length
+            add(code + "\n", [
                 .font: NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular),
                 .foregroundColor: p.body.ns,
                 .backgroundColor: p.codeBackground.ns,
                 .paragraphStyle: s,
             ])
+            if let key = c.language.flatMap(Syntax.key(fence:)) { highlight(out, at: start, code, key: key, p) }
             add("\n", [.font: NSFont.systemFont(ofSize: 6)])
         }
 
@@ -153,7 +195,7 @@ private struct Renderer: Sendable {
     }
 }
 
-@MainActor final class MarkdownPaneView: NSView, NSTextViewDelegate {
+@MainActor final class FilePaneView: NSView, NSTextViewDelegate {
     let paneID: PaneID
     private let path: String
     private var palette: Palette
@@ -169,7 +211,7 @@ private struct Renderer: Sendable {
     private var fileInode: ino_t = 0
     private var pending: DispatchWorkItem?
     var onOpenLink: ((URL) -> Void)?
-    private let renderQueue = DispatchQueue(label: "pane.markdown", qos: .userInitiated)   // one render in flight per pane
+    private let renderQueue = DispatchQueue(label: "pane.file", qos: .userInitiated)   // one render in flight per pane
 
     init(id: PaneID, path: String, theme: Theme) {
         paneID = id
@@ -224,8 +266,7 @@ private struct Renderer: Sendable {
             guard latest.value.load(ordering: .relaxed) == gen else { return }
             let text = Self.load(path)
             guard latest.value.load(ordering: .relaxed) == gen else { return }
-            let dir = URL(fileURLWithPath: path).deletingLastPathComponent()
-            let result = Renderer(markdown: text, baseDir: dir, palette: palette).render()
+            let result = Renderer(text: text, path: path, palette: palette).render()
             guard latest.value.load(ordering: .relaxed) == gen else { return }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {

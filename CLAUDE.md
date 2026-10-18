@@ -15,7 +15,7 @@ struct Launch: Codable, Equatable, Sendable {
     var command: String          // typed into the shell as initial input; rewritten at quit to the running agent's resume command
     var scrollbackLimit: Int?    // bytes; nil = global default
 }
-enum PaneKind: Codable, Equatable, Sendable { case terminal(cwd: String, launch: Launch?), markdown(path: String) }
+enum PaneKind: Codable, Equatable, Sendable { case terminal(cwd: String, launch: Launch?), file(path: String) }   // file: markdown preview or highlighted code; coded as "markdown" for old layouts
 struct PaneSpec: Codable, Equatable, Sendable { var id: PaneID; var kind: PaneKind }
 enum Axis: String, Codable, Sendable { case horizontal /* a | b, ⌘D */, vertical /* a over b, ⇧⌘D */ }
 indirect enum SplitNode: Codable, Equatable, Sendable {
@@ -98,6 +98,7 @@ extension Theme {
     static func all() -> [Theme]                         // read once per run: Bundle.main.resourceURL/themes/*.json, then Store.directory/themes/*.json overriding by id; sorted by name
     static func named(_ id: String) -> Theme             // falls back to "oceanic-v2", then first
     func color(_ key: String) -> NSColor                  // ui[key] (hex #RRGGBB or rgba(r, g, b, a)); magenta if missing
+    func terminalColor(_ key: String) -> NSColor          // terminal[key] (ANSI palette); ui foreground if missing
     var ghosttyConfig: String                             // newline-separated ghostty config lines for terminal colors + split-divider-color
 }
 
@@ -121,8 +122,15 @@ enum FocusDirection: Sendable { case left, right, up, down }
     func neighbor(of id: PaneID, _ direction: FocusDirection) -> PaneID?
 }
 
-// MarkdownPaneView.swift
-@MainActor final class MarkdownPaneView: NSView { let paneID: PaneID; init(id: PaneID, path: String, theme: Theme); func apply(theme: Theme); func close() }
+// FilePaneView.swift — .md previewed, other files as monospace code highlighted via Syntax; reloads on file change
+@MainActor final class FilePaneView: NSView { let paneID: PaneID; init(id: PaneID, path: String, theme: Theme); func apply(theme: Theme); func close() }
+
+// Syntax.swift — tree-sitter grammars (SwiftPM packages; queries read from their resource bundles in Contents/Resources)
+enum Syntax {
+    static func key(for path: String) -> String?          // grammar key by extension (or file name, e.g. dockerfile); nil = unknown
+    static func key(fence: String) -> String?             // markdown code fence info string → grammar key
+    static func highlights(_ text: String, key: String) -> [(range: NSRange, name: String)]?   // thread-safe; UTF-16 ranges, less specific first
+}
 
 // SidebarView.swift
 struct SidebarRow: Equatable, Sendable { let name: String; let path: String; let status: PaneStatus }
