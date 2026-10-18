@@ -385,8 +385,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             }, selected: project.activeTab, theme: theme)
             tree.updateHeaders(focused: focusedPane, theme: theme, status: { [status] in status[$0] ?? .idle }) { [titles] id in
                 if let t = titles[id] { return t }
-                if case let .file(path)? = spec(id)?.kind { return (path as NSString).lastPathComponent }
-                return "Terminal"
+                switch spec(id)?.kind {
+                case let .file(path)?: return (path as NSString).lastPathComponent
+                case let .terminal(cwd, _)?: return Self.folderTitle(cwd)
+                case nil: return ""
+                }
             }
         } else {
             tabBar.update(items: [], selected: 0, theme: theme)
@@ -490,7 +493,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             // A braille spinner means the agent is mid-turn: that drives the status dot for agents started any way,
             // not only through presets with hooks. Spinner gone means the turn ended.
             let spinning = raw.unicodeScalars.first.map { (0x2800...0x28FF).contains($0.value) } ?? false
-            let t = Self.stripStatusGlyphs(raw)
+            let t = Self.displayTitle(raw)
             let titleChanged = titles[id] != t
             titles[id] = t
             // One chrome update per event: setStatus does it when the state flips.
@@ -731,7 +734,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             store.layout.projects[p].tabs[i].focused = spec.id
             store.layout.projects[p].activeTab = i
         } else {
-            store.layout.projects[p].tabs.append(Tab(id: UUID(), title: "Terminal", root: .leaf(spec), focused: spec.id))
+            store.layout.projects[p].tabs.append(Tab(id: UUID(), title: Self.title(of: spec), root: .leaf(spec), focused: spec.id))
             store.layout.projects[p].activeTab = store.layout.projects[p].tabs.count - 1
         }
         activate(p)
@@ -748,7 +751,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private func newTab(kind: PaneKind? = nil) {
         guard let p = activeProjectIndex else { addProject(nil); return }
         let spec = PaneSpec(id: UUID(), kind: kind ?? .terminal(cwd: store.layout.projects[p].path, launch: nil))
-        store.layout.projects[p].tabs.append(Tab(id: UUID(), title: "Terminal", root: .leaf(spec), focused: spec.id))
+        store.layout.projects[p].tabs.append(Tab(id: UUID(), title: Self.title(of: spec), root: .leaf(spec), focused: spec.id))
         store.layout.projects[p].activeTab = store.layout.projects[p].tabs.count - 1
         store.changed()
         render()
@@ -1198,7 +1201,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         if let i = store.layout.projects.firstIndex(where: { $0.path == url.path && $0.scratch != true }) { selectProject(i); return }
         let spec = PaneSpec(id: UUID(), kind: .terminal(cwd: url.path, launch: nil))
         store.layout.projects.append(Project(id: UUID(), path: url.path, name: url.lastPathComponent,
-                                             tabs: [Tab(id: UUID(), title: "Terminal", root: .leaf(spec), focused: spec.id)],
+                                             tabs: [Tab(id: UUID(), title: Self.title(of: spec), root: .leaf(spec), focused: spec.id)],
                                              activeTab: 0))
         activate(store.layout.projects.count - 1)   // also leaves the Hidden list
         store.changed()
@@ -1281,10 +1284,32 @@ extension SplitNode {
 }
 
 extension WorkspaceController {
-    nonisolated static func stripStatusGlyphs(_ title: String) -> String {
-        String(String.UnicodeScalarView(title.unicodeScalars.drop {
+    /// A terminal title as tabs and headers show it. Agent spinner/status glyphs are dropped (the status dot shows
+    /// them), and a shell prompt's title (`user@host:~/dir`, or a bare path) becomes the folder name: the same text a
+    /// new tab starts with, so a tab doesn't change width when its shell comes up.
+    nonisolated static func displayTitle(_ raw: String) -> String {
+        let t = String(String.UnicodeScalarView(raw.unicodeScalars.drop {
             $0.properties.generalCategory == .otherSymbol || $0 == "·" || $0.properties.isWhitespace
         }))
+        var path = Substring(t)
+        if let colon = t.firstIndex(of: ":"), let at = t.firstIndex(of: "@"), at < colon, !t[..<colon].contains(" ") {
+            path = t[t.index(after: colon)...]
+        }
+        guard path.hasPrefix("/") || path.hasPrefix("~"), !path.contains(" ") else { return t }
+        return folderTitle(String(path))
+    }
+
+    /// What a new tab is called before its pane reports a title.
+    nonisolated static func title(of spec: PaneSpec) -> String {
+        switch spec.kind {
+        case let .terminal(cwd, _): folderTitle(cwd)
+        case let .file(path): (path as NSString).lastPathComponent
+        }
+    }
+
+    nonisolated static func folderTitle(_ path: String) -> String {
+        let p = (path as NSString).expandingTildeInPath
+        return p == NSHomeDirectory() ? "~" : (p as NSString).lastPathComponent
     }
 }
 
