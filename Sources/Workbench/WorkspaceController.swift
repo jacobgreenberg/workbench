@@ -4,9 +4,12 @@ import UserNotifications
 
 @MainActor
 final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDelegate {
+    /// Idle cost: blink's 600 ms timer, and vsync's CVDisplayLink, which ticks at the display rate per visible
+    /// surface even with nothing to draw (~300 → ~40 wakeups/s idle with it off; same CPU under heavy output).
     static func overrides(_ theme: Theme) -> String {
         """
         cursor-style-blink = false
+        window-vsync = false
         scrollback-limit = 10000000
         unfocused-split-opacity = 1
         window-padding-x = 8
