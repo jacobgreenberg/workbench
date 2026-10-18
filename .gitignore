@@ -5,3 +5,4 @@ vendor/ghostty-src/
 build/
 *.app
 build.noindex/
+.claude/worktrees/
