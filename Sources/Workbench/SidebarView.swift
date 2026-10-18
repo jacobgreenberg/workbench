@@ -332,7 +332,7 @@ private final class FlatRowView: NSTableRowView {
             addSubview(v)
         }
         NSLayoutConstraint.activate([
-            rail.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 6),   // below the toolbar
+            rail.topAnchor.constraint(equalTo: topAnchor),   // full height; its icons clear the toolbar themselves
             rail.bottomAnchor.constraint(equalTo: bottomAnchor),
             rail.leadingAnchor.constraint(equalTo: leadingAnchor),
             content.leadingAnchor.constraint(equalTo: rail.trailingAnchor),
