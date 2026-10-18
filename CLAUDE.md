@@ -96,12 +96,22 @@ enum GhosttyInput {
 // Theme.swift
 struct Theme: Decodable, Sendable { let id: String; let name: String; let type: String; let ui: [String: String]; let terminal: [String: String] }
 extension Theme {
-    static func all() -> [Theme]                         // read once per run: Bundle.main.resourceURL/themes/*.json, then Store.directory/themes/*.json overriding by id; sorted by name
-    static func named(_ id: String) -> Theme             // falls back to "oceanic-v2", then first
+    @MainActor static func all() -> [Theme]              // cached until reload(): system-dark/system-light ("Dark"/"Light", built in code: Terminal.app "Basic" colors, accents from system colors resolved under their fixed appearance), then Bundle.main.resourceURL/themes/*.json (bundled, read-only), then Store.directory/themes/*.json (user) overriding by id; sorted by name
+    @MainActor static func reload()                      // rescan; Theme.userFiles[id] = file of the editable (user) themes
+    @MainActor static func named(_ id: String) -> Theme  // falls back to "oceanic-v2", then first
+    var isSystem: Bool; var appearance: NSAppearance?    // system-* ids; window appearance from `type` ("light" → .aqua, else .darkAqua), applied in paintTheme
+    static let requiredUI: [String]; static let requiredTerminal: [String]   // every key the app reads; a custom theme must provide all
+    func template(id:name:) -> String                    // complete theme JSON seeded with this theme's colors
+    static func validate(_ text: String) -> Result<Theme, Invalid>   // JSON parses, id filename-safe (not system-*), name, type dark|light, required keys, every color parses; Invalid.message is user-facing
+    @MainActor static func save(_ t: Theme, text: String) throws -> URL   // atomic write to Store.directory/themes/<id>.json
     func color(_ key: String) -> NSColor                  // ui[key] (hex #RRGGBB or rgba(r, g, b, a)); magenta if missing
     func terminalColor(_ key: String) -> NSColor          // terminal[key] (ANSI palette); ui foreground if missing
     var ghosttyConfig: String                             // newline-separated ghostty config lines for terminal colors + split-divider-color
 }
+
+// Notification.Name.themeChanged — posted by WorkspaceController.applyTheme (and so after any list change); the Theme menu (AppDelegate.rebuildThemeMenu: Dark, Light, separator, custom, current checked) and Settings refresh on it.
+
+// SettingsWindow.swift — ⌘, ("Settings…" in the app menu): SettingsWindowController, a window with an NSTabViewController (.toolbar tab style; add panes as NSTabViewItems). "Themes" pane: Dark/Light cards (NSButton), Custom Themes list (radio per theme; user ones get Edit…/Delete with confirmation), "Add Custom Theme…". Add/Edit is a sheet with a monospace JSON editor prefilled by Theme.template (or the file); Save runs Theme.validate, shows the error inline, else Theme.save → Theme.reload → applyTheme. Selecting applies live via WorkspaceController.applyTheme.
 
 // Agents.swift — agent processes found by inherited PANE_ID; launcher (cc1/cc2/gpt1…) recovered from the user's zsh functions
 enum Agents {
