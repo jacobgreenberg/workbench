@@ -17,7 +17,8 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
     static var isReservedShortcut: (NSEvent) -> Bool = { _ in false }
 
     private var markedText = NSMutableAttributedString()
-    private(set) var focused: Bool = false
+    private(set) var focused: Bool = false   // first responder
+    private var ghosttyFocused = false        // what libghostty was told: focused in the key window
     private var prevPressureStage: Int = 0
     private var keyTextAccumulator: [String]?
     private var lastPerformKeyEvent: TimeInterval?
@@ -92,6 +93,9 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
             return
         }
         self.surface = created
+        // libghostty starts surfaces focused; a focused surface runs a 600 ms cursor-blink timer (even with blink off)
+        // and a 200 ms termios poll, so only the first responder in the key window is told it is focused.
+        ghostty_surface_set_focus(created, false)
 
         updateTrackingAreas()
     }
@@ -201,7 +205,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         guard let surface, !closed else { return }
         guard self.focused != focused else { return }
         self.focused = focused
-        ghostty_surface_set_focus(surface, focused)
+        syncFocus()
         // ⌘-key releases never reach keyUp (AppKit eats them), so the focused surface watches for them; only the
         // focused one, so a keystroke costs one monitor call however many panes exist.
         if focused, eventMonitor == nil {
@@ -215,6 +219,15 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
             NSEvent.removeMonitor(m)
             eventMonitor = nil
         }
+    }
+
+    /// Called on focus changes and when the window gains or loses key (WorkspaceController).
+    func syncFocus() {
+        guard let surface, !closed else { return }
+        let f = focused && window?.isKeyWindow == true
+        guard f != ghosttyFocused else { return }
+        ghosttyFocused = f
+        ghostty_surface_set_focus(surface, f)
     }
 
     /// layout() and setFrameSize both fire per resize step; only a changed pixel size reaches Ghostty.
@@ -279,6 +292,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
             MainActor.assumeIsolated { self?.windowDidChangeScreen() }
         }
         windowDidChangeScreen()
+        syncFocus()
     }
 
     private func windowDidChangeScreen() {

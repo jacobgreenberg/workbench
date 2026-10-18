@@ -861,6 +861,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     // MARK: - NSWindowDelegate
 
     func windowDidChangeOcclusionState(_ notification: Notification) { syncVisibility() }
+    func windowDidBecomeKey(_ notification: Notification) { (window?.firstResponder as? SurfaceView)?.syncFocus() }
+    func windowDidResignKey(_ notification: Notification) { (window?.firstResponder as? SurfaceView)?.syncFocus() }
 
     /// Single-window app: closing the window is quitting, so it goes through the quit confirmation
     /// instead of leaving a running app with no window.
