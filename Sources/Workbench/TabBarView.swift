@@ -148,7 +148,7 @@ extension NSView {
         return label.isEditable ? hit : self
     }
 
-    /// Updates in place; buttons are only rebuilt when the tab count changes.
+    /// Updates in place.
     func apply(item: TabItem, selected: Bool, theme: Theme) {
         if label.stringValue != item.title, !label.isEditable {
             label.stringValue = item.title
@@ -216,9 +216,8 @@ extension NSView {
     private let stack = NSStackView()
     private let plus = HandButton.glass("plus", "New Tab", .large)
     private let glass = NSGlassEffectView()
-    private let indicator = NSView()   // the selected pill; one view that slides between tabs
-    private var indicatorTarget = NSRect.zero
-    private var animateNext = false
+    private let indicator = NSView()   // the selected pill; one view, pinned to the selected tab, slides between tabs
+    private var indicatorPins: [NSLayoutConstraint] = []
     private var buttons: [TabButton] = []
     private var selectedIndex = -1
     private let reorder = Reorder()
@@ -235,6 +234,7 @@ extension NSView {
         indicator.wantsLayer = true
         indicator.layer?.cornerRadius = Self.pill / 2
         indicator.isHidden = true
+        indicator.translatesAutoresizingMaskIntoConstraints = false
         plus.target = self
         plus.action = #selector(newTapped)
         for v in [glass, stack, plus] as [NSView] {
@@ -242,7 +242,7 @@ extension NSView {
         }
         setContentHuggingPriority(.required, for: .horizontal)
         let inner = NSView()   // glass content: selection pill under the tabs
-        inner.addSubview(indicator)   // positioned by hand in layout()
+        inner.addSubview(indicator)
         inner.addSubview(stack)
         glass.contentView = inner
         addSubview(glass)
@@ -287,42 +287,53 @@ extension NSView {
         return NSSize(width: min(w, Self.maxWidth), height: Self.height)
     }
 
-    override func layout() {
-        super.layout()
-        placeIndicator()
-    }
-
-    /// Moves the selection pill under the selected tab (slides when the selection changed, snaps otherwise).
-    private func placeIndicator() {
-        guard buttons.indices.contains(selectedIndex), !buttons[selectedIndex].lifted else {
-            indicator.isHidden = true
-            indicatorTarget = .zero
-            return
-        }
-        let f = stack.convert(buttons[selectedIndex].frame, to: indicator.superview)
-        let animate = animateNext && !indicator.isHidden && !reduceMotion
-        animateNext = false
+    /// Pins the pill to the selected tab, so layout keeps it there; a selection change slides it.
+    private func placeIndicator(animated: Bool) {
+        NSLayoutConstraint.deactivate(indicatorPins)
+        indicatorPins = []
+        guard buttons.indices.contains(selectedIndex), !buttons[selectedIndex].lifted else { indicator.isHidden = true; return }
+        let b = buttons[selectedIndex]
+        indicatorPins = [indicator.leadingAnchor.constraint(equalTo: b.leadingAnchor),
+                         indicator.trailingAnchor.constraint(equalTo: b.trailingAnchor),
+                         indicator.topAnchor.constraint(equalTo: b.topAnchor),
+                         indicator.bottomAnchor.constraint(equalTo: b.bottomAnchor)]
+        NSLayoutConstraint.activate(indicatorPins)
+        let slide = animated && !indicator.isHidden && !reduceMotion
         indicator.isHidden = false
-        guard f != indicatorTarget else { return }
-        indicatorTarget = f
-        indicator.layer?.backgroundColor = cg(.tertiarySystemFill)
-        if animate {
-            NSAnimationContext.runAnimationGroup { c in
-                c.duration = 0.28
-                c.timingFunction = CAMediaTimingFunction(controlPoints: 0.3, 0, 0.2, 1)
-                c.allowsImplicitAnimation = true
-                indicator.animator().frame = f
-            }
-        } else {
-            indicator.frame = f
+        guard slide, let inner = indicator.superview else { return }
+        NSAnimationContext.runAnimationGroup { c in
+            c.duration = 0.28
+            c.timingFunction = CAMediaTimingFunction(controlPoints: 0.3, 0, 0.2, 1)
+            c.allowsImplicitAnimation = true
+            inner.layoutSubtreeIfNeeded()
         }
     }
 
     private func endLift() {
         guard buttons.contains(where: \.lifted) else { return }
         buttons.forEach { $0.lifted = false }
-        indicatorTarget = .zero
-        placeIndicator()
+        placeIndicator(animated: false)
+    }
+
+    private func makeButton() -> TabButton {
+        let b = TabButton(height: Self.pill)
+        // Looked up at call time: dragging reorders the buttons.
+        let index = { [unowned self, unowned b] in buttons.firstIndex { $0 === b } ?? 0 }
+        b.onSelect = { [weak self] in self?.onSelect?(index()) }
+        b.onClose = { [weak self] in self?.onClose?(index()) }
+        b.onRename = { [weak self] in self?.onRename?(index(), $0) }
+        b.onDrag = { [weak self, unowned b] dx, done in
+            guard let self, let from = buttons.firstIndex(where: { $0 === b }) else { return }
+            if !done, !b.lifted { b.lifted = true; placeIndicator(animated: false) }
+            reorder.drag(buttons, from, by: dx, done: done) { [self] from, to in
+                buttons.insert(buttons.remove(at: from), at: to)
+                stack.insertArrangedSubview(b, at: to)
+                stack.layoutSubtreeIfNeeded()
+                onMove?(from, to)
+            }
+            if done { DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.endLift() } }
+        }
+        return b
     }
 
     private var last: (items: [TabItem], selected: Int, theme: String)?
@@ -331,55 +342,17 @@ extension NSView {
         // Called on every title/status event of any pane; most change nothing visible here.
         let state = (newItems, selected, theme.id)
         if let last, last == state { return }
+        let sameTabs = last?.items.map(\.title) == newItems.map(\.title)   // a project switch snaps, a tab click slides
         last = state
-        let grew = buttons.count > 0 && newItems.count == buttons.count + 1
-        let rebuilt = buttons.count != newItems.count
-        if rebuilt {
-            buttons.forEach { $0.removeFromSuperview() }
-            buttons = newItems.indices.map { i in
-                let b = TabButton(height: Self.pill)
-                // Looked up at call time: dragging reorders the buttons.
-                let index = { [unowned self, unowned b] in buttons.firstIndex { $0 === b } ?? i }
-                b.onSelect = { [weak self] in self?.onSelect?(index()) }
-                b.onClose = { [weak self] in self?.onClose?(index()) }
-                b.onRename = { [weak self] in self?.onRename?(index(), $0) }
-                b.onDrag = { [weak self, unowned b] dx, done in
-                    guard let self, let from = buttons.firstIndex(where: { $0 === b }) else { return }
-                    if !done, !b.lifted { b.lifted = true; placeIndicator() }
-                    reorder.drag(buttons, from, by: dx, done: done) { [self] from, to in
-                        buttons.insert(buttons.remove(at: from), at: to)
-                        stack.insertArrangedSubview(b, at: to)
-                        stack.layoutSubtreeIfNeeded()
-                        onMove?(from, to)
-                    }
-                    if done { DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.endLift() } }
-                }
-                stack.addArrangedSubview(b)
-                return b
-            }
-            glass.isHidden = buttons.isEmpty
-            indicatorTarget = .zero
-        }
-        animateNext = !rebuilt && selected != selectedIndex
+        // Add or drop only the difference: the remaining tabs keep their views, so nothing flashes.
+        while buttons.count < newItems.count { let b = makeButton(); buttons.append(b); stack.addArrangedSubview(b) }
+        while buttons.count > newItems.count { buttons.removeLast().removeFromSuperview() }
+        glass.isHidden = buttons.isEmpty
+        let moved = sameTabs && selected != selectedIndex
         selectedIndex = selected
         for (i, b) in buttons.enumerated() { b.apply(item: newItems[i], selected: i == selected, theme: theme) }
         invalidateIntrinsicContentSize()
-        needsLayout = true
-        layoutSubtreeIfNeeded()
-        placeIndicator()
-        if grew, !reduceMotion, let b = buttons.last, let l = b.layer {
-            // New tab: fade and scale in about its center.
-            let s: CGFloat = 0.8
-            let g = CABasicAnimation(keyPath: "transform")
-            g.fromValue = CATransform3DScale(CATransform3DMakeTranslation(b.bounds.width * (1 - s) / 2, b.bounds.height * (1 - s) / 2, 0), s, s, 1)
-            g.toValue = CATransform3DIdentity
-            let f = CABasicAnimation(keyPath: "opacity")
-            f.fromValue = 0
-            f.toValue = 1
-            for a in [g, f] { a.duration = 0.25; a.timingFunction = CAMediaTimingFunction(name: .easeOut) }
-            l.add(g, forKey: "appear")
-            l.add(f, forKey: "appearFade")
-        }
+        placeIndicator(animated: moved)
     }
 }
 

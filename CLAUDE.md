@@ -133,7 +133,7 @@ enum Syntax {
 }
 
 // SidebarView.swift
-struct SidebarRow: Equatable, Sendable { let name: String; let path: String; let status: PaneStatus }
+struct SidebarRow: Equatable, Sendable { let name: String; let path: String; let status: PaneStatus; let terminals: Int; let agents: Int }   // agents: terminals whose launch is set (an agent runs there)
 enum PaneStatus: Int, Comparable, Sendable { case idle = 0, busy = 1, done = 2, attention = 3 }   // Comparable by rawValue
 @MainActor final class SidebarView: NSView {   // native .sourceList table: selection = active project, native drag-and-drop reorder
     var onSelect: ((Int) -> Void)?; var onAdd: (() -> Void)?; var onRemove: ((Int) -> Void)?

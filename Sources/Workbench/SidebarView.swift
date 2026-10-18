@@ -1,6 +1,6 @@
 import AppKit
 
-struct SidebarRow: Equatable, Sendable { let name: String; let path: String; let status: PaneStatus }
+struct SidebarRow: Equatable, Sendable { let name: String; let path: String; let status: PaneStatus; let terminals: Int; let agents: Int }
 
 enum PaneStatus: Int, Comparable, Sendable {
     case idle = 0, busy = 1, done = 2, attention = 3
@@ -11,29 +11,33 @@ private final class SidebarTable: NSTableView {
     override var acceptsFirstResponder: Bool { false }
 }
 
+/// Two lines: the project name, and what is open in it (terminals, running agents).
 private final class SidebarCell: NSTableCellView {
     let label = NSTextField(labelWithString: "")
-    let icon = NSImageView()
+    let detail = NSTextField(labelWithString: "")
     let dot = NSView()
 
     override init(frame: NSRect) {
         super.init(frame: frame)
+        label.font = .systemFont(ofSize: 13, weight: .medium)
         label.lineBreakMode = .byTruncatingTail
+        detail.font = .systemFont(ofSize: 11)
+        detail.textColor = .secondaryLabelColor
         dot.wantsLayer = true
         dot.layer?.cornerRadius = 3.5
         textField = label
-        imageView = icon
-        for v in [icon, label, dot] as [NSView] {
+        for v in [label, detail, dot] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor),
-            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
-            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
-            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            label.bottomAnchor.constraint(equalTo: centerYAnchor, constant: 1),
             label.trailingAnchor.constraint(lessThanOrEqualTo: dot.leadingAnchor, constant: -8),
-            dot.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            detail.leadingAnchor.constraint(equalTo: label.leadingAnchor),
+            detail.topAnchor.constraint(equalTo: centerYAnchor, constant: 2),
+            detail.trailingAnchor.constraint(lessThanOrEqualTo: dot.leadingAnchor, constant: -8),
+            dot.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             dot.centerYAnchor.constraint(equalTo: centerYAnchor),
             dot.widthAnchor.constraint(equalToConstant: 7),
             dot.heightAnchor.constraint(equalToConstant: 7),
@@ -70,6 +74,8 @@ private final class SidebarCell: NSTableCellView {
         table.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("c")))
         table.headerView = nil
         table.style = .sourceList
+        table.rowHeight = 46
+        table.intercellSpacing = NSSize(width: 0, height: 4)
         table.selectionHighlightStyle = .regular
         table.allowsEmptySelection = true
         table.draggingDestinationFeedbackStyle = .gap
@@ -149,11 +155,29 @@ private final class SidebarCell: NSTableCellView {
         guard let theme, row < rows.count else { return }
         let r = rows[row]
         if !cell.label.isEditable { cell.label.stringValue = r.name }
-        cell.icon.image = NSImage(systemSymbolName: row == selected ? "folder.fill" : "folder", accessibilityDescription: nil)
+        cell.detail.attributedStringValue = Self.detail(r)
         cell.toolTip = r.path
         styleStatusDot(cell.dot, r.status, theme: theme)
     }
 
+
+    /// "􀩼 3  􀆿 2": open terminals, then running agents (Claude/Codex); the agent count only when there is one.
+    private static func detail(_ r: SidebarRow) -> NSAttributedString {
+        let s = NSMutableAttributedString()
+        func add(_ symbol: String, _ n: Int, _ label: String) {
+            let a = NSTextAttachment()
+            a.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)?
+                .withSymbolConfiguration(.init(pointSize: 10, weight: .medium))
+            if s.length > 0 { s.append(NSAttributedString(string: "   ")) }
+            s.append(NSAttributedString(attachment: a))
+            s.append(NSAttributedString(string: " \(n)"))
+        }
+        add("terminal", r.terminals, "terminals")
+        if r.agents > 0 { add("sparkle", r.agents, "agents") }
+        s.addAttributes([.foregroundColor: NSColor.secondaryLabelColor, .font: NSFont.systemFont(ofSize: 11)],
+                        range: NSRange(location: 0, length: s.length))
+        return s
+    }
 
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 

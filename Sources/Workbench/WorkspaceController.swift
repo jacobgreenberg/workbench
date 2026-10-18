@@ -335,8 +335,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private func updateChrome() {
         let projects = store.layout.projects
         sidebar.update(rows: projects.map { p in
-            SidebarRow(name: p.name, path: p.path,
-                       status: p.tabs.flatMap { $0.root.leaves }.map { status[$0.id] ?? .idle }.max() ?? .idle)
+            let leaves = p.tabs.flatMap { $0.root.leaves }
+            // A terminal's launch is set exactly while an agent runs in it (apply(_:) keeps it current).
+            return SidebarRow(name: p.name, path: p.path, status: leaves.map { status[$0.id] ?? .idle }.max() ?? .idle,
+                              terminals: leaves.count { if case .terminal = $0.kind { true } else { false } },
+                              agents: leaves.count { if case .terminal(_, _?) = $0.kind { true } else { false } })
         }, selected: store.layout.activeProject, theme: theme)
         if let p = activeProjectIndex {
             let project = projects[p]
@@ -471,6 +474,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             } else if status[id] == .busy {
                 setStatus(id, .idle)   // agent exited without a Stop hook
             }
+            scheduleCapture()   // a command ended: maybe an agent exited (its count leaves the sidebar)
         case let .openURL(url):
             openURL(url, from: id)
         case .closeRequested:
@@ -809,6 +813,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         guard layout != store.layout else { return }
         store.layout = layout
         store.changed()
+        updateChrome()   // the sidebar's agent counts
     }
 
     // MARK: - Control socket
