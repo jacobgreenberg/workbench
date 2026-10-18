@@ -47,7 +47,16 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private let sidebar = SidebarView(frame: .zero)
     private let tabBar = TabBarView(frame: .zero)
     private let content = NSView()
-    private let findBar = FindBar(frame: .zero)
+    /// Toolbar search (⌘F): collapses to a magnifier, expands with the native morph. Drives libghostty's search on `findPane`.
+    private lazy var searchItem: NSSearchToolbarItem = {
+        let item = NSSearchToolbarItem(itemIdentifier: .search)
+        let f = FindField(frame: .zero)
+        f.delegate = self
+        item.searchField = f
+        item.preferredWidthForSearchField = 260
+        return item
+    }()
+    private var findField: FindField { searchItem.searchField as! FindField }
     private let emptyLabel = NSTextField(labelWithString: "")
     private lazy var tree = SplitTreeView { [unowned self] spec in self.view(for: spec) }
     /// Native split: glass sidebar (projects) | terminals | inspector (the file ⌘-clicked last). AppKit owns the
@@ -98,7 +107,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
 
         let main = NSView()
         main.wantsLayer = true
-        for v in [content, findBar, emptyLabel] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false }
+        for v in [content, emptyLabel] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false }
         main.addSubview(content)
         content.wantsLayer = true
         tree.frame = content.bounds
@@ -108,8 +117,6 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         emptyLabel.textColor = .secondaryLabelColor
         emptyLabel.alignment = .center
         content.addSubview(emptyLabel)
-        findBar.isHidden = true
-        content.addSubview(findBar)
 
         previewTitle.font = .systemFont(ofSize: 12, weight: .medium)
         previewTitle.textColor = .secondaryLabelColor
@@ -124,8 +131,6 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             content.bottomAnchor.constraint(equalTo: main.bottomAnchor),
             emptyLabel.centerXAnchor.constraint(equalTo: content.centerXAnchor),
             emptyLabel.centerYAnchor.constraint(equalTo: content.centerYAnchor),
-            findBar.topAnchor.constraint(equalTo: content.topAnchor, constant: 8),
-            findBar.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
             previewTitle.topAnchor.constraint(equalTo: preview.safeAreaLayoutGuide.topAnchor, constant: 6),
             previewTitle.leadingAnchor.constraint(equalTo: preview.leadingAnchor, constant: 16),
             previewTitle.trailingAnchor.constraint(lessThanOrEqualTo: preview.trailingAnchor, constant: -16),
@@ -173,10 +178,6 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             render()
         }
         tree.onHeaderClick = { [unowned self] id in focus(id) }
-        findBar.onChange = { [unowned self] text in findSurface?.perform("search:\(text)") }
-        findBar.onNext = { [unowned self] in findSurface?.perform("navigate_search:next") }
-        findBar.onPrevious = { [unowned self] in findSurface?.perform("navigate_search:previous") }
-        findBar.onClose = { [unowned self] in findSurface?.perform("end_search"); hideFind() }
     }
 
     // MARK: - Model access
@@ -280,11 +281,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     }
 
     private func render() {
-        if let f = findPane, !(activeTab?.root.contains(f) ?? false) {
-            findSurface?.perform("end_search")
-            findBar.isHidden = true
-            findPane = nil
-        }
+        if let f = findPane, !(activeTab?.root.contains(f) ?? false) { endFind(refocus: false) }
         var rebuilt = false
         if let tab = activeTab {
             tree.isHidden = false
@@ -385,7 +382,6 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private func paintTheme() {
         window?.backgroundColor = theme.color("background")
         content.layer?.backgroundColor = theme.color("background").cgColor
-        findBar.apply(theme: theme)
         for v in views.values { (v as? FilePaneView)?.apply(theme: theme) }
         previewFile?.apply(theme: theme)
     }
@@ -393,6 +389,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     // MARK: - Focus & status
 
     private func paneFocused(_ id: PaneID) {
+        if let f = findPane, f != id { endFind(refocus: false) }
         if let (p, t) = locate(id), store.layout.projects[p].tabs[t].focused != id {
             store.layout.projects[p].tabs[t].focused = id
             store.changed()
@@ -480,28 +477,35 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         case .closeRequested:
             closePane(id, confirm: false)
         case let .startSearch(needle):
+            if let old = findPane, old != id { surfaceView(for: old)?.perform("end_search") }
             findPane = id
             searchCounts = (-1, -1)
-            findBar.isHidden = false
-            findBar.setCounts(total: -1, selected: -1)
-            findBar.show(needle: needle)
+            findField.setCounts(total: -1, selected: -1)
+            findField.stringValue = needle
+            searchItem.beginSearchInteraction()
+            findField.selectText(nil)
         case .endSearch:
-            hideFind()
+            if findPane == id { endFind(send: false) }
         case let .searchTotal(n):
             searchCounts.total = n
-            findBar.setCounts(total: searchCounts.total, selected: searchCounts.selected)
+            findField.setCounts(total: searchCounts.total, selected: searchCounts.selected)
         case let .searchSelected(n):
             searchCounts.selected = n
-            findBar.setCounts(total: searchCounts.total, selected: searchCounts.selected)
+            findField.setCounts(total: searchCounts.total, selected: searchCounts.selected)
         }
     }
 
     private var findSurface: SurfaceView? { findPane.flatMap { surfaceView(for: $0) } }
 
-    private func hideFind() {
-        findBar.isHidden = true
-        if let v = findSurface { window?.makeFirstResponder(v) }
+    /// Ends the search: libghostty (`send`), the toolbar field (cleared, collapsed), and keyboard focus back to the terminal (`refocus`).
+    private func endFind(send: Bool = true, refocus: Bool = true) {
+        let v = findSurface
         findPane = nil
+        if send { v?.perform("end_search") }
+        findField.stringValue = ""
+        findField.setCounts(total: -1, selected: -1)
+        searchItem.endSearchInteraction()
+        if refocus, let v { window?.makeFirstResponder(v) }
     }
 
     private func openURL(_ url: String, from id: PaneID) {
@@ -646,7 +650,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         views[id] = nil
         status[id] = nil
         titles[id] = nil
-        if findPane == id { hideFind() }
+        if findPane == id { endFind(send: false, refocus: false) }
     }
 
     // Close paths resolve their target by id only after any confirm dialog: the modal run loop keeps
@@ -1046,7 +1050,13 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         focus(leaves[(i + d + leaves.count) % leaves.count])
     }
     @objc func clearScreen(_ sender: Any?) { focusedPane.flatMap { surfaceView(for: $0) }?.perform("clear_screen") }
-    @objc func find(_ sender: Any?) { focusedPane.flatMap { surfaceView(for: $0) }?.perform("start_search") }
+    @objc func find(_ sender: Any?) {
+        guard let v = focusedPane.flatMap({ surfaceView(for: $0) }) else { return }
+        searchItem.beginSearchInteraction()
+        v.perform("start_search")
+    }
+    @objc func findNext(_ sender: Any?) { findSurface?.perform("navigate_search:next") }
+    @objc func findPrevious(_ sender: Any?) { findSurface?.perform("navigate_search:previous") }
     @objc func increaseFontSize(_ sender: Any?) { focusedPane.flatMap { surfaceView(for: $0) }?.perform("increase_font_size:1") }
     @objc func decreaseFontSize(_ sender: Any?) { focusedPane.flatMap { surfaceView(for: $0) }?.perform("decrease_font_size:1") }
     @objc func resetFontSize(_ sender: Any?) { focusedPane.flatMap { surfaceView(for: $0) }?.perform("reset_font_size") }
@@ -1089,20 +1099,42 @@ extension WorkspaceController {
 
 extension NSToolbarItem.Identifier {
     static let tabs = NSToolbarItem.Identifier("tabs")
+    static let search = NSToolbarItem.Identifier("search")
 }
 
 /// Unified toolbar: sidebar toggle over the sidebar, the tab capsule over the terminals, inspector toggle over the preview.
 extension WorkspaceController: NSToolbarDelegate {
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .sidebarTrackingSeparator, .tabs, .flexibleSpace, .inspectorTrackingSeparator, .flexibleSpace, .toggleInspector]
+        [.toggleSidebar, .sidebarTrackingSeparator, .tabs, .flexibleSpace, .search, .inspectorTrackingSeparator, .flexibleSpace, .toggleInspector]
     }
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(toolbar) }
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier, willBeInsertedIntoToolbar: Bool) -> NSToolbarItem? {
+        if id == .search { return searchItem }
         guard id == .tabs else { return nil }
         let item = NSToolbarItem(itemIdentifier: id)
         item.view = tabBar
         item.isBordered = false   // the tab bar draws its own glass capsule
         item.visibilityPriority = .high
         return item
+    }
+}
+
+/// Typing searches, Return / ⇧Return step through matches, Esc or the cancel button ends the search.
+extension WorkspaceController: NSSearchFieldDelegate {
+    func controlTextDidChange(_ obj: Notification) { findSurface?.perform("search:\(findField.stringValue)") }
+    func controlTextDidEndEditing(_ obj: Notification) {
+        if findPane != nil, findField.stringValue.isEmpty { endFind() }   // collapsed while empty
+    }
+    func searchFieldDidEndSearching(_ sender: NSSearchField) { if findPane != nil { endFind() } }   // cancel button
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
+        switch sel {
+        case #selector(NSResponder.insertNewline(_:)):
+            if NSApp.currentEvent?.modifierFlags.contains(.shift) == true { findPrevious(nil) } else { findNext(nil) }
+        case #selector(NSResponder.cancelOperation(_:)):
+            endFind()
+        default:
+            return false
+        }
+        return true
     }
 }
