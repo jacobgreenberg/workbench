@@ -171,6 +171,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         sidebar.onSelectScratch = { [unowned self] i in scratch(atRow: i).map(selectProject) }
         sidebar.onCloseScratch = { [unowned self] i in scratch(atRow: i).map(closeScratch) }
         sidebar.onNewScratch = { [unowned self] in newScratchTerminal(nil) }
+        sidebar.onSelectTab = { [unowned self] i in selectTab(i) }
+        sidebar.onRenameTab = { [unowned self] i, name in renameTab(i, name) }
+        sidebar.onCloseTab = { [unowned self] i in closeTab(at: i) }
         tabBar.onSelect = { [unowned self] i in selectTab(i) }
         tabBar.onClose = { [unowned self] i in closeTab(at: i) }
         tabBar.onNew = { [unowned self] in newTab(nil) }
@@ -363,26 +366,20 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         let projects = store.layout.projects
         let visible = visibleProjects
         sidebar.update(rows: visible.map { projects[$0] }.map { p in
-            let leaves = p.tabs.flatMap { $0.root.leaves }
-            // A terminal's launch is set exactly while an agent runs in it (apply(_:) keeps it current).
-            return SidebarRow(name: p.name, path: p.path, status: leaves.map { status[$0.id] ?? .idle }.max() ?? .idle,
-                              terminals: leaves.count { if case .terminal = $0.kind { true } else { false } },
-                              agents: leaves.count { if case .terminal(_, _?) = $0.kind { true } else { false } })
+            let items = tabItems(p)
+            return SidebarRow(id: p.id, name: p.name, path: p.path, status: items.map(\.status).max() ?? .idle,
+                              tabs: items, selectedTab: p.activeTab)
         }, selected: visible.firstIndex(of: store.layout.activeProject) ?? -1,
            hiddenCount: projects.count { $0.scratch != true && $0.hidden == true }, showingHidden: showingHidden, theme: theme)
         let scratches = scratchProjectIndices(projects)
         sidebar.updateScratch(rows: scratches.map { projects[$0] }.map { p in
             let leaves = p.tabs.flatMap { $0.root.leaves }
-            return SidebarRow(name: p.tabs.indices.contains(p.activeTab) ? title(of: p.tabs[p.activeTab]) : p.name,
-                              path: p.path, status: leaves.map { status[$0.id] ?? .idle }.max() ?? .idle,
-                              terminals: leaves.count, agents: 0)
+            return SidebarRow(id: p.id, name: p.tabs.indices.contains(p.activeTab) ? title(of: p.tabs[p.activeTab]) : p.name,
+                              path: p.path, status: leaves.map { status[$0.id] ?? .idle }.max() ?? .idle)
         }, selected: scratches.firstIndex(of: store.layout.activeProject) ?? -1, theme: theme)
         if let p = activeProjectIndex {
             let project = projects[p]
-            tabBar.update(items: project.tabs.map { tab in
-                TabItem(title: title(of: tab),
-                               status: tab.root.leaves.map { status[$0.id] ?? .idle }.max() ?? .idle)
-            }, selected: project.activeTab, theme: theme)
+            tabBar.update(items: tabItems(project), selected: project.activeTab, theme: theme)
             tree.updateHeaders(focused: focusedPane, theme: theme, status: { [status] in status[$0] ?? .idle }) { [titles] id in
                 if let t = titles[id] { return t }
                 switch spec(id)?.kind {
@@ -406,6 +403,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             ProcessInfo.processInfo.endActivity(a)
             activity = nil
         }
+    }
+
+    /// A project's tabs as the tab bar and the sidebar show them: title, and the busiest status among their panes.
+    private func tabItems(_ p: Project) -> [TabItem] {
+        p.tabs.map { TabItem(title: title(of: $0), status: $0.root.leaves.map { status[$0.id] ?? .idle }.max() ?? .idle) }
     }
 
     private func title(of tab: Tab) -> String {
