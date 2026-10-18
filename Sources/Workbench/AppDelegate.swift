@@ -135,6 +135,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             item("Select All", #selector(SurfaceView.selectAll(_:)), "a", reserved: false),
             .separator(),
             item("Find…", #selector(w.find(_:)), "f"),
+            item("Find Next", #selector(w.findNext(_:)), "g"),
+            item("Find Previous", #selector(w.findPrevious(_:)), "g", [.command, .shift]),
             item("Clear", #selector(w.clearScreen(_:)), "k"),
         ]))
         var themeItems: [NSMenuItem] = []
