@@ -3,7 +3,7 @@ import AppKit
 /// `image` is an absolute path (already cropped and downscaled), `emoji` a single character; the icon is the image,
 /// else the emoji on a tint, else a monogram. `status` is the busiest pane of the workspace's projects.
 struct WorkspaceItem: Equatable, Sendable {
-    let id: UUID; let name: String; let image: String?; let emoji: String?; let status: PaneStatus
+    let id: UUID; let name: String; let image: String?; let emoji: String?; let color: Int?; let status: PaneStatus
 }
 
 /// A workspace's monogram: a short all-caps word as is (KWI), else the first letters of the first two words
@@ -15,14 +15,15 @@ func monogram(_ name: String) -> String {
     return words.prefix(2).compactMap(\.first).map { String($0).uppercased() }.joined()
 }
 
-/// The workspace's color, stable across launches (from its id).
-private let tints: [(NSColor, NSColor)] = [
-    (NSColor(srgbRed: 0.43, green: 0.61, blue: 1.00, alpha: 1), NSColor(srgbRed: 0.24, green: 0.39, blue: 0.79, alpha: 1)),
-    (NSColor(srgbRed: 0.18, green: 0.83, blue: 0.75, alpha: 1), NSColor(srgbRed: 0.06, green: 0.46, blue: 0.43, alpha: 1)),
-    (NSColor(srgbRed: 0.78, green: 0.57, blue: 0.92, alpha: 1), NSColor(srgbRed: 0.49, green: 0.34, blue: 0.76, alpha: 1)),
-    (NSColor(srgbRed: 0.94, green: 0.64, blue: 0.37, alpha: 1), NSColor(srgbRed: 0.77, green: 0.40, blue: 0.23, alpha: 1)),
-    (NSColor(srgbRed: 0.97, green: 0.47, blue: 0.55, alpha: 1), NSColor(srgbRed: 0.75, green: 0.22, blue: 0.33, alpha: 1)),
-    (NSColor(srgbRed: 0.76, green: 0.91, blue: 0.55, alpha: 1), NSColor(srgbRed: 0.36, green: 0.60, blue: 0.27, alpha: 1)),
+/// The workspace palette: a name and a top/bottom gradient pair. A workspace without a chosen color takes one from its
+/// id, stable across launches.
+private let tints: [(name: String, top: NSColor, bottom: NSColor)] = [
+    ("Blue", NSColor(srgbRed: 0.43, green: 0.61, blue: 1.00, alpha: 1), NSColor(srgbRed: 0.24, green: 0.39, blue: 0.79, alpha: 1)),
+    ("Teal", NSColor(srgbRed: 0.18, green: 0.83, blue: 0.75, alpha: 1), NSColor(srgbRed: 0.06, green: 0.46, blue: 0.43, alpha: 1)),
+    ("Purple", NSColor(srgbRed: 0.78, green: 0.57, blue: 0.92, alpha: 1), NSColor(srgbRed: 0.49, green: 0.34, blue: 0.76, alpha: 1)),
+    ("Orange", NSColor(srgbRed: 0.94, green: 0.64, blue: 0.37, alpha: 1), NSColor(srgbRed: 0.77, green: 0.40, blue: 0.23, alpha: 1)),
+    ("Pink", NSColor(srgbRed: 0.97, green: 0.47, blue: 0.55, alpha: 1), NSColor(srgbRed: 0.75, green: 0.22, blue: 0.33, alpha: 1)),
+    ("Green", NSColor(srgbRed: 0.76, green: 0.91, blue: 0.55, alpha: 1), NSColor(srgbRed: 0.36, green: 0.60, blue: 0.27, alpha: 1)),
 ]
 
 @MainActor private final class WorkspaceIcon: NSView {
@@ -81,7 +82,7 @@ private let tints: [(NSColor, NSColor)] = [
         item = w
         toolTip = w.name
         setAccessibilityLabel(w.name)
-        let (top, bottom) = tints[Int(w.id.uuid.0) % tints.count]
+        let (_, top, bottom) = tints[abs(w.color ?? Int(w.id.uuid.0)) % tints.count]
         let alpha: CGFloat = w.emoji == nil ? 1 : 0.28   // an emoji sits on a soft tint of the color
         tile.colors = [top.withAlphaComponent(alpha).cgColor, bottom.withAlphaComponent(alpha).cgColor]
         picture.isHidden = w.image == nil
@@ -112,6 +113,7 @@ private let tints: [(NSColor, NSColor)] = [
     var onRename: ((Int) -> Void)?
     var onChooseEmoji: ((Int) -> Void)?
     var onChooseImage: ((Int) -> Void)?
+    var onChooseColor: ((Int, Int) -> Void)?   // workspace index, palette index
     var onClearIcon: ((Int) -> Void)?   // back to the monogram
     var onDelete: ((Int) -> Void)?
 
@@ -196,6 +198,23 @@ private let tints: [(NSColor, NSColor)] = [
         menu.addItem(NSMenuItem(title: "Rename…", action: #selector(renameTapped), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Choose Emoji…", action: #selector(emojiTapped), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Choose Image…", action: #selector(imageTapped), keyEquivalent: ""))
+        let colorItem = NSMenuItem(title: "Color", action: nil, keyEquivalent: "")
+        let colorMenu = NSMenu()
+        let current = abs(w.color ?? Int(w.id.uuid.0)) % tints.count
+        for (n, t) in tints.enumerated() {
+            let c = NSMenuItem(title: t.name, action: #selector(colorTapped(_:)), keyEquivalent: "")
+            c.tag = n
+            c.target = self
+            c.state = n == current ? .on : .off
+            c.image = NSImage(size: NSSize(width: 12, height: 12), flipped: false) { r in
+                t.top.setFill()
+                NSBezierPath(ovalIn: r).fill()
+                return true
+            }
+            colorMenu.addItem(c)
+        }
+        colorItem.submenu = colorMenu
+        menu.addItem(colorItem)
         if w.image != nil || w.emoji != nil {
             menu.addItem(NSMenuItem(title: "Use Monogram", action: #selector(clearTapped), keyEquivalent: ""))
         }
@@ -208,6 +227,7 @@ private let tints: [(NSColor, NSColor)] = [
     @objc private func renameTapped() { onRename?(menuTarget) }
     @objc private func emojiTapped() { onChooseEmoji?(menuTarget) }
     @objc private func imageTapped() { onChooseImage?(menuTarget) }
+    @objc private func colorTapped(_ sender: NSMenuItem) { onChooseColor?(menuTarget, sender.tag) }
     @objc private func clearTapped() { onClearIcon?(menuTarget) }
     @objc private func deleteTapped() { onDelete?(menuTarget) }
 }

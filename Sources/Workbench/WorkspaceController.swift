@@ -182,6 +182,12 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         sidebar.rail.onRename = { [unowned self] i in renameWorkspace(i) }
         sidebar.rail.onChooseEmoji = { [unowned self] i in chooseWorkspaceEmoji(i) }
         sidebar.rail.onChooseImage = { [unowned self] i in chooseWorkspaceImage(i) }
+        sidebar.rail.onChooseColor = { [unowned self] i, c in
+            guard store.layout.workspaces?.indices.contains(i) == true else { return }
+            store.layout.workspaces?[i].color = c
+            store.changed()
+            render()
+        }
         sidebar.rail.onClearIcon = { [unowned self] i in setWorkspaceIcon(i, image: nil, emoji: nil) }
         sidebar.rail.onDelete = { [unowned self] i in deleteWorkspace(i) }
         tabBar.onRename = { [unowned self] i, name in renameTab(i, name) }
@@ -382,7 +388,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
            showingHidden: showingHidden, theme: theme)
         sidebar.updateWorkspaces(workspaces.map { w in
             WorkspaceItem(id: w.id, name: w.name, image: w.image.map { Store.workspaceImages.appendingPathComponent($0).path },
-                          emoji: w.emoji,
+                          emoji: w.emoji, color: w.color,
                           status: projects.filter { $0.workspace == w.id }.flatMap { tabItems($0).map(\.status) }.max() ?? .idle)
         }, selected: workspaces.firstIndex { $0.id == store.layout.activeWorkspace } ?? -1, theme: theme)
         let scratches = scratchProjectIndices(projects)

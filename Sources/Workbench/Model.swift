@@ -132,6 +132,7 @@ struct Workspace: Codable, Identifiable, Equatable, Sendable {
     var name: String
     var image: String? = nil       // file name in Store.workspaceImages; wins over the emoji
     var emoji: String? = nil
+    var color: Int? = nil          // index into the rail's palette; nil = the id-derived default
     var lastProject: UUID? = nil   // reselected when switching back to this workspace
 }
 
@@ -273,6 +274,8 @@ func modelSelfCheck() {
     try! Data("# hi".utf8).write(to: md); try! Data().write(to: empty); mkfifo(fifo.path, 0o600)
     assert(FilePaneView.load(md.path) == "# hi" && FilePaneView.load(empty.path) == "")
     assert(FilePaneView.load(fifo.path).hasPrefix("Cannot preview"))   // must not block
+
+    assert((try? JSONDecoder().decode(Workspace.self, from: Data(#"{"id":"\#(UUID().uuidString)","name":"W"}"#.utf8)))?.color == nil)   // old layouts decode
 
     // Every grammar's query compiles (queries come from resource bundles beside the binary), and highlights land.
     for ext in ["ex", "exs", "heex", "py", "js", "jsx", "ts", "tsx", "go", "rs", "rb", "java", "c", "cpp", "cs", "json", "sh",
