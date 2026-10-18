@@ -14,14 +14,18 @@ private final class SidebarTable: NSTableView {
     override var acceptsFirstResponder: Bool { false }
 }
 
-/// One line for a project or scratch terminal: name, then status dot (hidden when idle) and tab count on the right.
+/// One line for a project or scratch terminal: SF Symbol, name, then status dot (hidden when idle) and tab count on the
+/// right. The symbol is what makes rows read as separate items, as in Finder's and Mail's sidebars.
 private final class ProjectCell: NSTableCellView {
+    let icon = NSImageView()
     let label = NSTextField(labelWithString: "")
     let dot = NSView()
     let count = NSTextField(labelWithString: "")
 
-    override init(frame: NSRect) {
-        super.init(frame: frame)
+    init(symbol: String) {
+        super.init(frame: .zero)
+        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        icon.symbolConfiguration = .init(pointSize: 14, weight: .regular)
         label.lineBreakMode = .byTruncatingTail
         dot.wantsLayer = true
         dot.layer?.cornerRadius = 3.5
@@ -29,12 +33,15 @@ private final class ProjectCell: NSTableCellView {
         textField = label
         let trailing = NSStackView(views: [dot, count])   // hidden members drop out of the stack
         trailing.spacing = 8
-        for v in [label, trailing] as [NSView] {
+        for v in [icon, label, trailing] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
         NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 18),
+            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 8),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
             label.trailingAnchor.constraint(lessThanOrEqualTo: trailing.leadingAnchor, constant: -8),
             trailing.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
@@ -44,12 +51,14 @@ private final class ProjectCell: NSTableCellView {
         ])
     }
 
+    override init(frame: NSRect) { fatalError("use init(symbol:)") }
     required init?(coder: NSCoder) { fatalError() }
 
     @MainActor func style(_ r: SidebarRow, selected: Bool, theme: Theme) {
         if !label.isEditable { label.stringValue = r.name }
         label.font = .systemFont(ofSize: 13, weight: selected ? .semibold : .regular)
         label.textColor = r.tabCount == 0 && !selected ? .tertiaryLabelColor : .labelColor
+        icon.contentTintColor = r.tabCount == 0 && !selected ? .tertiaryLabelColor : .secondaryLabelColor
         count.stringValue = String(r.tabCount)
         count.isHidden = r.tabCount == 0
         count.textColor = selected ? .secondaryLabelColor : .tertiaryLabelColor
@@ -85,16 +94,6 @@ private final class GlassRowView: NSTableRowView {
         hover.frame = glass.frame
     }
 
-    /// A quiet resting card, so rows read as separate items without any glass; selection is the glass over it.
-    override func drawBackground(in dirtyRect: NSRect) {
-        let card = NSBezierPath(roundedRect: bounds.insetBy(dx: Self.inset, dy: 1), xRadius: 10, yRadius: 10)
-        NSColor.labelColor.withAlphaComponent(0.05).setFill()
-        card.fill()
-        NSColor.labelColor.withAlphaComponent(0.08).setStroke()
-        card.lineWidth = 0.5
-        card.stroke()
-    }
-
     override func drawSelection(in dirtyRect: NSRect) {}   // the glass is the selection
     override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }   // keep label colors on glass
 
@@ -116,6 +115,15 @@ private final class GlassRowView: NSTableRowView {
         hover.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.07).cgColor
         hover.isHidden = !on
     }
+}
+
+/// Scratch rows: a flat selection fill, no glass, so a session reads as different from a project.
+private final class FlatRowView: NSTableRowView {
+    override func drawSelection(in dirtyRect: NSRect) {
+        NSColor.labelColor.withAlphaComponent(0.10).setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 6, dy: 1), xRadius: 8, yRadius: 8).fill()
+    }
+    override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }
 }
 
 /// The scratch terminals under the project list: a small source-list table (native selection look) that hugs its rows.
@@ -183,10 +191,10 @@ private final class GlassRowView: NSTableRowView {
 
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 
-    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { GlassRowView() }
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { FlatRowView() }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let cell = ProjectCell(frame: .zero)
+        let cell = ProjectCell(symbol: "terminal")
         style(cell, row: row)
         return cell
     }
@@ -237,8 +245,8 @@ private final class GlassRowView: NSTableRowView {
         table.headerView = nil
         table.style = .sourceList
         table.floatsGroupRows = false
-        table.rowHeight = 34
-        table.intercellSpacing = NSSize(width: 0, height: 2)
+        table.rowHeight = 36
+        table.intercellSpacing = NSSize(width: 0, height: 4)
         table.selectionHighlightStyle = .regular
         table.allowsEmptySelection = true
         table.draggingDestinationFeedbackStyle = .gap
@@ -262,11 +270,12 @@ private final class GlassRowView: NSTableRowView {
         separator.boxType = .separator
         let newScratch = NSButton(title: "Scratch Terminal", image: NSImage(systemSymbolName: "plus", accessibilityDescription: "New Scratch Terminal")!,
                                   target: self, action: #selector(newScratchTapped))
-        newScratch.isBordered = false   // plain secondary text: the sidebar's only glass is the selection
+        newScratch.bezelStyle = .glass   // a glass capsule hugging its content
+        newScratch.borderShape = .capsule
+        newScratch.controlSize = .large
         newScratch.imagePosition = .imageLeading
         newScratch.imageHugsTitle = true
-        newScratch.contentTintColor = .secondaryLabelColor
-        newScratch.font = .systemFont(ofSize: 12, weight: .medium)
+        newScratch.font = .systemFont(ofSize: 13, weight: .medium)
         newScratch.refusesFirstResponder = true
         newScratch.toolTip = "New Scratch Terminal (⇧⌘N)"
         scratchList.onSelect = { [unowned self] i in onSelectScratch?(i) }
@@ -383,7 +392,7 @@ private final class GlassRowView: NSTableRowView {
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { GlassRowView() }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let cell = ProjectCell(frame: .zero)
+        let cell = ProjectCell(symbol: "folder")
         style(cell, row: row)
         return cell
     }
