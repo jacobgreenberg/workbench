@@ -155,21 +155,10 @@ final class HandButton: NSButton {
         let p = convert(event.locationInWindow, from: nil)
         if !close.isHidden && p.x >= close.frame.minX - 6 { onClose?() }
         else if event.clickCount == 2 { InlineRename(label) { [weak self] in self?.onRename?($0) } }
-        else { onSelect?(); trackDrag(from: event) }
-    }
-
-    private func trackDrag(from event: NSEvent) {
-        guard let window else { return }
-        let start = event.locationInWindow
-        var dragging = false
-        window.trackEvents(matching: [.leftMouseDragged, .leftMouseUp], timeout: .infinity, mode: .eventTracking) { e, stop in
-            guard let e else { return }
-            let up = e.type == .leftMouseUp
-            if up { stop.pointee = true }
-            if !dragging, abs(e.locationInWindow.x - start.x) < 4 { return }
-            if !dragging { dragging = true; NSCursor.closedHand.push() }
-            self.onDrag?(e.locationInWindow.x - start.x, up)
-            if up { NSCursor.pop() }
+        else {
+            onSelect?()
+            let x = event.locationInWindow.x
+            trackDrag(from: event, in: window) { [weak self] p, done in self?.onDrag?(p.x - x, done) }
         }
     }
 
@@ -195,6 +184,7 @@ final class HandButton: NSButton {
     private let border = NSView()
     private let strip = NSView()
     private var buttons: [TabButton] = []
+    private let reorder = Reorder(.x)
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -239,70 +229,6 @@ final class HandButton: NSButton {
 
     @objc private func newTapped() { onNew?() }
 
-    private var dragSlot: Int?
-
-    /// The dragged tab follows the cursor, lifted; the others slide aside to open the slot it would drop into. On
-    /// release it snaps into that slot, then the buttons are really reordered and the model follows. Everything moves
-    /// by layer transforms, so autolayout never runs mid-drag.
-    private func drag(_ b: TabButton, by dx: CGFloat, done: Bool) {
-        guard let from = buttons.firstIndex(where: { $0 === b }), let first = buttons.first, let last = buttons.last else { return }
-        let x = min(max(dx, first.frame.minX - b.frame.minX), last.frame.maxX - b.frame.maxX)
-        let to = buttons.filter { $0 !== b && $0.frame.midX < b.frame.midX + x }.count
-        if to != dragSlot {
-            dragSlot = to
-            let w = b.frame.width
-            for (i, o) in buttons.enumerated() where o !== b {
-                shift(o, i > from && i <= to ? -w : i < from && i >= to ? w : 0, animated: true)
-            }
-        }
-        if !done { lift(b, true); shift(b, x, animated: false); return }
-        dragSlot = nil
-        let slot = to > from ? buttons[from + 1...to].reduce(0) { $0 + $1.frame.width }
-                             : -buttons[to..<from].reduce(0) { $0 + $1.frame.width }
-        CATransaction.begin()
-        CATransaction.setCompletionBlock { [self] in
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            lift(b, false)
-            if to != from {
-                buttons.insert(buttons.remove(at: from), at: to)
-                stack.insertArrangedSubview(b, at: to)
-                stack.layoutSubtreeIfNeeded()
-            }
-            buttons.forEach { shift($0, 0, animated: false) }
-            CATransaction.commit()
-            if to != from { onMove?(from, to) }
-        }
-        shift(b, slot, animated: true)
-        CATransaction.commit()
-    }
-
-    private func shift(_ v: NSView, _ x: CGFloat, animated: Bool) {
-        guard let l = v.layer else { return }
-        let t = CATransform3DMakeTranslation(x, 0, 0)
-        if animated {
-            let a = CABasicAnimation(keyPath: "transform")
-            a.fromValue = l.presentation()?.transform ?? l.transform
-            a.duration = 0.16
-            a.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            l.add(a, forKey: "shift")
-        } else {
-            l.removeAnimation(forKey: "shift")
-        }
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        l.transform = t
-        CATransaction.commit()
-    }
-
-    private func lift(_ b: NSView, _ up: Bool) {
-        guard let l = b.layer else { return }
-        l.zPosition = up ? 1 : 0
-        l.shadowOpacity = up ? 0.4 : 0
-        l.shadowRadius = 8
-        l.shadowOffset = CGSize(width: 0, height: -2)
-    }
-
     #if DEBUG
     func tabCenter(_ i: Int) -> NSPoint? {
         buttons.indices.contains(i) ? buttons[i].convert(NSPoint(x: buttons[i].bounds.midX, y: buttons[i].bounds.midY), to: nil) : nil
@@ -326,7 +252,15 @@ final class HandButton: NSButton {
                 b.onSelect = { [weak self] in self?.onSelect?(index()) }
                 b.onClose = { [weak self] in self?.onClose?(index()) }
                 b.onRename = { [weak self] in self?.onRename?(index(), $0) }
-                b.onDrag = { [weak self, unowned b] dx, done in self?.drag(b, by: dx, done: done) }
+                b.onDrag = { [weak self, unowned b] dx, done in
+                    guard let self, let from = buttons.firstIndex(where: { $0 === b }) else { return }
+                    reorder.drag(buttons, from, by: dx, done: done) { [self] from, to in
+                        buttons.insert(buttons.remove(at: from), at: to)
+                        stack.insertArrangedSubview(b, at: to)
+                        stack.layoutSubtreeIfNeeded()
+                        onMove?(from, to)
+                    }
+                }
                 stack.addArrangedSubview(b)
                 return b
             }

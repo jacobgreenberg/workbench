@@ -52,18 +52,7 @@ private final class DividerSplitView: NSSplitView {
 
     override func mouseDown(with event: NSEvent) {
         onClick?()
-        guard let window else { return }
-        let start = event.locationInWindow
-        var dragging = false
-        window.trackEvents(matching: [.leftMouseDragged, .leftMouseUp], timeout: .infinity, mode: .eventTracking) { e, stop in
-            guard let e else { return }
-            let up = e.type == .leftMouseUp
-            if up { stop.pointee = true }
-            if !dragging, hypot(e.locationInWindow.x - start.x, e.locationInWindow.y - start.y) < 4 { return }
-            if !dragging { dragging = true; NSCursor.closedHand.push() }
-            self.onDrag?(e.locationInWindow, up)
-            if up { NSCursor.pop() }
-        }
+        trackDrag(from: event, in: window) { [weak self] p, done in self?.onDrag?(p, done) }
     }
 }
 

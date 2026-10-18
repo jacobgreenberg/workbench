@@ -8,7 +8,13 @@ enum PaneStatus: Int, Comparable, Sendable {
 }
 
 private final class SidebarTable: NSTableView {
+    var onPress: ((Int, NSEvent) -> Void)?
     override var acceptsFirstResponder: Bool { false }
+    /// A single click on a row selects it and may become a drag; the table keeps double-clicks (rename).
+    override func mouseDown(with event: NSEvent) {
+        let r = row(at: convert(event.locationInWindow, from: nil))
+        if event.clickCount == 1, r >= 0, let onPress { onPress(r, event) } else { super.mouseDown(with: event) }
+    }
 }
 
 private final class SidebarRowView: NSTableRowView {
@@ -59,6 +65,7 @@ private final class SidebarCell: NSTableCellView {
     var onAdd: (() -> Void)?
     var onRemove: ((Int) -> Void)?
     var onRename: ((Int, String?) -> Void)?
+    var onMove: ((Int, Int) -> Void)?   // from, to (same pick-up, drag and snap as tabs)
 
     private var rows: [SidebarRow] = []
     private var selected = -1
@@ -66,6 +73,7 @@ private final class SidebarCell: NSTableCellView {
     private var needsReload = false   // rows changed while a name was being edited
     private let table = SidebarTable()
     private let addButton = HandButton()
+    private let reorder = Reorder(.y)
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -88,7 +96,11 @@ private final class SidebarCell: NSTableCellView {
         table.dataSource = self
         table.delegate = self
         table.target = self
-        table.action = #selector(rowClicked)
+        table.onPress = { [unowned self] r, event in
+            onSelect?(r)
+            let y = event.locationInWindow.y
+            trackDrag(from: event, in: window) { [weak self] p, done in self?.drag(r, by: y - p.y, done: done) }
+        }
         table.doubleAction = #selector(rowDoubleClicked)
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "Remove Project", action: #selector(removeTapped), keyEquivalent: ""))
@@ -123,9 +135,16 @@ private final class SidebarCell: NSTableCellView {
 
     @objc private func addTapped() { onAdd?() }
 
-    @objc private func rowClicked() {
-        let r = table.clickedRow
-        if r >= 0 { onSelect?(r) }
+    /// `dy`: downward pointer movement (the table is flipped).
+    private func drag(_ r: Int, by dy: CGFloat, done: Bool) {
+        let views = (0..<rows.count).compactMap { table.rowView(atRow: $0, makeIfNecessary: false) }
+        guard views.count == rows.count else { return }   // ponytail: needs every row on screen; no autoscroll mid-drag
+        reorder.drag(views, r, by: dy, done: done) { [self] from, to in
+            rows.insert(rows.remove(at: from), at: to)
+            if selected == from { selected = to } else if from < selected, selected <= to { selected -= 1 } else if to <= selected, selected < from { selected += 1 }
+            table.reloadData()
+            onMove?(from, to)
+        }
     }
 
     @objc private func rowDoubleClicked() {
@@ -181,6 +200,12 @@ private final class SidebarCell: NSTableCellView {
         cell.toolTip = r.path
         styleStatusDot(cell.dot, r.status, theme: theme)
     }
+
+    #if DEBUG
+    func rowCenter(_ i: Int) -> NSPoint? {
+        rows.indices.contains(i) ? table.convert(NSPoint(x: table.rect(ofRow: i).midX, y: table.rect(ofRow: i).midY), to: nil) : nil
+    }
+    #endif
 
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 
