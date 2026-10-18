@@ -161,13 +161,14 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     }
 
     private func wireCallbacks() {
-        sidebar.onSelect = { [unowned self] i in selectProject(i) }
-        sidebar.onAdd = { [unowned self] in addProject(nil) }
-        sidebar.onRemove = { [unowned self] i in removeProject(i) }
+        sidebar.onSelect = { [unowned self] i in project(atRow: i).map(selectProject) }
+        sidebar.onRemove = { [unowned self] i in project(atRow: i).map(removeProject) }
+        sidebar.onShowHidden = { [unowned self] on in setShowHidden(on) }
+        sidebar.onToggleHidden = { [unowned self] i in toggleHidden(row: i) }
         tabBar.onSelect = { [unowned self] i in selectTab(i) }
         tabBar.onClose = { [unowned self] i in closeTab(at: i) }
         tabBar.onNew = { [unowned self] in newTab(nil) }
-        sidebar.onRename = { [unowned self] i, name in renameProject(i, name) }
+        sidebar.onRename = { [unowned self] i, name in renameProject(project(atRow: i) ?? -1, name) }
         sidebar.onMove = { [unowned self] from, to in moveProject(from, to) }
         tabBar.onRename = { [unowned self] i, name in renameTab(i, name) }
         tabBar.onMove = { [unowned self] from, to in moveTab(from, to) }
@@ -182,6 +183,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     }
 
     // MARK: - Model access
+
+    /// The sidebar lists either the active or the hidden projects; its rows map to project indices through this.
+    private var showingHidden: Bool { store.layout.showHidden ?? false }
+    private var visibleProjects: [Int] { visibleProjectIndices(store.layout.projects, hidden: showingHidden) }
+    private func project(atRow r: Int) -> Int? { let v = visibleProjects; return v.indices.contains(r) ? v[r] : nil }
 
     private var activeProjectIndex: Int? {
         store.layout.projects.indices.contains(store.layout.activeProject) ? store.layout.activeProject : nil
@@ -342,13 +348,15 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private func updateChrome() {
         updateWindowTitle()
         let projects = store.layout.projects
-        sidebar.update(rows: projects.map { p in
+        let visible = visibleProjects
+        sidebar.update(rows: visible.map { projects[$0] }.map { p in
             let leaves = p.tabs.flatMap { $0.root.leaves }
             // A terminal's launch is set exactly while an agent runs in it (apply(_:) keeps it current).
             return SidebarRow(name: p.name, path: p.path, status: leaves.map { status[$0.id] ?? .idle }.max() ?? .idle,
                               terminals: leaves.count { if case .terminal = $0.kind { true } else { false } },
                               agents: leaves.count { if case .terminal(_, _?) = $0.kind { true } else { false } })
-        }, selected: store.layout.activeProject, theme: theme)
+        }, selected: visible.firstIndex(of: store.layout.activeProject) ?? -1,
+           hiddenCount: projects.count { $0.hidden == true }, showingHidden: showingHidden, theme: theme)
         if let p = activeProjectIndex {
             let project = projects[p]
             tabBar.update(items: project.tabs.map { tab in
@@ -411,7 +419,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
 
     func focusPane(_ id: PaneID) {
         guard let (p, t) = locate(id) else { return }
-        store.layout.activeProject = p
+        activate(p)
         store.layout.projects[p].activeTab = t
         store.layout.projects[p].tabs[t].focused = id
         store.changed()
@@ -565,7 +573,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             return
         }
         let new = PaneSpec(id: UUID(), kind: kind)
-        store.layout.activeProject = p
+        activate(p)
         store.layout.projects[p].activeTab = t
         var tab = store.layout.projects[p].tabs[t]
         tab.root = tab.root.replacing(base, with: .split(axis: axis, ratio: 0.5, a: .leaf(old), b: .leaf(new)))
@@ -621,7 +629,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             store.layout.projects[p].tabs.append(Tab(id: UUID(), title: "Terminal", root: .leaf(spec), focused: spec.id))
             store.layout.projects[p].activeTab = store.layout.projects[p].tabs.count - 1
         }
-        store.layout.activeProject = p
+        activate(p)
         store.changed()
         render()
     }
@@ -716,13 +724,12 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         render()
     }
 
+    /// `from`/`to` are rows of the list being shown.
     private func moveProject(_ from: Int, _ to: Int) {
-        var projects = store.layout.projects
-        guard projects.indices.contains(from), projects.indices.contains(to) else { return }
-        let active = projects.indices.contains(store.layout.activeProject) ? projects[store.layout.activeProject].id : nil
-        projects.insert(projects.remove(at: from), at: to)
+        guard let projects = reorderedProjects(store.layout.projects, map: visibleProjects, from: from, to: to) else { return }
+        let active = activeProjectIndex.map { store.layout.projects[$0].id }
         store.layout.projects = projects
-        store.layout.activeProject = projects.firstIndex { $0.id == active } ?? 0
+        store.layout.activeProject = projects.firstIndex { $0.id == active } ?? store.layout.activeProject
         store.changed()
         render()
     }
@@ -736,29 +743,69 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
 
     private func selectProject(_ index: Int) {
         guard store.layout.projects.indices.contains(index) else { return }
-        store.layout.activeProject = index
+        activate(index)
         store.changed()
         render()
+    }
+
+    /// Makes `p` the active project and switches the sidebar to the list it is in.
+    private func activate(_ p: Int) {
+        store.layout.activeProject = p
+        let hidden = store.layout.projects[p].hidden == true
+        if hidden != showingHidden { store.layout.showHidden = hidden ? true : nil }
+    }
+
+    /// The Hidden/Active switch only changes the list; the active project stays until the user clicks another.
+    private func setShowHidden(_ on: Bool) {
+        store.layout.showHidden = on ? true : nil
+        store.changed()
+        render()
+    }
+
+    /// Hide Project (Active view) / Show Project (Hidden view). Terminals and agents of a hidden project keep running.
+    private func toggleHidden(row: Int) {
+        guard let i = project(atRow: row) else { return }
+        let pos = visibleProjects.firstIndex(of: i) ?? 0
+        let hiding = !showingHidden
+        store.layout.projects[i].hidden = hiding ? true : nil
+        if hiding, i == store.layout.activeProject { selectVisible(near: pos) }
+        store.changed()
+        render()
+    }
+
+    /// Selects the project now at row `pos` of the list shown (the last one if the list got shorter), or none if empty.
+    private func selectVisible(near pos: Int) {
+        let v = visibleProjects
+        store.layout.activeProject = v.isEmpty ? -1 : v[min(pos, v.count - 1)]
     }
 
     private func removeProject(_ index: Int) {
-        guard store.layout.projects.indices.contains(index) else { return }
+        guard store.layout.projects.indices.contains(index), let window else { return }
         let project = store.layout.projects[index]
-        if needsConfirm(project.tabs.flatMap { $0.root.leaves.map(\.id) }),
-           !confirm("Remove project “\(project.name)”?") { return }
-        guard let i = store.layout.projects.firstIndex(where: { $0.id == project.id }) else { return }
-        store.layout.projects[i].tabs.flatMap { $0.root.leaves.map(\.id) }.forEach(destroy)
-        dropProject(i)
-        store.changed()
-        render()
+        let alert = NSAlert()
+        alert.messageText = "Remove “\(project.name)”?"
+        alert.informativeText = "Its tabs and terminals will be closed. The folder on disk is not touched."
+            + (needsConfirm(project.tabs.flatMap { $0.root.leaves.map(\.id) }) ? " Running processes will be terminated." : "")
+        alert.addButton(withTitle: "Remove").hasDestructiveAction = true
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self,
+                  let i = store.layout.projects.firstIndex(where: { $0.id == project.id }) else { return }
+            store.layout.projects[i].tabs.flatMap { $0.root.leaves.map(\.id) }.forEach(destroy)
+            dropProject(i)
+            store.changed()
+            render()
+        }
     }
 
-    /// Removes a project and keeps the active project pointing at the same project.
+    /// Removes a project; if it was the active one, the next project in the list shown takes over.
     private func dropProject(_ i: Int) {
+        let pos = i == store.layout.activeProject ? visibleProjects.firstIndex(of: i) : nil
         store.layout.projects.remove(at: i)
+        if let pos { selectVisible(near: pos); return }
         var active = store.layout.activeProject
         if i < active { active -= 1 }
-        store.layout.activeProject = max(0, min(active, store.layout.projects.count - 1))
+        store.layout.activeProject = active < 0 ? active : max(0, min(active, store.layout.projects.count - 1))
     }
 
     /// Shows `path` in the right sidebar, replacing the file shown there.
@@ -977,11 +1024,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     @objc func newTab(_ sender: Any?) { newTab(kind: .terminal(cwd: cwdForNewPane(), launch: nil)) }
     @objc func newScratchTerminal(_ sender: Any?) {
         if let i = store.layout.projects.firstIndex(where: { $0.scratch == true }) {
-            store.layout.activeProject = i
+            activate(i)
         } else {
             store.layout.projects.append(Project(id: UUID(), path: NSHomeDirectory(), name: "Scratch", tabs: [],
                                                  activeTab: 0, scratch: true))
-            store.layout.activeProject = store.layout.projects.count - 1
+            activate(store.layout.projects.count - 1)
         }
         newTab(kind: .terminal(cwd: NSHomeDirectory(), launch: nil))
     }
@@ -1009,13 +1056,14 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         guard n > 0 else { return }
         selectTab((store.layout.projects[p].activeTab + d + n) % n)
     }
-    @objc func selectProjectByTag(_ sender: NSMenuItem) { selectProject(sender.tag - 1) }
+    @objc func selectProjectByTag(_ sender: NSMenuItem) { project(atRow: sender.tag - 1).map(selectProject) }
     @objc func nextProject(_ sender: Any?) { cycleProject(1) }
     @objc func previousProject(_ sender: Any?) { cycleProject(-1) }
     private func cycleProject(_ d: Int) {
-        let n = store.layout.projects.count
-        guard n > 0 else { return }
-        selectProject((store.layout.activeProject + d + n) % n)
+        let v = visibleProjects
+        guard !v.isEmpty else { return }
+        let cur = v.firstIndex(of: store.layout.activeProject) ?? (d > 0 ? -1 : 0)   // none selected: start at an end
+        selectProject(v[(cur + d + v.count) % v.count])
     }
     @objc func addProject(_ sender: Any?) {
         let panel = NSOpenPanel()
@@ -1031,7 +1079,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         store.layout.projects.append(Project(id: UUID(), path: url.path, name: url.lastPathComponent,
                                              tabs: [Tab(id: UUID(), title: "Terminal", root: .leaf(spec), focused: spec.id)],
                                              activeTab: 0))
-        store.layout.activeProject = store.layout.projects.count - 1
+        activate(store.layout.projects.count - 1)   // also leaves the Hidden list
         store.changed()
         render()
     }
@@ -1111,18 +1159,27 @@ extension WorkspaceController {
 extension NSToolbarItem.Identifier {
     static let tabs = NSToolbarItem.Identifier("tabs")
     static let search = NSToolbarItem.Identifier("search")
+    static let addProject = NSToolbarItem.Identifier("addProject")
 }
 
 /// Unified toolbar: sidebar toggle over the sidebar, the tab capsule over the terminals, inspector toggle over the preview.
 extension WorkspaceController: NSToolbarDelegate {
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .sidebarTrackingSeparator, .tabs, .flexibleSpace, .search, .inspectorTrackingSeparator, .flexibleSpace, .toggleInspector]
+        [.toggleSidebar, .addProject, .sidebarTrackingSeparator, .tabs, .flexibleSpace, .search, .inspectorTrackingSeparator, .flexibleSpace, .toggleInspector]
     }
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(toolbar) }
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier, willBeInsertedIntoToolbar: Bool) -> NSToolbarItem? {
         if id == .search { return searchItem }
-        guard id == .tabs else { return nil }
         let item = NSToolbarItem(itemIdentifier: id)
+        if id == .addProject {
+            item.label = "Add Project"
+            item.toolTip = "Add Project"
+            item.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "Add Project")
+            item.target = self
+            item.action = #selector(addProject(_:))
+            return item
+        }
+        guard id == .tabs else { return nil }
         item.view = tabBar
         item.isBordered = false   // the tab bar draws its own glass capsule
         item.visibilityPriority = .high

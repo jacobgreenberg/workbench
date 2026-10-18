@@ -49,9 +49,12 @@ private final class SidebarCell: NSTableCellView {
 
 /// The project list: a native source list inside the split view's sidebar item (AppKit supplies the glass, the
 /// collapse and the insets). Selection is the active project; reordering is native table drag and drop.
+/// A segmented control above the list switches between active and hidden projects; every index here is a row of
+/// the list being shown (the controller maps rows to projects).
 @MainActor final class SidebarView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     var onSelect: ((Int) -> Void)?
-    var onAdd: (() -> Void)?
+    var onShowHidden: ((Bool) -> Void)?   // segment picked: true = Hidden
+    var onToggleHidden: ((Int) -> Void)?   // context menu Hide/Show Project
     var onRemove: ((Int) -> Void)?
     var onRename: ((Int, String?) -> Void)?
     var onMove: ((Int, Int) -> Void)?   // from, to (final index after removal)
@@ -60,16 +63,21 @@ private final class SidebarCell: NSTableCellView {
     private var rows: [SidebarRow] = []
     private var selected = -1
     private var theme: Theme?
+    private var hiddenCount = 0
+    private var showingHidden = false
     private var needsReload = false   // rows changed while a name was being edited
     private var syncing = false       // programmatic selection: don't report it as a click
     private let table = SidebarTable()
-    private let addButton = HandButton.glass("plus", "Add Project", .large)
+    private let filter = NSSegmentedControl(labels: ["Active", "Hidden"], trackingMode: .selectOne, target: nil, action: nil)
+    private let toggleItem = NSMenuItem(title: "Hide Project", action: #selector(toggleHiddenTapped), keyEquivalent: "")
 
     override init(frame: NSRect) {
         super.init(frame: frame)
 
-        addButton.target = self
-        addButton.action = #selector(addTapped)
+        filter.target = self
+        filter.action = #selector(filterChanged)
+        filter.segmentDistribution = .fillEqually
+        filter.selectedSegment = 0
 
         table.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("c")))
         table.headerView = nil
@@ -86,37 +94,48 @@ private final class SidebarCell: NSTableCellView {
         table.target = self
         table.doubleAction = #selector(rowDoubleClicked)
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Remove Project", action: #selector(removeTapped), keyEquivalent: ""))
-        menu.items[0].target = self
+        menu.addItem(toggleItem)
+        menu.addItem(NSMenuItem(title: "Rename", action: #selector(renameTapped), keyEquivalent: ""))
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Remove Project…", action: #selector(removeTapped), keyEquivalent: ""))
+        menu.items.forEach { $0.target = self }
         table.menu = menu
 
         let scroll = NSScrollView()
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
-        scroll.additionalSafeAreaInsets = NSEdgeInsets(top: 0, left: 0, bottom: 48, right: 0)   // room for the add button
         scroll.documentView = table
 
-        for v in [scroll, addButton] as [NSView] {
+        for v in [scroll, filter] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
         NSLayoutConstraint.activate([
-            scroll.topAnchor.constraint(equalTo: topAnchor),
+            filter.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 8),   // below the toolbar
+            filter.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            filter.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            scroll.topAnchor.constraint(equalTo: filter.bottomAnchor, constant: 4),
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
             scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
-            addButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            addButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
         ])
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    @objc private func addTapped() { onAdd?() }
+    @objc private func filterChanged() { onShowHidden?(filter.selectedSegment == 1) }
 
-    @objc private func rowDoubleClicked() {
+    @objc private func toggleHiddenTapped() {
         let r = table.clickedRow
+        if r >= 0 { onToggleHidden?(r) }
+    }
+
+    @objc private func renameTapped() { beginRename(table.clickedRow) }
+
+    @objc private func rowDoubleClicked() { beginRename(table.clickedRow) }
+
+    private func beginRename(_ r: Int) {
         guard r >= 0, let cell = table.view(atColumn: 0, row: r, makeIfNecessary: false) as? SidebarCell else { return }
         InlineRename(cell.label) { [weak self] name in
             guard let self else { return }
@@ -136,7 +155,14 @@ private final class SidebarCell: NSTableCellView {
         syncing = false
     }
 
-    func update(rows: [SidebarRow], selected: Int, theme: Theme) {
+    func update(rows: [SidebarRow], selected: Int, hiddenCount: Int, showingHidden: Bool, theme: Theme) {
+        if hiddenCount != self.hiddenCount || showingHidden != self.showingHidden {
+            self.hiddenCount = hiddenCount
+            self.showingHidden = showingHidden
+            filter.setLabel(hiddenCount > 0 ? "Hidden · \(hiddenCount)" : "Hidden", forSegment: 1)
+            filter.selectedSegment = showingHidden ? 1 : 0
+            toggleItem.title = showingHidden ? "Show Project" : "Hide Project"
+        }
         guard rows != self.rows || selected != self.selected || theme.id != self.theme?.id else { return }
         let changed = rows != self.rows
         self.rows = rows
