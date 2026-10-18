@@ -124,10 +124,27 @@ struct Project: Codable, Identifiable, Equatable, Sendable {
     var hidden: Bool? = nil    // off the Active list, shown under Hidden; its terminals and agents keep running
 }
 
-/// Project indices shown in the sidebar for the Active (`hidden == false`) or Hidden list, in order.
+/// Project indices shown in the sidebar for the Active (`hidden == false`) or Hidden list, in order. Scratch
+/// terminals are never listed (they have their own area under the list).
 func visibleProjectIndices(_ projects: [Project], hidden: Bool) -> [Int] {
-    projects.indices.filter { (projects[$0].hidden ?? false) == hidden }
+    projects.indices.filter { projects[$0].scratch != true && (projects[$0].hidden ?? false) == hidden }
 }
+
+/// Indices of the scratch terminals, in order (the sidebar's bottom area).
+func scratchProjectIndices(_ projects: [Project]) -> [Int] {
+    projects.indices.filter { projects[$0].scratch == true }
+}
+
+/// "3 terminals · 1 agent": the agent part only when there is one.
+func sidebarDetail(terminals: Int, agents: Int) -> String {
+    var s = "\(terminals) terminal\(terminals == 1 ? "" : "s")"
+    if agents > 0 { s += " · \(agents) agent\(agents == 1 ? "" : "s")" }
+    return s
+}
+
+/// The sidebar table's row 0 is the "Projects" group header; project row r is table row r + 1.
+func projectRow(forTableRow r: Int) -> Int? { r >= 1 ? r - 1 : nil }
+func tableRow(forProjectRow r: Int) -> Int { r + 1 }
 
 /// Dragging visible row `from` to visible row `to` (`map`: visible row -> project index) moves that project to the
 /// other row's position in the full list; hidden projects in between keep their places.
@@ -290,6 +307,14 @@ func modelSelfCheck() {
     assert(reorderedProjects(projs, map: act, from: 0, to: 2)?.map(\.name) == ["h1", "B", "h2", "C", "A"])
     assert(reorderedProjects(projs, map: act, from: 2, to: 0)?.map(\.name) == ["C", "A", "h1", "B", "h2"])
     assert(reorderedProjects(projs, map: act, from: 0, to: 3) == nil)
+    // scratch terminals: in neither list, found separately; the header row 0 maps to no project
+    var scr = proj("S", nil); scr.scratch = true
+    let withScratch = projs + [scr]
+    assert(visibleProjectIndices(withScratch, hidden: false) == [0, 2, 4] && visibleProjectIndices(withScratch, hidden: true) == [1, 3])
+    assert(scratchProjectIndices(withScratch) == [5] && scratchProjectIndices(projs).isEmpty)
+    assert(sidebarDetail(terminals: 1, agents: 0) == "1 terminal" && sidebarDetail(terminals: 3, agents: 1) == "3 terminals · 1 agent"
+           && sidebarDetail(terminals: 0, agents: 2) == "0 terminals · 2 agents")
+    assert(projectRow(forTableRow: 0) == nil && projectRow(forTableRow: 1) == 0 && tableRow(forProjectRow: 2) == 3)
     // p2 over p3, drag p3 to p2's right: they become side by side
     assert(tree.moving(p3.id, to: p2.id, .right) == .split(axis: .horizontal, ratio: 0.3, a: .leaf(p1),
                                                             b: .split(axis: .horizontal, ratio: 0.5, a: .leaf(p2), b: .leaf(p3))))
