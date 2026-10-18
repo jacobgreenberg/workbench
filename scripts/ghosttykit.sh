@@ -4,7 +4,7 @@
 # No-op when the built SHA matches. Needs zig 0.16 (brew install zig@0.16) and Xcode's Metal toolchain.
 set -euo pipefail
 cd "$(dirname "$0")/../vendor"
-SHA=8844e7bb4ec8c416af22b4b51373085ef6facd7a
+SHA=07df9dc38acd1b53161be6f81f58374ddac465a3
 ZIG="$(brew --prefix zig@0.16 2>/dev/null)/bin/zig"
 [ -x "$ZIG" ] || ZIG=zig
 [ "$(cat GhosttyKit.xcframework/.sha 2>/dev/null)" = "$SHA" ] && exit 0
