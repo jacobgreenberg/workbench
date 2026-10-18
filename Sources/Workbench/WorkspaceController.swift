@@ -50,14 +50,15 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private let findBar = FindBar(frame: .zero)
     private let emptyLabel = NSTextField(labelWithString: "")
     private lazy var tree = SplitTreeView { [unowned self] spec in self.view(for: spec) }
-    private var sidebarWidth: NSLayoutConstraint!
-    /// Right sidebar: the file ⌘-clicked last, beside every tab until closed (⌥⌘B hides and shows it).
+    /// Native split: glass sidebar (projects) | terminals | inspector (the file ⌘-clicked last). AppKit owns the
+    /// materials, divider dragging and the collapse animations.
+    private let split = NSSplitViewController()
+    private var sidebarItem: NSSplitViewItem!
+    private var inspectorItem: NSSplitViewItem!
+    private var collapseObservation: NSKeyValueObservation?
     private let preview = NSView()
-    private let previewTitle = NSTextField(labelWithString: "")
-    private let previewEdge = ResizeEdge()
+    private let previewTitle = NSTextField(labelWithString: "No file. ⌘-click a path to preview it here.")
     private var previewFile: FilePaneView?
-    private var previewWidth: NSLayoutConstraint!
-    private var previewGap: NSLayoutConstraint!   // content's trailing edge to the panel's leading edge
 
     init(store: Store, runtime: Runtime) {
         self.store = store
@@ -67,17 +68,22 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             contentRect: NSRect(x: 0, y: 0, width: 1400, height: 900),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered, defer: false)
-        window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.appearance = NSAppearance(named: .darkAqua)
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
-        window.center()
-        window.setFrameAutosaveName("Main")
         super.init(window: window)
         window.delegate = self
         runtime.delegate = self
         buildLayout()
+        let toolbar = NSToolbar(identifier: "main")
+        toolbar.delegate = self
+        toolbar.displayMode = .iconOnly
+        toolbar.allowsUserCustomization = false
+        window.toolbar = toolbar
+        window.toolbarStyle = .unified
+        window.center()
+        window.setFrameAutosaveName("Main")
         wireCallbacks()
         paintTheme()
         restore()
@@ -88,79 +94,64 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     // MARK: - Layout
 
     private func buildLayout() {
-        guard let root = window?.contentView else { return }
-        root.wantsLayer = true
-        for v in [sidebar, tabBar, content, preview] as [NSView] {
-            v.translatesAutoresizingMaskIntoConstraints = false
-            root.addSubview(v)
-        }
+        func controller(_ v: NSView) -> NSViewController { let c = NSViewController(); c.view = v; return c }
+
+        let main = NSView()
+        main.wantsLayer = true
+        for v in [content, findBar, emptyLabel] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false }
+        main.addSubview(content)
         content.wantsLayer = true
         tree.frame = content.bounds
         tree.autoresizingMask = [.width, .height]
         content.addSubview(tree)
-        emptyLabel.translatesAutoresizingMaskIntoConstraints = false
         emptyLabel.font = .systemFont(ofSize: 13)
+        emptyLabel.textColor = .secondaryLabelColor
         emptyLabel.alignment = .center
         content.addSubview(emptyLabel)
-        findBar.translatesAutoresizingMaskIntoConstraints = false
         findBar.isHidden = true
         content.addSubview(findBar)
-        preview.wantsLayer = true
-        preview.layer?.cornerRadius = 16   // a floating glass panel, like the project sidebar
-        preview.layer?.masksToBounds = true
-        preview.isHidden = true
-        let glass = NSGlassEffectView(frame: preview.bounds)
-        glass.cornerRadius = 16
-        glass.autoresizingMask = [.width, .height]
-        preview.addSubview(glass)
-        previewTitle.font = .systemFont(ofSize: 12, weight: .medium)
-        previewTitle.lineBreakMode = .byTruncatingMiddle
-        let close = HandButton.glass("xmark", "Close Preview")
-        close.target = self
-        close.action = #selector(closePreview(_:))
-        for v in [previewTitle, close, previewEdge] as [NSView] {
-            v.translatesAutoresizingMaskIntoConstraints = false
-            preview.addSubview(v)
-        }
-        previewEdge.onDrag = { [unowned self] dx in
-            previewWidth.constant = min(max(previewWidth.constant - dx, 240), root.bounds.width - 300)
-        }
 
-        sidebarWidth = sidebar.widthAnchor.constraint(equalToConstant: store.layout.sidebarVisible ? 220 : 0)
-        previewWidth = preview.widthAnchor.constraint(equalToConstant: 0)
-        previewGap = content.trailingAnchor.constraint(equalTo: preview.leadingAnchor, constant: 8)   // hidden: past the 8 pt inset
+        previewTitle.font = .systemFont(ofSize: 12, weight: .medium)
+        previewTitle.textColor = .secondaryLabelColor
+        previewTitle.lineBreakMode = .byTruncatingMiddle
+        previewTitle.translatesAutoresizingMaskIntoConstraints = false
+        preview.addSubview(previewTitle)
+
         NSLayoutConstraint.activate([
-            sidebar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            sidebar.topAnchor.constraint(equalTo: root.topAnchor),
-            sidebar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            sidebarWidth,
-            tabBar.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
-            tabBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            tabBar.topAnchor.constraint(equalTo: root.topAnchor),
-            tabBar.heightAnchor.constraint(equalToConstant: TabBarView.titleStrip + TabBarView.tabHeight),
-            content.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
-            previewGap,
-            preview.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
-            preview.topAnchor.constraint(equalTo: tabBar.bottomAnchor, constant: 4),
-            preview.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -8),
-            previewWidth,
-            previewEdge.leadingAnchor.constraint(equalTo: preview.leadingAnchor),
-            previewEdge.topAnchor.constraint(equalTo: preview.topAnchor),
-            previewEdge.bottomAnchor.constraint(equalTo: preview.bottomAnchor),
-            previewEdge.widthAnchor.constraint(equalToConstant: 5),
-            previewTitle.leadingAnchor.constraint(equalTo: preview.leadingAnchor, constant: 14),
-            previewTitle.trailingAnchor.constraint(lessThanOrEqualTo: close.leadingAnchor, constant: -8),
-            previewTitle.centerYAnchor.constraint(equalTo: preview.topAnchor, constant: 18),
-            close.trailingAnchor.constraint(equalTo: preview.trailingAnchor, constant: -8),
-            close.centerYAnchor.constraint(equalTo: previewTitle.centerYAnchor),
-            content.topAnchor.constraint(equalTo: tabBar.bottomAnchor),
-            content.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            content.topAnchor.constraint(equalTo: main.safeAreaLayoutGuide.topAnchor),   // below the toolbar
+            content.leadingAnchor.constraint(equalTo: main.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: main.trailingAnchor),
+            content.bottomAnchor.constraint(equalTo: main.bottomAnchor),
             emptyLabel.centerXAnchor.constraint(equalTo: content.centerXAnchor),
             emptyLabel.centerYAnchor.constraint(equalTo: content.centerYAnchor),
             findBar.topAnchor.constraint(equalTo: content.topAnchor, constant: 8),
             findBar.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+            previewTitle.topAnchor.constraint(equalTo: preview.safeAreaLayoutGuide.topAnchor, constant: 6),
+            previewTitle.leadingAnchor.constraint(equalTo: preview.leadingAnchor, constant: 16),
+            previewTitle.trailingAnchor.constraint(lessThanOrEqualTo: preview.trailingAnchor, constant: -16),
         ])
-        sidebar.isHidden = !store.layout.sidebarVisible
+
+        sidebarItem = NSSplitViewItem(sidebarWithViewController: controller(sidebar))
+        sidebarItem.minimumThickness = 180
+        sidebarItem.maximumThickness = 360
+        sidebarItem.isCollapsed = !store.layout.sidebarVisible
+        let mainItem = NSSplitViewItem(viewController: controller(main))
+        mainItem.minimumThickness = 300
+        inspectorItem = NSSplitViewItem(inspectorWithViewController: controller(preview))
+        inspectorItem.minimumThickness = 260
+        inspectorItem.maximumThickness = 1600
+        inspectorItem.isCollapsed = true
+        for item in [sidebarItem!, mainItem, inspectorItem!] { split.addSplitViewItem(item) }
+        split.splitView.autosaveName = "Workbench.split"   // divider positions survive relaunch
+        window?.contentViewController = split
+        // Collapsing from the toolbar button bypasses our actions; persist whatever AppKit did.
+        collapseObservation = sidebarItem.observe(\.isCollapsed) { [weak self] _, _ in
+            MainActor.assumeIsolated {
+                guard let self, self.store.layout.sidebarVisible == self.sidebarItem.isCollapsed else { return }
+                self.store.layout.sidebarVisible = !self.sidebarItem.isCollapsed
+                self.store.changed()
+            }
+        }
     }
 
     private func wireCallbacks() {
@@ -391,11 +382,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private func paintTheme() {
         window?.backgroundColor = theme.color("background")
         content.layer?.backgroundColor = theme.color("background").cgColor
-        emptyLabel.textColor = theme.color("mutedForeground")
         findBar.apply(theme: theme)
         for v in views.values { (v as? FilePaneView)?.apply(theme: theme) }
         previewFile?.apply(theme: theme)
-        previewTitle.textColor = theme.color("mutedForeground")
     }
 
     // MARK: - Focus & status
@@ -760,33 +749,19 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         let f = FilePaneView(id: UUID(), path: path, theme: theme)
         f.onOpenLink = { [unowned self] url in open(url) }
         f.translatesAutoresizingMaskIntoConstraints = false
-        preview.addSubview(f, positioned: .below, relativeTo: previewEdge)
+        preview.addSubview(f)
         NSLayoutConstraint.activate([
             f.leadingAnchor.constraint(equalTo: preview.leadingAnchor),
             f.trailingAnchor.constraint(equalTo: preview.trailingAnchor),
-            f.topAnchor.constraint(equalTo: preview.topAnchor, constant: 34),
+            f.topAnchor.constraint(equalTo: previewTitle.bottomAnchor, constant: 4),
             f.bottomAnchor.constraint(equalTo: preview.bottomAnchor),
         ])
         previewFile = f
         previewTitle.stringValue = (path as NSString).abbreviatingWithTildeInPath
         previewTitle.toolTip = path
-        if preview.isHidden { showPreview(true) }
+        if inspectorItem.isCollapsed { togglePreview(nil) }
     }
-    @objc func togglePreview(_ sender: Any?) {
-        guard previewFile != nil else { return NSSound.beep() }
-        showPreview(preview.isHidden)
-    }
-    @objc func closePreview(_ sender: Any?) {
-        previewFile?.close()
-        previewFile?.removeFromSuperview()
-        previewFile = nil
-        showPreview(false)
-    }
-    private func showPreview(_ show: Bool) {
-        preview.isHidden = !show
-        previewWidth.constant = show ? ((window?.contentView?.bounds.width ?? 1000) * 0.4).rounded() : 0
-        previewGap.constant = show ? -6 : 8
-    }
+    @objc func togglePreview(_ sender: Any?) { split.toggleInspector(sender) }
 
     /// Something would be lost by quitting: a process other than an idle shell, or an agent mid-turn.
     var needsConfirmQuit: Bool { status.values.contains(.busy) || views.keys.contains { needsConfirm([$0]) } }
@@ -1041,14 +1016,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         store.changed()
         render()
     }
-    // Not `toggleSidebar(_:)`: NSWindow implements that action itself and, earlier in the responder chain, swallows it.
-    @objc func toggleProjectSidebar(_ sender: Any?) {
-        store.layout.sidebarVisible.toggle()
-        store.changed()
-        let visible = store.layout.sidebarVisible
-        sidebar.isHidden = !visible
-        sidebarWidth.constant = visible ? 220 : 0
-    }
+    // Not `toggleSidebar(_:)` in the menu: NSWindow implements that action itself and, earlier in the responder chain,
+    // swallows it. The split view animates it; collapseObservation persists it.
+    @objc func toggleProjectSidebar(_ sender: Any?) { split.toggleSidebar(sender) }
     @objc func focusLeft(_ sender: Any?) { moveFocus(.left) }
     @objc func focusRight(_ sender: Any?) { moveFocus(.right) }
     @objc func focusUp(_ sender: Any?) { moveFocus(.up) }
@@ -1117,9 +1087,22 @@ extension WorkspaceController {
     }
 }
 
-/// The preview sidebar's left edge: drag to resize. Reports horizontal movement since the last event.
-@MainActor final class ResizeEdge: NSView {
-    var onDrag: ((CGFloat) -> Void)?
-    override func resetCursorRects() { addCursorRect(bounds, cursor: .resizeLeftRight) }
-    override func mouseDragged(with event: NSEvent) { onDrag?(event.deltaX) }
+extension NSToolbarItem.Identifier {
+    static let tabs = NSToolbarItem.Identifier("tabs")
+}
+
+/// Unified toolbar: sidebar toggle over the sidebar, the tab capsule over the terminals, inspector toggle over the preview.
+extension WorkspaceController: NSToolbarDelegate {
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.toggleSidebar, .sidebarTrackingSeparator, .tabs, .flexibleSpace, .inspectorTrackingSeparator, .flexibleSpace, .toggleInspector]
+    }
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(toolbar) }
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier, willBeInsertedIntoToolbar: Bool) -> NSToolbarItem? {
+        guard id == .tabs else { return nil }
+        let item = NSToolbarItem(itemIdentifier: id)
+        item.view = tabBar
+        item.isBordered = false   // the tab bar draws its own glass capsule
+        item.visibilityPriority = .high
+        return item
+    }
 }
