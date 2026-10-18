@@ -14,6 +14,7 @@ enum Agents {
     private static let launchers = Mutex<[String: String]>([:])
 
     static let claudeHookArgs = #"--settings "$PANE_CLAUDE_SETTINGS""#
+    static let codexBypass = "--dangerously-bypass-approvals-and-sandbox"
     static let codexHookArgs = #"-c "notify=[\"$PANE_BIN\",\"hook\",\"done\"]""#
 
     // MARK: launcher discovery
@@ -134,7 +135,8 @@ enum Agents {
                 result[pane] = Session(cmd: session.map { cmd + " --resume \($0)" }, claude: true, home: dir, id: session)
             } else if words.contains("codex") {
                 let dir = env["CODEX_HOME"].map { ($0 as NSString).standardizingPath } ?? home + "/.codex"
-                var cmd = map["codex:" + dir] ?? (env["CODEX_HOME"] == nil ? "codex" : "CODEX_HOME=\(Runtime.shellEscape(dir)) codex")
+                // Launchers (gpt1…) pass the bypass flag themselves and Codex rejects it twice; a bare codex gets it here.
+                var cmd = map["codex:" + dir] ?? (env["CODEX_HOME"] == nil ? "codex" : "CODEX_HOME=\(Runtime.shellEscape(dir)) codex") + " " + codexBypass
                 if argv.contains(where: { $0.hasPrefix("notify=") && $0.contains("hook") }) { cmd += " " + codexHookArgs }
                 // A thread resumed by id names itself in argv. Otherwise a running Codex does not expose its thread,
                 // so it gets one from the state db below; `resume --last` would send every pane in a folder to the
