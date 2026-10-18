@@ -218,12 +218,16 @@ extension NSView {
     private let glass = NSGlassEffectView()
     private let indicator = NSView()   // the selected pill; one view, pinned to the selected tab, slides between tabs
     private var indicatorPins: [NSLayoutConstraint] = []
+    private var plusAfterTabs: NSLayoutConstraint!
+    private var plusAlone: NSLayoutConstraint!   // no tabs: the glass capsule is hidden, so the + sits at the leading edge
     private var buttons: [TabButton] = []
     private var selectedIndex = -1
     private let reorder = Reorder()
 
     override init(frame: NSRect) {
         super.init(frame: frame)
+        plusAfterTabs = plus.leadingAnchor.constraint(equalTo: glass.trailingAnchor, constant: 8)
+        plusAlone = plus.leadingAnchor.constraint(equalTo: leadingAnchor)
         wantsLayer = true
         stack.orientation = .horizontal
         stack.spacing = 2
@@ -257,7 +261,7 @@ extension NSView {
             glass.leadingAnchor.constraint(equalTo: leadingAnchor),
             glass.topAnchor.constraint(equalTo: topAnchor),
             glass.bottomAnchor.constraint(equalTo: bottomAnchor),
-            plus.leadingAnchor.constraint(equalTo: glass.trailingAnchor, constant: 8),
+            plusAfterTabs,
             plus.centerYAnchor.constraint(equalTo: centerYAnchor),
             plus.trailingAnchor.constraint(equalTo: trailingAnchor),
         ])
@@ -348,6 +352,8 @@ extension NSView {
         while buttons.count < newItems.count { let b = makeButton(); buttons.append(b); stack.addArrangedSubview(b) }
         while buttons.count > newItems.count { buttons.removeLast().removeFromSuperview() }
         glass.isHidden = buttons.isEmpty
+        plusAfterTabs.isActive = !buttons.isEmpty
+        plusAlone.isActive = buttons.isEmpty
         let moved = sameTabs && selected != selectedIndex
         selectedIndex = selected
         for (i, b) in buttons.enumerated() { b.apply(item: newItems[i], selected: i == selected, theme: theme) }

@@ -252,12 +252,11 @@ private final class GlassRowView: NSTableRowView {
         separator.boxType = .separator
         let newScratch = NSButton(title: "Scratch Terminal", image: NSImage(systemSymbolName: "plus", accessibilityDescription: "New Scratch Terminal")!,
                                   target: self, action: #selector(newScratchTapped))
-        newScratch.bezelStyle = .glass   // glass capsule hugging its content, leading-aligned
-        newScratch.borderShape = .capsule
-        newScratch.controlSize = .large
+        newScratch.isBordered = false   // plain secondary text: the sidebar's only glass is the selection
         newScratch.imagePosition = .imageLeading
         newScratch.imageHugsTitle = true
-        newScratch.font = .systemFont(ofSize: 13, weight: .medium)
+        newScratch.contentTintColor = .secondaryLabelColor
+        newScratch.font = .systemFont(ofSize: 12, weight: .medium)
         newScratch.refusesFirstResponder = true
         newScratch.toolTip = "New Scratch Terminal (⇧⌘N)"
         scratchList.onSelect = { [unowned self] i in onSelectScratch?(i) }
@@ -290,7 +289,7 @@ private final class GlassRowView: NSTableRowView {
             scratchList.scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scratchList.scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
             scratchList.scroll.bottomAnchor.constraint(equalTo: newScratch.topAnchor, constant: -6),
-            newScratch.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            newScratch.centerXAnchor.constraint(equalTo: centerXAnchor),
             newScratch.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
         ])
     }
