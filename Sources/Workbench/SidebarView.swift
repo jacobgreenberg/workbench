@@ -280,10 +280,13 @@ private final class ScratchCell: NSTableCellView {
         separator.boxType = .separator
         let newScratch = NSButton(title: "Scratch Terminal", image: NSImage(systemSymbolName: "plus", accessibilityDescription: "New Scratch Terminal")!,
                                   target: self, action: #selector(newScratchTapped))
-        newScratch.isBordered = false
+        newScratch.bezelStyle = .glass   // a full-width glass capsule, like the toggle at the top
+        newScratch.borderShape = .capsule
+        newScratch.controlSize = .large
         newScratch.imagePosition = .imageLeading
-        newScratch.contentTintColor = .secondaryLabelColor
-        newScratch.font = .systemFont(ofSize: 12)
+        newScratch.imageHugsTitle = true
+        newScratch.font = .systemFont(ofSize: 13, weight: .medium)
+        newScratch.refusesFirstResponder = true
         newScratch.toolTip = "New Scratch Terminal (⇧⌘N)"
         scratchList.onSelect = { [unowned self] i in onSelectScratch?(i) }
         scratchList.onClose = { [unowned self] i in onCloseScratch?(i) }
@@ -302,12 +305,13 @@ private final class ScratchCell: NSTableCellView {
             scroll.bottomAnchor.constraint(equalTo: separator.topAnchor, constant: -4),
             separator.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             separator.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            separator.bottomAnchor.constraint(equalTo: scratchList.scroll.topAnchor, constant: -4),
+            separator.bottomAnchor.constraint(equalTo: scratchList.scroll.topAnchor, constant: -6),
             scratchList.scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scratchList.scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scratchList.scroll.bottomAnchor.constraint(equalTo: newScratch.topAnchor, constant: -2),
-            newScratch.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            newScratch.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
+            scratchList.scroll.bottomAnchor.constraint(equalTo: newScratch.topAnchor, constant: -6),
+            newScratch.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            newScratch.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            newScratch.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
         ])
     }
 

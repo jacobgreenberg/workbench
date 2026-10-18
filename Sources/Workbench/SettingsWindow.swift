@@ -50,7 +50,7 @@ private final class ThemeCard: NSButton {
         func line(_ parts: [(String, String)], _ row: Int) {
             let s = NSMutableAttributedString()
             for (text, key) in parts { s.append(NSAttributedString(string: text, attributes: [.font: mono, .foregroundColor: theme.terminalColor(key)])) }
-            s.draw(at: NSPoint(x: preview.minX + 12, y: preview.maxY - 24 - CGFloat(row) * 16))
+            s.draw(at: NSPoint(x: preview.minX + 12, y: preview.minY + 14 + CGFloat(row) * 16))   // NSButton is flipped: rows run down
         }
         line([("~ % ", "foreground"), ("ls", "foreground")], 0)
         line([("src  ", "blue"), ("README.md  ", "green"), ("run", "red")], 1)
