@@ -122,7 +122,7 @@ enum FocusDirection: Sendable { case left, right, up, down }
     func neighbor(of id: PaneID, _ direction: FocusDirection) -> PaneID?
 }
 
-// FilePaneView.swift — .md previewed, other files as monospace code highlighted via Syntax; reloads on file change
+// FilePaneView.swift — .md previewed, other files as monospace code highlighted via Syntax; reloads on file change. Shown in the right preview sidebar (⌘-click a path, `pane open`, Open File…; ⌥⌘B toggles), or as a .file pane from old layouts
 @MainActor final class FilePaneView: NSView { let paneID: PaneID; init(id: PaneID, path: String, theme: Theme); func apply(theme: Theme); func close() }
 
 // Syntax.swift — tree-sitter grammars (SwiftPM packages; queries read from their resource bundles in Contents/Resources)

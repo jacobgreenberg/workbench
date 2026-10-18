@@ -37,6 +37,12 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private let emptyLabel = NSTextField(labelWithString: "")
     private lazy var tree = SplitTreeView { [unowned self] spec in self.view(for: spec) }
     private var sidebarWidth: NSLayoutConstraint!
+    /// Right sidebar: the file ⌘-clicked last, beside every tab until closed (⌥⌘B hides and shows it).
+    private let preview = NSView()
+    private let previewTitle = NSTextField(labelWithString: "")
+    private let previewEdge = ResizeEdge()
+    private var previewFile: FilePaneView?
+    private var previewWidth: NSLayoutConstraint!
 
     init(store: Store, runtime: Runtime) {
         self.store = store
@@ -69,7 +75,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private func buildLayout() {
         guard let root = window?.contentView else { return }
         root.wantsLayer = true
-        for v in [sidebar, tabBar, content] as [NSView] {
+        for v in [sidebar, tabBar, content, preview] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
         }
@@ -84,8 +90,23 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         findBar.translatesAutoresizingMaskIntoConstraints = false
         findBar.isHidden = true
         content.addSubview(findBar)
+        preview.wantsLayer = true
+        preview.isHidden = true
+        previewTitle.font = .systemFont(ofSize: 12, weight: .medium)
+        previewTitle.lineBreakMode = .byTruncatingMiddle
+        let close = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close Preview")!,
+                             target: self, action: #selector(closePreview(_:)))
+        close.isBordered = false
+        for v in [previewTitle, close, previewEdge] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            preview.addSubview(v)
+        }
+        previewEdge.onDrag = { [unowned self] dx in
+            previewWidth.constant = min(max(previewWidth.constant - dx, 240), root.bounds.width - 300)
+        }
 
         sidebarWidth = sidebar.widthAnchor.constraint(equalToConstant: store.layout.sidebarVisible ? 220 : 0)
+        previewWidth = preview.widthAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
             sidebar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             sidebar.topAnchor.constraint(equalTo: root.topAnchor),
@@ -96,7 +117,20 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             tabBar.topAnchor.constraint(equalTo: root.topAnchor),
             tabBar.heightAnchor.constraint(equalToConstant: TabBarView.titleStrip + TabBarView.tabHeight),
             content.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
-            content.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            content.trailingAnchor.constraint(equalTo: preview.leadingAnchor),
+            preview.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            preview.topAnchor.constraint(equalTo: tabBar.bottomAnchor),
+            preview.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            previewWidth,
+            previewEdge.leadingAnchor.constraint(equalTo: preview.leadingAnchor),
+            previewEdge.topAnchor.constraint(equalTo: preview.topAnchor),
+            previewEdge.bottomAnchor.constraint(equalTo: preview.bottomAnchor),
+            previewEdge.widthAnchor.constraint(equalToConstant: 5),
+            previewTitle.leadingAnchor.constraint(equalTo: preview.leadingAnchor, constant: 14),
+            previewTitle.trailingAnchor.constraint(lessThanOrEqualTo: close.leadingAnchor, constant: -8),
+            previewTitle.centerYAnchor.constraint(equalTo: preview.topAnchor, constant: 14),
+            close.trailingAnchor.constraint(equalTo: preview.trailingAnchor, constant: -10),
+            close.centerYAnchor.constraint(equalTo: previewTitle.centerYAnchor),
             content.topAnchor.constraint(equalTo: tabBar.bottomAnchor),
             content.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             emptyLabel.centerXAnchor.constraint(equalTo: content.centerXAnchor),
@@ -190,7 +224,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             v = s
         case let .file(path):
             let m = FilePaneView(id: spec.id, path: path, theme: theme)
-            m.onOpenLink = { [unowned self, id = spec.id] url in open(url, from: id) }
+            m.onOpenLink = { [unowned self] url in open(url) }
             v = m
         }
         views[spec.id] = v
@@ -337,6 +371,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         emptyLabel.textColor = theme.color("mutedForeground")
         findBar.apply(theme: theme)
         for v in views.values { (v as? FilePaneView)?.apply(theme: theme) }
+        previewFile?.apply(theme: theme)
+        preview.layer?.backgroundColor = theme.color("background").cgColor
+        preview.layer?.borderColor = theme.color("border").cgColor
+        preview.layer?.borderWidth = 1
+        previewTitle.textColor = theme.color("mutedForeground")
     }
 
     // MARK: - Focus & status
@@ -453,24 +492,24 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     }
 
     private func openURL(_ url: String, from id: PaneID) {
-        if let u = URL(string: url), u.scheme != nil { open(u, from: id); return }
+        if let u = URL(string: url), u.scheme != nil { open(u); return }
         var path = (url as NSString).expandingTildeInPath
         if !path.hasPrefix("/"), let spec = spec(id), case let .terminal(cwd, _) = spec.kind {
             path = URL(fileURLWithPath: cwd).appendingPathComponent(path).standardizedFileURL.path
         }
-        open(URL(fileURLWithPath: path), from: id)
+        open(URL(fileURLWithPath: path))
     }
 
     /// The one link policy for terminal ⌘-clicks and markdown links. Terminal output and documents are untrusted, so
     /// a click only opens passive files (text/source, images, PDF) and plain folders, and only follows http/https/mailto.
     /// Everything else, including scripts, .command/.terminal/.webloc files and bundles, is revealed in Finder, never run.
-    private func open(_ url: URL, from id: PaneID) {
+    private func open(_ url: URL) {
         if url.isFileURL {
             let file = url.resolvingSymlinksInPath()
             let v = try? file.resourceValues(forKeys: [.contentTypeKey, .isDirectoryKey, .isPackageKey])
             if v?.isDirectory != true, ["md", "markdown"].contains(file.pathExtension.lowercased()) || Syntax.key(for: file.path) != nil
                 || v?.contentType.map({ $0.conforms(to: .text) }) == true {
-                openFile(file.path, from: id)
+                openFile(file.path)
                 return
             }
             let passive = v?.contentType.map {
@@ -682,19 +721,36 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         store.layout.activeProject = max(0, min(active, store.layout.projects.count - 1))
     }
 
-    /// Shows `path` beside `source`. A tab has one file pane: a later open replaces its file instead of splitting again.
-    func openFile(_ path: String, from source: PaneID?) {
-        guard let source, let (p, t) = locate(source),
-              let old = store.layout.projects[p].tabs[t].root.leaves.first(where: { if case .file = $0.kind { true } else { false } })
-        else { return split(.horizontal, kind: .file(path: path), from: source) }
-        if old.kind != .file(path: path) {
-            destroy(old.id)
-            let new = PaneSpec(id: UUID(), kind: .file(path: path))
-            store.layout.projects[p].tabs[t].root = store.layout.projects[p].tabs[t].root.replacing(old.id, with: .leaf(new))
-            if store.layout.projects[p].tabs[t].focused == old.id { store.layout.projects[p].tabs[t].focused = new.id }
-            store.changed()
-        }
-        render()
+    /// Shows `path` in the right sidebar, replacing the file shown there.
+    func openFile(_ path: String) {
+        previewFile?.close()
+        previewFile?.removeFromSuperview()
+        let f = FilePaneView(id: UUID(), path: path, theme: theme)
+        f.onOpenLink = { [unowned self] url in open(url) }
+        f.translatesAutoresizingMaskIntoConstraints = false
+        preview.addSubview(f, positioned: .below, relativeTo: previewEdge)
+        NSLayoutConstraint.activate([
+            f.leadingAnchor.constraint(equalTo: preview.leadingAnchor, constant: 1),
+            f.trailingAnchor.constraint(equalTo: preview.trailingAnchor),
+            f.topAnchor.constraint(equalTo: preview.topAnchor, constant: 28),
+            f.bottomAnchor.constraint(equalTo: preview.bottomAnchor),
+        ])
+        previewFile = f
+        previewTitle.stringValue = (path as NSString).abbreviatingWithTildeInPath
+        previewTitle.toolTip = path
+        if preview.isHidden { togglePreview(nil) }
+    }
+    @objc func togglePreview(_ sender: Any?) {
+        guard previewFile != nil, let root = window?.contentView else { return NSSound.beep() }
+        preview.isHidden.toggle()
+        previewWidth.constant = preview.isHidden ? 0 : (root.bounds.width * 0.4).rounded()
+    }
+    @objc func closePreview(_ sender: Any?) {
+        previewFile?.close()
+        previewFile?.removeFromSuperview()
+        previewFile = nil
+        preview.isHidden = true
+        previewWidth.constant = 0
     }
 
     /// Something would be lost by quitting: a process other than an idle shell, or an agent mid-turn.
@@ -795,7 +851,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             return "{}"
         case "open":
             guard let path = msg["path"] else { return #"{"error":"no path"}"# }
-            openFile(path, from: pane.flatMap { locate($0) != nil ? $0 : nil })
+            openFile(path)
             return "{}"
         #if DEBUG
         case "action":   // test harness: run a menu action, e.g. "newTab:", without needing keyboard focus
@@ -995,7 +1051,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.text]
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        openFile(url.path, from: focusedPane)
+        openFile(url.path)
     }
     @objc func selectTheme(_ sender: NSMenuItem) {
         if let id = sender.representedObject as? String { applyTheme(id) }
@@ -1019,4 +1075,11 @@ extension WorkspaceController {
             $0.properties.generalCategory == .otherSymbol || $0 == "·" || $0.properties.isWhitespace
         }))
     }
+}
+
+/// The preview sidebar's left edge: drag to resize. Reports horizontal movement since the last event.
+@MainActor final class ResizeEdge: NSView {
+    var onDrag: ((CGFloat) -> Void)?
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .resizeLeftRight) }
+    override func mouseDragged(with event: NSEvent) { onDrag?(event.deltaX) }
 }
