@@ -135,30 +135,28 @@ func scratchProjectIndices(_ projects: [Project]) -> [Int] {
     projects.indices.filter { projects[$0].scratch == true }
 }
 
-/// What a sidebar table row shows. Row 0 is the "Projects" group header; project row r follows at r + 1; the
-/// expanded (active) project's tab rows follow its own row. `expanded` = that project's row in the list shown
-/// (-1 = none) and `tabs` its tab count; with no tabs there is nothing to expand.
-enum SidebarRowKind: Equatable { case header, project(Int), tab(project: Int, tab: Int) }
+/// What a sidebar table row shows: project row r, with the expanded (active) project's tab rows following its own
+/// row. `expanded` = that project's row in the list shown (-1 = none) and `tabs` its tab count; with no tabs there
+/// is nothing to expand.
+enum SidebarRowKind: Equatable { case project(Int), tab(project: Int, tab: Int) }
 
 func sidebarRowKind(forTableRow r: Int, expanded: Int = -1, tabs: Int = 0) -> SidebarRowKind? {
     guard r >= 0 else { return nil }
-    if r == 0 { return .header }
-    let p = r - 1
-    guard expanded >= 0, tabs > 0, p > expanded else { return .project(p) }
-    return p <= expanded + tabs ? .tab(project: expanded, tab: p - expanded - 1) : .project(p - tabs)
+    guard expanded >= 0, tabs > 0, r > expanded else { return .project(r) }
+    return r <= expanded + tabs ? .tab(project: expanded, tab: r - expanded - 1) : .project(r - tabs)
 }
 func projectRow(forTableRow r: Int, expanded: Int = -1, tabs: Int = 0) -> Int? {
     if case .project(let p)? = sidebarRowKind(forTableRow: r, expanded: expanded, tabs: tabs) { p } else { nil }
 }
 func tableRow(forProjectRow r: Int, expanded: Int = -1, tabs: Int = 0) -> Int {
-    r + 1 + (expanded >= 0 && tabs > 0 && r > expanded ? tabs : 0)
+    r + (expanded >= 0 && tabs > 0 && r > expanded ? tabs : 0)
 }
 /// Tab `t` of the expanded project `p` (its rows follow the project's own row).
-func tableRow(forTab t: Int, inProject p: Int) -> Int { p + 2 + t }
+func tableRow(forTab t: Int, inProject p: Int) -> Int { p + 1 + t }
 /// Dropping above table row `r` (a boundary) inserts before this project row.
 func projectInsertion(forTableRow r: Int, expanded: Int = -1, tabs: Int = 0) -> Int {
-    let before = expanded >= 0 ? max(0, min(r, expanded + 2 + tabs) - (expanded + 2)) : 0   // tab rows above the boundary
-    return max(r - 1 - before, 0)
+    let before = expanded >= 0 ? max(0, min(r, expanded + 1 + tabs) - (expanded + 1)) : 0   // tab rows above the boundary
+    return max(r - before, 0)
 }
 
 /// Dragging visible row `from` to visible row `to` (`map`: visible row -> project index) moves that project to the
@@ -322,22 +320,21 @@ func modelSelfCheck() {
     assert(reorderedProjects(projs, map: act, from: 0, to: 2)?.map(\.name) == ["h1", "B", "h2", "C", "A"])
     assert(reorderedProjects(projs, map: act, from: 2, to: 0)?.map(\.name) == ["C", "A", "h1", "B", "h2"])
     assert(reorderedProjects(projs, map: act, from: 0, to: 3) == nil)
-    // scratch terminals: in neither list, found separately; the header row 0 maps to no project
+    // scratch terminals: in neither list, found separately
     var scr = proj("S", nil); scr.scratch = true
     let withScratch = projs + [scr]
     assert(visibleProjectIndices(withScratch, hidden: false) == [0, 2, 4] && visibleProjectIndices(withScratch, hidden: true) == [1, 3])
     assert(scratchProjectIndices(withScratch) == [5] && scratchProjectIndices(projs).isEmpty)
-    assert(sidebarRowKind(forTableRow: 0) == .header && projectRow(forTableRow: 0) == nil && projectRow(forTableRow: 1) == 0
-           && tableRow(forProjectRow: 2) == 3 && sidebarRowKind(forTableRow: -1) == nil)
-    // project 1 expanded with 3 tabs: rows 0 header, 1 p0, 2 p1, 3-5 its tabs, 6 p2, 7 p3
-    let kinds = (0...7).map { sidebarRowKind(forTableRow: $0, expanded: 1, tabs: 3) }
-    assert(kinds == [.header, .project(0), .project(1), .tab(project: 1, tab: 0), .tab(project: 1, tab: 1), .tab(project: 1, tab: 2), .project(2), .project(3)])
-    assert((0...3).map { tableRow(forProjectRow: $0, expanded: 1, tabs: 3) } == [1, 2, 6, 7] && tableRow(forTab: 2, inProject: 1) == 5)
-    assert(projectRow(forTableRow: 4, expanded: 1, tabs: 3) == nil && projectRow(forTableRow: 6, expanded: 1, tabs: 3) == 2)
-    assert(sidebarRowKind(forTableRow: 3, expanded: 1, tabs: 0) == .project(2) && sidebarRowKind(forTableRow: 3, expanded: -1, tabs: 3) == .project(2))
+    assert(projectRow(forTableRow: 0) == 0 && tableRow(forProjectRow: 2) == 2 && sidebarRowKind(forTableRow: -1) == nil)
+    // project 1 expanded with 3 tabs: rows 0 p0, 1 p1, 2-4 its tabs, 5 p2, 6 p3
+    let kinds = (0...6).map { sidebarRowKind(forTableRow: $0, expanded: 1, tabs: 3) }
+    assert(kinds == [.project(0), .project(1), .tab(project: 1, tab: 0), .tab(project: 1, tab: 1), .tab(project: 1, tab: 2), .project(2), .project(3)])
+    assert((0...3).map { tableRow(forProjectRow: $0, expanded: 1, tabs: 3) } == [0, 1, 5, 6] && tableRow(forTab: 2, inProject: 1) == 4)
+    assert(projectRow(forTableRow: 3, expanded: 1, tabs: 3) == nil && projectRow(forTableRow: 5, expanded: 1, tabs: 3) == 2)
+    assert(sidebarRowKind(forTableRow: 2, expanded: 1, tabs: 0) == .project(2) && sidebarRowKind(forTableRow: 2, expanded: -1, tabs: 3) == .project(2))
     // drop boundaries (above row r) -> project insertion index
-    assert((1...8).map { projectInsertion(forTableRow: $0, expanded: 1, tabs: 3) } == [0, 1, 2, 2, 2, 2, 3, 4])
-    assert((1...4).map { projectInsertion(forTableRow: $0) } == [0, 1, 2, 3])
+    assert((0...7).map { projectInsertion(forTableRow: $0, expanded: 1, tabs: 3) } == [0, 1, 2, 2, 2, 2, 3, 4])
+    assert((0...3).map { projectInsertion(forTableRow: $0) } == [0, 1, 2, 3])
     // p2 over p3, drag p3 to p2's right: they become side by side
     assert(tree.moving(p3.id, to: p2.id, .right) == .split(axis: .horizontal, ratio: 0.3, a: .leaf(p1),
                                                             b: .split(axis: .horizontal, ratio: 0.5, a: .leaf(p2), b: .leaf(p3))))

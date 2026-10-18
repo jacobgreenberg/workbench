@@ -298,9 +298,9 @@ private final class ScratchCell: NSTableCellView {
 /// collapse and the insets). The active project is expanded into a rounded group: its row is the header and
 /// each tab is a child row; selection is the active project's selected tab (or, with no tabs, its row).
 /// Reordering projects is native table drag and drop.
-/// A segmented control above the list switches between active and hidden projects; project indices here are rows
-/// of the list being shown (the controller maps them to projects). The table's first row is the non-selectable
-/// "Projects" group header; flattened table rows map to projects/tabs through sidebarRowKind (Model.swift).
+/// A large "Projects" title, then a segmented control that switches between active and hidden projects; project
+/// indices here are rows of the list being shown (the controller maps them to projects). Flattened table rows map
+/// to projects/tabs through sidebarRowKind (Model.swift).
 /// Pinned below the list: a separator, the scratch terminals (not projects), and the Scratch Terminal button.
 @MainActor final class SidebarView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
     var onSelect: ((Int) -> Void)?
@@ -335,7 +335,6 @@ private final class ScratchCell: NSTableCellView {
     private func kind(_ row: Int) -> SidebarRowKind? { sidebarRowKind(forTableRow: row, expanded: expanded, tabs: expandedTabs) }
     private func row(of k: SidebarRowKind) -> Int? {
         switch k {
-        case .header: 0
         case .project(let p): tableRow(forProjectRow: p, expanded: expanded, tabs: expandedTabs)
         case .tab(let p, let t): tableRow(forTab: t, inProject: p)
         }
@@ -395,15 +394,24 @@ private final class ScratchCell: NSTableCellView {
         scratchList.onSelect = { [unowned self] i in onSelectScratch?(i) }
         scratchList.onClose = { [unowned self] i in onCloseScratch?(i) }
 
-        for v in [scroll, filter, separator, scratchList.scroll, newScratch] as [NSView] {
+        let title = NSTextField(labelWithString: "Projects")   // a large title, like Mail's or Notes' sidebar
+        title.font = .systemFont(ofSize: 26, weight: .bold)
+        title.textColor = .labelColor
+        title.setAccessibilityRole(.staticText)
+        title.setAccessibilityLabel("Projects")
+
+        for v in [title, scroll, filter, separator, scratchList.scroll, newScratch] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
         NSLayoutConstraint.activate([
-            filter.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 8),   // below the toolbar
+            title.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 6),   // below the toolbar
+            title.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            title.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
+            filter.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 10),
             filter.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             filter.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            scroll.topAnchor.constraint(equalTo: filter.bottomAnchor, constant: 4),
+            scroll.topAnchor.constraint(equalTo: filter.bottomAnchor, constant: 10),
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
             scroll.bottomAnchor.constraint(equalTo: separator.topAnchor, constant: -4),
@@ -470,7 +478,6 @@ private final class ScratchCell: NSTableCellView {
             switch k {
             case .project(let p): self?.onRename?(p, name)
             case .tab(_, let t): self?.onRenameTab?(t, name)
-            case .header: break
             }
         }
     }
@@ -567,9 +574,7 @@ private final class ScratchCell: NSTableCellView {
 
     // MARK: Table
 
-    func numberOfRows(in tableView: NSTableView) -> Int { rows.count + 1 + expandedTabs }
-
-    func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool { row == 0 }
+    func numberOfRows(in tableView: NSTableView) -> Int { rows.count + expandedTabs }
 
     /// Only tab rows (or, via mouse-up, another project) take clicks; a click never deselects or selects a header.
     func tableView(_ tableView: NSTableView, selectionIndexesForProposedSelection proposed: IndexSet) -> IndexSet {
@@ -580,7 +585,6 @@ private final class ScratchCell: NSTableCellView {
     /// Plain project 34, the group's header 34, tabs 30; the last tab 34 for the group's bottom padding.
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
         switch kind(row) {
-        case .header?: 24
         case .tab(_, let t)?: t == expandedTabs - 1 ? 34 : 30
         default: 34
         }
@@ -588,7 +592,6 @@ private final class ScratchCell: NSTableCellView {
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
         let k = kind(row)
-        if k == .header { return nil }
         let view = GlassRowView()
         view.position = position(of: k)
         return view
@@ -600,16 +603,7 @@ private final class ScratchCell: NSTableCellView {
         switch k {
         case .project?: view = ProjectCell(frame: .zero)
         case .tab?: view = TabCell(frame: .zero)
-        default:
-            let header = NSTextField(labelWithString: "Projects")
-            header.font = .systemFont(ofSize: 11, weight: .semibold)
-            header.textColor = .secondaryLabelColor
-            header.translatesAutoresizingMaskIntoConstraints = false
-            let cell = NSTableCellView()
-            cell.addSubview(header)
-            NSLayoutConstraint.activate([header.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 16),
-                                         header.centerYAnchor.constraint(equalTo: cell.centerYAnchor)])
-            return cell
+        case nil: return nil
         }
         style(view, k)
         return view
@@ -623,7 +617,7 @@ private final class ScratchCell: NSTableCellView {
     // MARK: Drag and drop (projects only)
 
     func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> NSPasteboardWriting? {
-        guard let r = projectRow(forTableRow: row, expanded: expanded, tabs: expandedTabs) else { return nil }   // header and tabs can't be dragged
+        guard let r = projectRow(forTableRow: row, expanded: expanded, tabs: expandedTabs) else { return nil }   // tabs can't be dragged
         let item = NSPasteboardItem()
         item.setString(String(r), forType: Self.dragType)
         return item
@@ -631,7 +625,7 @@ private final class ScratchCell: NSTableCellView {
 
     func tableView(_ tableView: NSTableView, validateDrop info: NSDraggingInfo, proposedRow row: Int, proposedDropOperation op: NSTableView.DropOperation) -> NSDragOperation {
         guard info.draggingSource as AnyObject === table else { return [] }
-        var r = max(row, 1)   // never above the header
+        var r = max(row, 0)
         if expanded >= 0 {   // not between a project's tab rows: the nearer project boundary
             let first = tableRow(forProjectRow: expanded, expanded: expanded, tabs: expandedTabs), n = expandedTabs
             if r > first, r <= first + n { r = (r - first) * 2 <= n ? first : first + n + 1 }
