@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 git pull --ff-only
-[ -d vendor/GhosttyKit.xcframework ] && [ -d vendor/ghostty-src ] || scripts/fetch-ghosttykit.sh
+scripts/ghosttykit.sh
 scripts/bundle.sh --install
 
 if pgrep -xq Workbench; then

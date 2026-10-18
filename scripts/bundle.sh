@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 SI=vendor/ghostty-src/src/shell-integration
-[ -d "$SI" ] || { echo "missing $SI: run scripts/fetch-ghosttykit.sh" >&2; exit 1; }
+[ -d "$SI" ] || { echo "missing $SI: run scripts/ghosttykit.sh" >&2; exit 1; }
 
 swift build -c release
 

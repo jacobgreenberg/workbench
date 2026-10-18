@@ -12,10 +12,10 @@ Swift 6 + AppKit on top of [libghostty](https://github.com/ghostty-org/ghostty) 
 
 ## Build and install
 
-Requires macOS 15+, Xcode command line tools, and Ghostty.app installed (for terminfo).
+Requires macOS 15+, Xcode with its Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`), zig 0.16 (`brew install zig@0.16`), and Ghostty.app installed (for terminfo).
 
 ```sh
-scripts/fetch-ghosttykit.sh      # once: pinned, checksum-verified GhosttyKit.xcframework
+scripts/ghosttykit.sh            # builds GhosttyKit.xcframework from our Ghostty fork (zig 0.16)
 scripts/bundle.sh --install      # builds build.noindex/Workbench.app and copies it to /Applications
 ```
 
