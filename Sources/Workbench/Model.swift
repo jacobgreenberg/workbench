@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 
 typealias PaneID = UUID
 
@@ -122,12 +122,37 @@ struct Project: Codable, Identifiable, Equatable, Sendable {
     var activeTab: Int
     var scratch: Bool? = nil   // temporary home-folder project: gone when its last tab closes, never restored
     var hidden: Bool? = nil    // off the Active list, shown under Hidden; its terminals and agents keep running
+    var workspace: UUID? = nil // the workspace it is listed in (nil only for scratch terminals; fixed up at load)
 }
 
-/// Project indices shown in the sidebar for the Active (`hidden == false`) or Hidden list, in order. Scratch
-/// terminals are never listed (they have their own area under the list).
-func visibleProjectIndices(_ projects: [Project], hidden: Bool) -> [Int] {
-    projects.indices.filter { projects[$0].scratch != true && (projects[$0].hidden ?? false) == hidden }
+/// A group of projects (Personal, Work…), picked in the sidebar's rail. Its icon is `image` (cropped and downscaled
+/// when chosen), else `emoji`, else a monogram of the name.
+struct Workspace: Codable, Identifiable, Equatable, Sendable {
+    var id: UUID
+    var name: String
+    var image: String? = nil       // file name in Store.workspaceImages; wins over the emoji
+    var emoji: String? = nil
+    var lastProject: UUID? = nil   // reselected when switching back to this workspace
+}
+
+/// Every layout has at least one workspace and every non-scratch project belongs to one that exists; layouts saved
+/// before workspaces get a single "Personal" holding everything. The active workspace follows the active project.
+func normalizeWorkspaces(_ l: inout Layout) {
+    if (l.workspaces ?? []).isEmpty { l.workspaces = [Workspace(id: UUID(), name: "Personal")] }
+    let ids = Set((l.workspaces ?? []).map(\.id)), first = l.workspaces?.first?.id
+    for i in l.projects.indices where l.projects[i].scratch != true && !ids.contains(l.projects[i].workspace ?? UUID()) {
+        l.projects[i].workspace = first
+    }
+    let activeHome = l.projects.indices.contains(l.activeProject) ? l.projects[l.activeProject].workspace : nil
+    if let activeHome { l.activeWorkspace = activeHome } else if !ids.contains(l.activeWorkspace ?? UUID()) { l.activeWorkspace = first }
+}
+
+/// Project indices shown in the sidebar for `workspace`'s Active (`hidden == false`) or Hidden list, in order.
+/// Scratch terminals are never listed (they have their own area under the list).
+func visibleProjectIndices(_ projects: [Project], hidden: Bool, workspace: UUID?) -> [Int] {
+    projects.indices.filter {
+        projects[$0].scratch != true && (projects[$0].hidden ?? false) == hidden && projects[$0].workspace == workspace
+    }
 }
 
 /// Indices of the scratch terminals, in order (the sidebar's bottom area).
@@ -150,6 +175,8 @@ struct Layout: Codable, Equatable, Sendable {
     var sidebarVisible: Bool
     var theme: String
     var showHidden: Bool? = nil   // sidebar lists the hidden projects instead of the active ones (nil = active)
+    var workspaces: [Workspace]? = nil   // never empty after load (normalizeWorkspaces)
+    var activeWorkspace: UUID? = nil
 
     static let `default` = Layout(
         projects: [],
@@ -178,6 +205,8 @@ func readFile(_ url: URL, cap: Int) -> Data? {
             .appendingPathComponent("Workbench")
     }()
 
+    static let workspaceImages = directory.appendingPathComponent("workspaces")
+
     var layout: Layout
     private var pending: DispatchWorkItem?
     private let queue = DispatchQueue(label: "pane.store")
@@ -196,6 +225,7 @@ func readFile(_ url: URL, cap: Int) -> Data? {
         l.projects.removeAll { $0.scratch == true }
         // -1 = no project selected (every active one hidden); keep it rather than surfacing a hidden project.
         l.activeProject = l.projects.firstIndex { $0.id == active } ?? (l.activeProject < 0 || l.projects.isEmpty ? -1 : 0)
+        normalizeWorkspaces(&l)
         for i in l.projects.indices {
             let n = l.projects[i].tabs.count
             l.projects[i].activeTab = n == 0 ? 0 : min(max(l.projects[i].activeTab, 0), n - 1)
@@ -279,7 +309,7 @@ func modelSelfCheck() {
     assert(try! JSONDecoder().decode(Project.self, from: Data(oldProject.utf8)).hidden == nil)
     func proj(_ n: String, _ h: Bool?) -> Project { Project(id: UUID(), path: "/" + n, name: n, tabs: [], activeTab: 0, hidden: h) }
     let projs = [proj("A", nil), proj("h1", true), proj("B", false), proj("h2", true), proj("C", nil)]
-    assert(visibleProjectIndices(projs, hidden: false) == [0, 2, 4] && visibleProjectIndices(projs, hidden: true) == [1, 3])
+    assert(visibleProjectIndices(projs, hidden: false, workspace: nil) == [0, 2, 4] && visibleProjectIndices(projs, hidden: true, workspace: nil) == [1, 3])
     let act = [0, 2, 4]
     assert(reorderedProjects(projs, map: act, from: 0, to: 2)?.map(\.name) == ["h1", "B", "h2", "C", "A"])
     assert(reorderedProjects(projs, map: act, from: 2, to: 0)?.map(\.name) == ["C", "A", "h1", "B", "h2"])
@@ -287,7 +317,25 @@ func modelSelfCheck() {
     // scratch terminals: in neither list, found separately
     var scr = proj("S", nil); scr.scratch = true
     let withScratch = projs + [scr]
-    assert(visibleProjectIndices(withScratch, hidden: false) == [0, 2, 4] && visibleProjectIndices(withScratch, hidden: true) == [1, 3])
+    assert(visibleProjectIndices(withScratch, hidden: false, workspace: nil) == [0, 2, 4] && visibleProjectIndices(withScratch, hidden: true, workspace: nil) == [1, 3])
+    // workspaces: an old layout gets one holding every project; strays join the first; active follows the project
+    var wl = Layout(projects: projs + [scr], activeProject: 2, sidebarVisible: true, theme: "t")
+    normalizeWorkspaces(&wl)
+    let home = wl.workspaces![0].id
+    assert(wl.workspaces!.count == 1 && wl.activeWorkspace == home && wl.projects.last!.workspace == nil)
+    assert(wl.projects.dropLast().allSatisfy { $0.workspace == home })
+    let kwi = Workspace(id: UUID(), name: "KWI")
+    wl.workspaces!.append(kwi); wl.projects[2].workspace = kwi.id; wl.projects[0].workspace = UUID()
+    normalizeWorkspaces(&wl)
+    assert(wl.activeWorkspace == kwi.id && wl.projects[0].workspace == home)
+    assert(visibleProjectIndices(wl.projects, hidden: false, workspace: kwi.id) == [2])
+    assert(monogram("KWI") == "KWI" && monogram("Personal") == "P" && monogram("side-projects") == "SP" && monogram("") == "?")
+    // a chosen picture is stored center-cropped and downscaled
+    let big = NSImage(size: NSSize(width: 1200, height: 800), flipped: false) { r in NSColor.red.setFill(); r.fill(); return true }
+    let src = dir.appendingPathComponent("big.png")
+    try! NSBitmapImageRep(data: big.tiffRepresentation!)!.representation(using: .png, properties: [:])!.write(to: src)
+    let icon = NSBitmapImageRep(data: workspaceIconPNG(src)!)!
+    assert(icon.pixelsWide == 128 && icon.pixelsHigh == 128)
     assert(scratchProjectIndices(withScratch) == [5] && scratchProjectIndices(projs).isEmpty)
     // p2 over p3, drag p3 to p2's right: they become side by side
     assert(tree.moving(p3.id, to: p2.id, .right) == .split(axis: .horizontal, ratio: 0.3, a: .leaf(p1),

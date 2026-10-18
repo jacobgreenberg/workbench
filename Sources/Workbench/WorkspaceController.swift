@@ -140,8 +140,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         ])
 
         sidebarItem = NSSplitViewItem(sidebarWithViewController: controller(sidebar))
-        sidebarItem.minimumThickness = 180
-        sidebarItem.maximumThickness = 360
+        sidebarItem.minimumThickness = 240 + WorkspaceRail.width
+        sidebarItem.maximumThickness = 360 + WorkspaceRail.width
         sidebarItem.isCollapsed = !store.layout.sidebarVisible
         let mainItem = NSSplitViewItem(viewController: controller(main))
         mainItem.minimumThickness = 300
@@ -176,6 +176,14 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         tabBar.onNew = { [unowned self] in newTab(nil) }
         sidebar.onRename = { [unowned self] i, name in renameProject(project(atRow: i) ?? -1, name) }
         sidebar.onMove = { [unowned self] from, to in moveProject(from, to) }
+        sidebar.onMoveToWorkspace = { [unowned self] row, w in project(atRow: row).map { moveProject($0, toWorkspace: w) } }
+        sidebar.rail.onSelect = { [unowned self] i in selectWorkspace(i) }
+        sidebar.rail.onNew = { [unowned self] in newWorkspace() }
+        sidebar.rail.onRename = { [unowned self] i in renameWorkspace(i) }
+        sidebar.rail.onChooseEmoji = { [unowned self] i in chooseWorkspaceEmoji(i) }
+        sidebar.rail.onChooseImage = { [unowned self] i in chooseWorkspaceImage(i) }
+        sidebar.rail.onClearIcon = { [unowned self] i in setWorkspaceIcon(i, image: nil, emoji: nil) }
+        sidebar.rail.onDelete = { [unowned self] i in deleteWorkspace(i) }
         tabBar.onRename = { [unowned self] i, name in renameTab(i, name) }
         tabBar.onMove = { [unowned self] from, to in moveTab(from, to) }
         tree.onRatiosChanged = { [unowned self] newRoot in
@@ -198,7 +206,10 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
 
     /// The sidebar lists either the active or the hidden projects; its rows map to project indices through this.
     private var showingHidden: Bool { store.layout.showHidden ?? false }
-    private var visibleProjects: [Int] { visibleProjectIndices(store.layout.projects, hidden: showingHidden) }
+    private var visibleProjects: [Int] {
+        visibleProjectIndices(store.layout.projects, hidden: showingHidden, workspace: store.layout.activeWorkspace)
+    }
+    private var workspaces: [Workspace] { store.layout.workspaces ?? [] }
     private func project(atRow r: Int) -> Int? { let v = visibleProjects; return v.indices.contains(r) ? v[r] : nil }
     private func scratch(atRow r: Int) -> Int? { let v = scratchProjectIndices(store.layout.projects); return v.indices.contains(r) ? v[r] : nil }
 
@@ -367,7 +378,13 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             return SidebarRow(id: p.id, name: p.name, path: p.path, status: items.map(\.status).max() ?? .idle,
                               tabCount: items.count)
         }, selected: visible.firstIndex(of: store.layout.activeProject) ?? -1,
-           hiddenCount: projects.count { $0.scratch != true && $0.hidden == true }, showingHidden: showingHidden, theme: theme)
+           hiddenCount: projects.count { $0.workspace == store.layout.activeWorkspace && $0.hidden == true },
+           showingHidden: showingHidden, theme: theme)
+        sidebar.updateWorkspaces(workspaces.map { w in
+            WorkspaceItem(id: w.id, name: w.name, image: w.image.map { Store.workspaceImages.appendingPathComponent($0).path },
+                          emoji: w.emoji,
+                          status: projects.filter { $0.workspace == w.id }.flatMap { tabItems($0).map(\.status) }.max() ?? .idle)
+        }, selected: workspaces.firstIndex { $0.id == store.layout.activeWorkspace } ?? -1, theme: theme)
         let scratches = scratchProjectIndices(projects)
         sidebar.updateScratch(rows: scratches.enumerated().map { n, i in
             let p = projects[i]
@@ -857,10 +874,13 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         render()
     }
 
-    /// Makes `p` the active project and switches the sidebar to the list it is in.
+    /// Makes `p` the active project and switches the sidebar to the workspace and list it is in.
     private func activate(_ p: Int) {
         store.layout.activeProject = p
         guard store.layout.projects[p].scratch != true else { return }   // not in either list: leave the list as is
+        let home = store.layout.projects[p].workspace
+        store.layout.activeWorkspace = home
+        if let w = workspaces.firstIndex(where: { $0.id == home }) { store.layout.workspaces?[w].lastProject = store.layout.projects[p].id }
         let hidden = store.layout.projects[p].hidden == true
         if hidden != showingHidden { store.layout.showHidden = hidden ? true : nil }
     }
@@ -919,6 +939,135 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         dropProject(i)
         store.changed()
         render()
+    }
+
+    // MARK: - Workspaces
+
+    /// Shows workspace `i`'s projects and reselects the one last used there (or its first, or none).
+    private func selectWorkspace(_ i: Int) {
+        guard workspaces.indices.contains(i) else { return }
+        let w = workspaces[i]
+        guard w.id != store.layout.activeWorkspace else { return }
+        store.layout.activeWorkspace = w.id
+        let projects = store.layout.projects
+        if let p = projects.firstIndex(where: { $0.id == w.lastProject && $0.workspace == w.id }) {
+            activate(p)
+        } else {
+            store.layout.showHidden = nil
+            selectVisible(near: 0)
+        }
+        store.changed()
+        render()
+    }
+
+    private func newWorkspace() {
+        askText("New Workspace", "Name", initial: "") { [weak self] name in
+            guard let self else { return }
+            store.layout.workspaces = workspaces + [Workspace(id: UUID(), name: name)]
+            selectWorkspace(workspaces.count - 1)
+        }
+    }
+
+    private func renameWorkspace(_ i: Int) {
+        guard workspaces.indices.contains(i) else { return }
+        let id = workspaces[i].id
+        askText("Rename Workspace", "Name", initial: workspaces[i].name) { [weak self] name in
+            guard let self, let j = workspaces.firstIndex(where: { $0.id == id }) else { return }
+            store.layout.workspaces?[j].name = name
+            store.changed()
+            render()
+        }
+    }
+
+    /// Any single character works; the character palette opens with the field so emoji are one click away.
+    private func chooseWorkspaceEmoji(_ i: Int) {
+        guard workspaces.indices.contains(i) else { return }
+        let w = workspaces[i]
+        askText("Workspace Emoji", "Pick an emoji for “\(w.name)”.", initial: w.emoji ?? "", palette: true) { [weak self] text in
+            guard let self, let j = workspaces.firstIndex(where: { $0.id == w.id }), let c = text.first else { return }
+            setWorkspaceIcon(j, image: nil, emoji: String(c))
+        }
+    }
+
+    private func chooseWorkspaceImage(_ i: Int) {
+        guard workspaces.indices.contains(i), let window else { return }
+        let id = workspaces[i].id
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.prompt = "Use Image"
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let url = panel.url, let self,
+                  let j = workspaces.firstIndex(where: { $0.id == id }) else { return }
+            guard let png = workspaceIconPNG(url) else { NSSound.beep(); return }
+            // A new name per image, so the rail sees the change and reloads it.
+            let name = "\(id.uuidString)-\(UUID().uuidString.prefix(8)).png"
+            try? FileManager.default.createDirectory(at: Store.workspaceImages, withIntermediateDirectories: true)
+            guard (try? png.write(to: Store.workspaceImages.appendingPathComponent(name), options: .atomic)) != nil else { NSSound.beep(); return }
+            setWorkspaceIcon(j, image: name, emoji: nil)
+        }
+    }
+
+    /// Sets the icon (nil and nil = the monogram), deleting the image file it replaces.
+    private func setWorkspaceIcon(_ i: Int, image: String?, emoji: String?) {
+        guard workspaces.indices.contains(i) else { return }
+        if let old = workspaces[i].image, old != image {
+            try? FileManager.default.removeItem(at: Store.workspaceImages.appendingPathComponent(old))
+        }
+        store.layout.workspaces?[i].image = image
+        store.layout.workspaces?[i].emoji = emoji
+        store.changed()
+        render()
+    }
+
+    /// Its projects move to the workspace before it (after it, for the first); nothing is closed.
+    private func deleteWorkspace(_ i: Int) {
+        guard workspaces.count > 1, workspaces.indices.contains(i), let window else { return }
+        let w = workspaces[i], heir = workspaces[i == 0 ? 1 : i - 1]
+        let n = store.layout.projects.count { $0.workspace == w.id }
+        let alert = NSAlert()
+        alert.messageText = "Delete “\(w.name)”?"
+        alert.informativeText = n == 0 ? "It has no projects." : "Its \(n == 1 ? "project moves" : "\(n) projects move") to “\(heir.name)”. Nothing is closed."
+        alert.addButton(withTitle: "Delete").hasDestructiveAction = true
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self, let j = workspaces.firstIndex(where: { $0.id == w.id }) else { return }
+            setWorkspaceIcon(j, image: nil, emoji: nil)   // drops the image file
+            for p in store.layout.projects.indices where store.layout.projects[p].workspace == w.id {
+                store.layout.projects[p].workspace = heir.id
+            }
+            store.layout.workspaces?.remove(at: j)
+            if store.layout.activeWorkspace == w.id { store.layout.activeWorkspace = heir.id }
+            store.changed()
+            render()
+        }
+    }
+
+    private func moveProject(_ p: Int, toWorkspace w: Int) {
+        guard store.layout.projects.indices.contains(p), workspaces.indices.contains(w) else { return }
+        let pos = visibleProjects.firstIndex(of: p) ?? 0
+        store.layout.projects[p].workspace = workspaces[w].id
+        if p == store.layout.activeProject { selectVisible(near: pos) }   // it left the list shown
+        store.changed()
+        render()
+    }
+
+    /// A sheet with one text field; `done` gets the trimmed text, never empty. `palette` opens the emoji picker too.
+    private func askText(_ title: String, _ message: String, initial: String, palette: Bool = false, done: @escaping (String) -> Void) {
+        guard let window else { return }
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        let field = NSTextField(string: initial)
+        field.frame = NSRect(x: 0, y: 0, width: 240, height: 24)
+        alert.accessoryView = field
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        alert.beginSheetModal(for: window) { response in
+            let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if response == .alertFirstButtonReturn, !text.isEmpty { done(text) }
+        }
+        if palette { DispatchQueue.main.async { alert.window.makeFirstResponder(field); NSApp.orderFrontCharacterPalette(field) } }
     }
 
     /// Removes a project; if it was the active one, the next project in the list shown takes over.
@@ -1203,7 +1352,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         let spec = PaneSpec(id: UUID(), kind: .terminal(cwd: url.path, launch: nil))
         store.layout.projects.append(Project(id: UUID(), path: url.path, name: url.lastPathComponent,
                                              tabs: [Tab(id: UUID(), title: Self.title(of: spec), root: .leaf(spec), focused: spec.id)],
-                                             activeTab: 0))
+                                             activeTab: 0, workspace: store.layout.activeWorkspace))
         activate(store.layout.projects.count - 1)   // also leaves the Hidden list
         store.changed()
         render()

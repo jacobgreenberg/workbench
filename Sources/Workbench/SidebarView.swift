@@ -14,13 +14,14 @@ private final class SidebarTable: NSTableView {
     override var acceptsFirstResponder: Bool { false }
 }
 
-/// One line for a project or scratch terminal: SF Symbol, name, then status dot (hidden when idle) and tab count on the
+/// One line for a scratch terminal: SF Symbol, name, then status dot (hidden when idle) and tab count on the
 /// right. The symbol is what makes rows read as separate items, as in Finder's and Mail's sidebars.
 private final class ProjectCell: NSTableCellView {
     let icon = NSImageView()
     let label = NSTextField(labelWithString: "")
     let dot = NSView()
     let count = NSTextField(labelWithString: "")
+    let hint = NSTextField(labelWithString: "")   // optional shortcut hint, trailing (empty = hidden)
 
     init(symbol: String) {
         super.init(frame: .zero)
@@ -30,8 +31,11 @@ private final class ProjectCell: NSTableCellView {
         dot.wantsLayer = true
         dot.layer?.cornerRadius = 3.5
         count.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        hint.font = .systemFont(ofSize: 11)
+        hint.textColor = .tertiaryLabelColor
+        hint.isHidden = true
         textField = label
-        let trailing = NSStackView(views: [dot, count])   // hidden members drop out of the stack
+        let trailing = NSStackView(views: [dot, count, hint])   // hidden members drop out of the stack
         trailing.spacing = 8
         for v in [icon, label, trailing] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
@@ -67,71 +71,102 @@ private final class ProjectCell: NSTableCellView {
     }
 }
 
-/// Selected rows are a Liquid Glass capsule inset from the edges instead of the flat source-list fill; a faint
-/// capsule shows under the pointer. The sidebar is not over a terminal, so glass is fine here.
-private final class GlassRowView: NSTableRowView {
-    private let glass = NSGlassEffectView()
-    private let hover = NSView()
-    private static let inset: CGFloat = 8
-    private static let gap: CGFloat = 3   // half the space between cards: rows fill their full height, so spacing is drawn here
+/// A project row: status dot (a hollow ring when nothing is open), name, and what it is doing underneath.
+private final class ProjectRowCell: NSTableCellView {
+    let dot = NSView()
+    let label = NSTextField(labelWithString: "")
+    let detail = NSTextField(labelWithString: "")
 
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        glass.cornerRadius = 10
-        glass.alphaValue = 0
-        hover.wantsLayer = true
-        hover.layer?.cornerRadius = 10
-        hover.isHidden = true
-        addSubview(hover)
-        addSubview(glass)
-        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
+    init() {
+        super.init(frame: .zero)
+        dot.wantsLayer = true
+        dot.layer?.cornerRadius = 4
+        label.lineBreakMode = .byTruncatingTail
+        label.font = .systemFont(ofSize: 13.5, weight: .semibold)
+        detail.lineBreakMode = .byTruncatingTail
+        detail.font = .systemFont(ofSize: 11.5)
+        let text = NSStackView(views: [label, detail])
+        text.orientation = .vertical
+        text.alignment = .leading
+        text.spacing = 1
+        for v in [dot, text] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(v)
+        }
+        NSLayoutConstraint.activate([
+            dot.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 20),
+            dot.centerYAnchor.constraint(equalTo: centerYAnchor),
+            dot.widthAnchor.constraint(equalToConstant: 8),
+            dot.heightAnchor.constraint(equalToConstant: 8),
+            text.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 10),
+            text.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -16),
+            text.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    override func layout() {
-        super.layout()
-        glass.frame = bounds.insetBy(dx: Self.inset, dy: Self.gap)
-        hover.frame = glass.frame
-    }
-
-    /// Each row rests on its own soft rounded card, so they read as separate items; selection is the glass over it.
-    override func drawBackground(in dirtyRect: NSRect) {
-        guard !isSelected else { return }   // the glass replaces the card; no edge peeking out
-        NSColor.labelColor.withAlphaComponent(0.07).setFill()
-        NSBezierPath(roundedRect: bounds.insetBy(dx: Self.inset, dy: Self.gap), xRadius: 10, yRadius: 10).fill()
-    }
-
-    override func drawSelection(in dirtyRect: NSRect) {}   // the glass is the selection
-    override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }   // keep label colors on glass
-
-    override var isSelected: Bool {
-        didSet {
-            guard isSelected != oldValue else { return }
-            hover.isHidden = true
-            needsDisplay = true
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.15
-                glass.animator().alphaValue = isSelected ? 1 : 0
-            }
+    @MainActor func style(_ r: SidebarRow, selected: Bool, theme: Theme) {
+        if !label.isEditable { label.stringValue = r.name }
+        let empty = r.tabCount == 0
+        label.textColor = selected ? .white : empty ? .secondaryLabelColor : .labelColor
+        detail.textColor = selected ? .white.withAlphaComponent(0.8) : .secondaryLabelColor
+        detail.stringValue = switch r.status {
+        case .attention: "Needs you"
+        case .busy: "Working…"
+        case .done: "Done"
+        case .idle: empty ? "Nothing open" : r.tabCount == 1 ? "1 tab" : "\(r.tabCount) tabs"
         }
-    }
-
-    override func mouseEntered(with event: NSEvent) { if !isSelected { showHover(true) } }
-    override func mouseExited(with event: NSEvent) { showHover(false) }
-
-    private func showHover(_ on: Bool) {
-        hover.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.07).cgColor
-        hover.isHidden = !on
+        toolTip = r.path
+        styleStatusDot(dot, r.status, theme: theme)
+        dot.isHidden = false
+        if r.status == .idle {   // idle: grey dot with tabs open, hollow ring without
+            let grey = selected ? NSColor.white.withAlphaComponent(0.7) : .tertiaryLabelColor
+            dot.layer?.backgroundColor = empty ? .clear : grey.cgColor
+            dot.layer?.borderColor = grey.cgColor
+            dot.layer?.borderWidth = empty ? 1.5 : 0
+        } else {
+            dot.layer?.borderColor = NSColor.white.cgColor
+            dot.layer?.borderWidth = selected ? 1.5 : 0
+        }
     }
 }
 
-/// Scratch rows: a flat selection fill, no glass, so a session reads as different from a project.
-private final class FlatRowView: NSTableRowView {
-    override func drawSelection(in dirtyRect: NSRect) {
-        NSColor.labelColor.withAlphaComponent(0.10).setFill()
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 6, dy: 1), xRadius: 8, yRadius: 8).fill()
+/// Selected = a solid accent rounded fill with white text, as Mail selects; nothing else drawn. Drawn as the
+/// background: a source list draws its own (grey, glass) selection instead of calling drawSelection.
+private final class AccentRowView: NSTableRowView {
+    override func drawBackground(in dirtyRect: NSRect) {
+        guard isSelected else { return }
+        NSColor.controlAccentColor.setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 2), xRadius: 9, yRadius: 9).fill()
     }
+    override func drawSelection(in dirtyRect: NSRect) {}
+    override var isSelected: Bool { didSet { if isSelected != oldValue { needsDisplay = true } } }
+    override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }   // the cell picks its own colors
+}
+
+/// Scratch rows: a soft rounded bar (5% label fill, 9% on hover), accent when selected; no glass, no border. The
+/// spacing between rows is drawn inside the row.
+private final class FlatRowView: NSTableRowView {
+    private var hovered = false { didSet { if hovered != oldValue { needsDisplay = true } } }
+    private var bar: NSBezierPath { NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 3), xRadius: 10, yRadius: 10) }
+    override func drawBackground(in dirtyRect: NSRect) {
+        guard !isSelected else { return }
+        NSColor.labelColor.withAlphaComponent(hovered ? 0.09 : 0.055).setFill()
+        bar.fill()
+    }
+    override func drawSelection(in dirtyRect: NSRect) {
+        NSColor.controlAccentColor.setFill()
+        bar.fill()
+    }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for t in trackingAreas { removeTrackingArea(t) }
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
+    }
+    override func mouseEntered(with event: NSEvent) { hovered = true }
+    override func mouseExited(with event: NSEvent) { hovered = false }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
     override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }
 }
 
@@ -148,7 +183,7 @@ private final class FlatRowView: NSTableRowView {
     private var selected = -1
     private var theme: Theme?
     private var syncing = false
-    private static let rowHeight: CGFloat = 34, spacing: CGFloat = 2, maxRows = 4
+    private static let rowHeight: CGFloat = 46, spacing: CGFloat = 0, maxRows = 4
 
     override init() {
         height = scroll.heightAnchor.constraint(equalToConstant: 0)
@@ -200,9 +235,17 @@ private final class FlatRowView: NSTableRowView {
 
     private func style(_ cell: ProjectCell, row: Int) {
         guard let theme else { return }
+        defer {
+            let sel = rows.indices.contains(row) && row == selected
+            cell.label.font = .systemFont(ofSize: 13, weight: .semibold)
+            cell.label.textColor = sel ? .white : NSColor.labelColor.withAlphaComponent(0.85)
+            if sel { cell.icon.contentTintColor = .white; cell.count.textColor = .white.withAlphaComponent(0.8) }
+            cell.hint.stringValue = "⇧⌘N"
+            cell.hint.isHidden = row != 0
+            cell.hint.textColor = sel ? .white.withAlphaComponent(0.7) : .tertiaryLabelColor
+        }
         if rows.indices.contains(row) { cell.style(rows[row], selected: row == selected, theme: theme); return }
         cell.style(Self.placeholder, selected: false, theme: theme)   // none open: the same row, not dimmed
-        cell.label.textColor = .labelColor
         cell.icon.contentTintColor = .secondaryLabelColor
     }
 
@@ -223,12 +266,12 @@ private final class FlatRowView: NSTableRowView {
     }
 }
 
-/// The project list: a native source list inside the split view's sidebar item (AppKit supplies the glass, the
-/// collapse and the insets). One line per project; selection is the active project. Reordering is native table
-/// drag and drop.
-/// A large "Projects" title, then a segmented control that switches between active and hidden projects; project
-/// indices here are rows of the list being shown (the controller maps them to projects).
-/// Pinned below the list: a separator, the scratch terminals (not projects), and the Scratch Terminal button.
+/// The sidebar: the workspace rail at the leading edge, and beside it the active workspace's projects, a native
+/// source list inside the split view's sidebar item (AppKit supplies the glass, the collapse and the insets).
+/// The workspace's name as a large title, then a segmented control that switches between active and hidden
+/// projects; project indices here are rows of the list being shown (the controller maps them to projects).
+/// Two lines per project; selection is the active project. Reordering is native table drag and drop.
+/// Pinned below the list: a separator and the scratch terminals (not projects; the first row is also the button).
 @MainActor final class SidebarView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
     var onSelect: ((Int) -> Void)?
     var onShowHidden: ((Bool) -> Void)?   // segment picked: true = Hidden
@@ -239,6 +282,8 @@ private final class FlatRowView: NSTableRowView {
     var onSelectScratch: ((Int) -> Void)?   // indices are rows of the scratch list
     var onCloseScratch: ((Int) -> Void)?
     var onNewScratch: (() -> Void)?
+    var onMoveToWorkspace: ((Int, Int) -> Void)?   // project row, workspace index
+    let rail = WorkspaceRail()
 
     private static let dragType = NSPasteboard.PasteboardType("dev.workbench.sidebar-row")
     private var rows: [SidebarRow] = []
@@ -250,6 +295,9 @@ private final class FlatRowView: NSTableRowView {
     private let table = SidebarTable()
     private let filter = GlassSegments(labels: ["Active", "Hidden"])
     private let scratchList = ScratchList()
+    private let title = NSTextField(labelWithString: "")
+    private var workspaces: [WorkspaceItem] = []
+    private var workspace = -1
     private let toggleItem = NSMenuItem(title: "Hide Project", action: #selector(toggleHiddenTapped), keyEquivalent: "")
 
     override init(frame: NSRect) {
@@ -262,7 +310,7 @@ private final class FlatRowView: NSTableRowView {
         table.headerView = nil
         table.style = .sourceList
         table.floatsGroupRows = false
-        table.rowHeight = 38
+        table.rowHeight = 46
         table.intercellSpacing = .zero
         table.selectionHighlightStyle = .regular
         table.allowsEmptySelection = true
@@ -289,31 +337,36 @@ private final class FlatRowView: NSTableRowView {
         scratchList.onNew = { [unowned self] in onNewScratch?() }
         scratchList.onClose = { [unowned self] i in onCloseScratch?(i) }
 
-        let title = NSTextField(labelWithString: "Projects")   // a large title, like Mail's or Notes' sidebar
-        title.font = .systemFont(ofSize: 26, weight: .bold)
+        title.font = .systemFont(ofSize: 26, weight: .bold)   // a large title, like Mail's or Notes' sidebar
         title.textColor = .labelColor
-        title.setAccessibilityRole(.staticText)
-        title.setAccessibilityLabel("Projects")
+        title.lineBreakMode = .byTruncatingTail
 
-        for v in [title, scroll, filter, separator, scratchList.scroll] as [NSView] {
+        let content = NSLayoutGuide()   // everything right of the rail
+        addLayoutGuide(content)
+        for v in [rail, title, scroll, filter, separator, scratchList.scroll] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
         NSLayoutConstraint.activate([
-            title.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 6),   // below the toolbar
-            title.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            rail.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 6),   // below the toolbar
+            rail.bottomAnchor.constraint(equalTo: bottomAnchor),
+            rail.leadingAnchor.constraint(equalTo: leadingAnchor),
+            content.leadingAnchor.constraint(equalTo: rail.trailingAnchor),
+            content.trailingAnchor.constraint(equalTo: trailingAnchor),
+            title.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 6),
+            title.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 8),
             title.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
             filter.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 10),
-            filter.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            filter.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 4),
             filter.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             scroll.topAnchor.constraint(equalTo: filter.bottomAnchor, constant: 10),
-            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
             scroll.bottomAnchor.constraint(equalTo: separator.topAnchor, constant: -4),
-            separator.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            separator.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 4),
             separator.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             separator.bottomAnchor.constraint(equalTo: scratchList.scroll.topAnchor, constant: -6),
-            scratchList.scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scratchList.scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             scratchList.scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
             scratchList.scroll.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
         ])
@@ -329,6 +382,17 @@ private final class FlatRowView: NSTableRowView {
         if rows.indices.contains(table.clickedRow) {
             menu.addItem(toggleItem)
             menu.addItem(NSMenuItem(title: "Rename", action: #selector(renameTapped), keyEquivalent: ""))
+            if workspaces.count > 1 {
+                let move = NSMenuItem(title: "Move to Workspace", action: nil, keyEquivalent: "")
+                move.submenu = NSMenu()
+                for (i, w) in workspaces.enumerated() where i != workspace {
+                    let item = NSMenuItem(title: w.name, action: #selector(moveTapped), keyEquivalent: "")
+                    item.tag = i
+                    item.target = self
+                    move.submenu?.addItem(item)
+                }
+                menu.addItem(move)
+            }
             menu.addItem(.separator())
             menu.addItem(NSMenuItem(title: "Remove Project…", action: #selector(removeTapped), keyEquivalent: ""))
         }
@@ -339,12 +403,16 @@ private final class FlatRowView: NSTableRowView {
 
     @objc private func removeTapped() { if rows.indices.contains(table.clickedRow) { onRemove?(table.clickedRow) } }
 
+    @objc private func moveTapped(_ sender: NSMenuItem) {
+        if rows.indices.contains(table.clickedRow) { onMoveToWorkspace?(table.clickedRow, sender.tag) }
+    }
+
     @objc private func renameTapped() { beginRename(table.clickedRow) }
 
     @objc private func rowDoubleClicked() { beginRename(table.clickedRow) }
 
     private func beginRename(_ row: Int) {
-        guard rows.indices.contains(row), let cell = table.view(atColumn: 0, row: row, makeIfNecessary: false) as? ProjectCell else { return }
+        guard rows.indices.contains(row), let cell = table.view(atColumn: 0, row: row, makeIfNecessary: false) as? ProjectRowCell else { return }
         InlineRename(cell.label) { [weak self] name in self?.onRename?(row, name) }
     }
 
@@ -355,6 +423,14 @@ private final class FlatRowView: NSTableRowView {
     }
 
     /// The scratch terminals pinned under the list (`selected` -1 = none).
+    /// The rail, and the title naming the selected workspace.
+    func updateWorkspaces(_ items: [WorkspaceItem], selected: Int, theme: Theme) {
+        workspaces = items
+        workspace = selected
+        title.stringValue = items.indices.contains(selected) ? items[selected].name : ""
+        rail.update(items, selected: selected, theme: theme)
+    }
+
     func updateScratch(rows: [SidebarRow], selected: Int, theme: Theme) {
         scratchList.update(rows: rows, selected: selected, theme: theme)
     }
@@ -381,11 +457,11 @@ private final class FlatRowView: NSTableRowView {
     /// Everything on screen is styled in place, so a status dot, count or name change never rebuilds or flashes a row.
     private func restyleVisible() {
         for row in rows.indices {
-            if let cell = table.view(atColumn: 0, row: row, makeIfNecessary: false) as? ProjectCell { style(cell, row: row) }
+            if let cell = table.view(atColumn: 0, row: row, makeIfNecessary: false) as? ProjectRowCell { style(cell, row: row) }
         }
     }
 
-    private func style(_ cell: ProjectCell, row: Int) {
+    private func style(_ cell: ProjectRowCell, row: Int) {
         if let theme, rows.indices.contains(row) { cell.style(rows[row], selected: row == selected, theme: theme) }
     }
 
@@ -393,10 +469,10 @@ private final class FlatRowView: NSTableRowView {
 
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 
-    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { GlassRowView() }
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { AccentRowView() }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let cell = ProjectCell(symbol: "folder")
+        let cell = ProjectRowCell()
         style(cell, row: row)
         return cell
     }

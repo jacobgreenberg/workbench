@@ -33,14 +33,18 @@ extension SplitNode {
     func moving(_ id: PaneID, to target: PaneID, _ edge: FocusDirection) -> SplitNode   // id re-split beside target on edge; self if same/missing
 }
 struct Tab: Codable, Identifiable, Equatable, Sendable { var id: UUID; var title: String; var root: SplitNode; var focused: PaneID?; var customTitle: String? = nil /* user rename; wins over the terminal title */ }
-struct Project: Codable, Identifiable, Equatable, Sendable { var id: UUID; var path: String; var name: String; var tabs: [Tab]; var activeTab: Int; var scratch: Bool? = nil /* ⇧⌘N scratch terminal in ~ (reused: each press adds a tab): never listed as a project, shown in the sidebar's bottom area; dropped when its last tab closes and at load */; var hidden: Bool? = nil /* off the Active list, listed under Hidden; terminals and agents keep running; nil/absent = active */ }
+struct Project: Codable, Identifiable, Equatable, Sendable { var id: UUID; var path: String; var name: String; var tabs: [Tab]; var activeTab: Int; var scratch: Bool? = nil /* ⇧⌘N scratch terminal in ~ (reused: each press adds a tab): never listed as a project, shown in the sidebar's bottom area; dropped when its last tab closes and at load */; var hidden: Bool? = nil /* off the Active list, listed under Hidden; terminals and agents keep running; nil/absent = active */; var workspace: UUID? = nil /* its workspace; nil only for scratch */ }
+struct Workspace: Codable, Identifiable, Equatable, Sendable { var id: UUID; var name: String; var image: String? = nil /* file in Store.workspaceImages (128 px PNG, center-cropped by workspaceIconPNG; new name per image) */; var emoji: String? = nil; var lastProject: UUID? = nil /* reselected on switching back */ }   // icon = image, else emoji on a tint, else monogram(name)
+func normalizeWorkspaces(_ l: inout Layout)   // at load: ≥1 workspace (old layouts get "Personal" holding everything), strays join the first, activeWorkspace follows the active project
 struct Layout: Codable, Equatable, Sendable {
     var projects: [Project]; var activeProject: Int /* -1 = none (the last active project was hidden) */; var sidebarVisible: Bool; var theme: String
     var showHidden: Bool? = nil   // sidebar shows the Hidden list instead of Active (view state; nil = Active)
+    var workspaces: [Workspace]? = nil; var activeWorkspace: UUID? = nil   // never empty / always valid after load
     static let `default`: Layout
 }
 @MainActor final class Store {
     static let directory: URL            // ~/Library/Application Support/Workbench (created on first use)
+    static let workspaceImages: URL      // directory/workspaces
     var layout: Layout                   // mutate, then call changed()
     init()                               // loads directory/layout.json, falls back to .default on missing/corrupt
     func changed()                       // debounced 500 ms save on a private serial queue, atomic write
@@ -143,12 +147,12 @@ enum Syntax {
     static func highlights(_ text: String, key: String) -> [(range: NSRange, name: String)]?   // thread-safe; UTF-16 ranges, less specific first
 }
 
-// Model.swift sidebar helpers: visibleProjectIndices(_:hidden:) excludes scratch (so ⌘1–9, next/previous project, reorder and the Hidden count only see real projects); scratchProjectIndices(_:) -> [Int]. The sidebar table is one row per project (table row == visible project index).
+// Model.swift sidebar helpers: visibleProjectIndices(_:hidden:workspace:) is the active workspace's list and excludes scratch (so ⌘1–9, next/previous project, reorder and the Hidden count only see real projects); scratchProjectIndices(_:) -> [Int]. The sidebar table is one row per project (table row == visible project index).
 
 // SidebarView.swift
 struct SidebarRow: Equatable, Sendable { let id: UUID; let name: String; let path: String; let status: PaneStatus; var tabCount = 0 }   // status = busiest pane of the project; tabCount = its tabs (shown right of the row, omitted when 0; a project with none is dimmed unless selected)
 enum PaneStatus: Int, Comparable, Sendable { case idle = 0, busy = 1, done = 2, attention = 3 }   // Comparable by rawValue
-@MainActor final class SidebarView: NSView {   // a large bold "Projects" title, the Active/Hidden GlassSegments under it, then a native .sourceList table. One 34 pt line per project (ProjectCell): name (13 pt, semibold when selected), then on the right the status dot (max of its panes, hidden when idle) and the tab count; no chevrons or tab rows. Selection = the active project (the single glass capsule). update() restyles cells in place and reloads only when the row ids change. Native drag-and-drop reorders projects. Pinned below the list: separator, scratch terminal rows (own small source-list table, same ProjectCell/row view, named "Scratch Terminal [n]", cwd as tooltip), a content-hugging "Scratch Terminal" glass button at the leading edge
+@MainActor final class SidebarView: NSView {   // the WorkspaceRail at the leading edge; right of it the workspace's name as a large bold title, the Active/Hidden GlassSegments under it, then a native .sourceList table. Two lines per project (ProjectRowCell, 46 pt): status dot (grey idle, hollow ring with nothing open), name, then "Needs you / Working… / Done / N tabs / Nothing open". Selection = the active project, a solid accent fill with white text (AccentRowView, drawn as the background). update() restyles cells in place and reloads only when the row ids change. Native drag-and-drop reorders projects. Pinned below the list: separator, scratch terminal rows (own small source-list table, ProjectCell with a terminal symbol, named "Scratch Terminal [n]", cwd as tooltip); with none open, one "Scratch Terminal ⇧⌘N" row that is itself the button
     var onSelect: ((Int) -> Void)?; var onRemove: ((Int) -> Void)?         // project indices are rows of the list shown; WorkspaceController maps rows to projects (visibleProjectIndices / reorderedProjects in Model.swift)
     var onShowHidden: ((Bool) -> Void)?                  // Active/Hidden segmented control above the list
     var onToggleHidden: ((Int) -> Void)?                 // context menu Hide Project (Active view) / Show Project (Hidden view)
@@ -156,11 +160,20 @@ enum PaneStatus: Int, Comparable, Sendable { case idle = 0, busy = 1, done = 2, 
     var onMove: ((Int, Int) -> Void)?                    // drag a project: from, to (final index after removal)
     var onSelectScratch: ((Int) -> Void)?; var onCloseScratch: ((Int) -> Void)?   // indices are rows of the scratch list; right-click Close
     var onNewScratch: (() -> Void)?                      // the Scratch Terminal button (same as ⇧⌘N)
+    var onMoveToWorkspace: ((Int, Int) -> Void)?         // project context menu "Move to Workspace" (2+ workspaces): row, workspace index
+    let rail: WorkspaceRail
+    func updateWorkspaces(_ items: [WorkspaceItem], selected: Int, theme: Theme)   // rail + title
     func update(rows: [SidebarRow], selected: Int, hiddenCount: Int, showingHidden: Bool, theme: Theme)   // selected -1 = none; skipped while a name is being edited (the rename's end re-renders)
     func updateScratch(rows: [SidebarRow], selected: Int, theme: Theme)   // scratch terminals; selected -1 = none (a project is active)
 }   // Add Project is a toolbar item (WorkspaceController), not a sidebar button
 
-// GlassSegments.swift — `GlassSegments(labels:)`: the tab bar's toggle look as a standalone view (glass capsule + sliding tertiary-fill selection pill, same 0.28 s curve, Reduce Motion snaps); `onSelect: ((Int) -> Void)?`, `setLabel(_:at:)`, `select(_:animated:)`. Used by the sidebar's Active/Hidden switch. Sidebar rows are GlassRowView (selection = NSGlassEffectView capsule inset 6 pt, hover fill; no flat source-list fill).
+// GlassSegments.swift — `GlassSegments(labels:)`: the tab bar's toggle look as a standalone view (glass capsule + sliding tertiary-fill selection pill, same 0.28 s curve, Reduce Motion snaps); `onSelect: ((Int) -> Void)?`, `setLabel(_:at:)`, `select(_:animated:)`. Used by the sidebar's Active/Hidden switch. Scratch rows are soft rounded bars (5% label fill, 9% hover, solid accent when selected; no glass), ⇧⌘N hint on the first.
+
+// WorkspaceRail.swift — 60 pt rail, Slack-style: one 40 pt icon per workspace (gradient tile + rounded-bold monogram, or emoji on a soft tint, or image), status badge = busiest pane inside, selected marked by a bar at the rail's edge; glass + New Workspace below. Right-click: Rename…, Choose Emoji… (sheet with a field + character palette; first character kept), Choose Image… (NSOpenPanel), Use Monogram, Delete Workspace… (2+; projects move to the neighbour, nothing closed)
+struct WorkspaceItem: Equatable, Sendable { let id: UUID; let name: String; let image: String? /* absolute path */; let emoji: String?; let status: PaneStatus }
+func monogram(_ name: String) -> String   // KWI → KWI, side-projects → SP, Personal → P
+func workspaceIconPNG(_ url: URL, px: Int = 128) -> Data?
+@MainActor final class WorkspaceRail: NSView { var onSelect, onRename, onChooseEmoji, onChooseImage, onClearIcon, onDelete: ((Int) -> Void)?; var onNew: (() -> Void)?; static let width: CGFloat; func update(_ items: [WorkspaceItem], selected: Int, theme: Theme) }
 
 // TabBarView.swift
 struct TabItem: Equatable, Sendable { let title: String; let status: PaneStatus }
