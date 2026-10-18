@@ -109,8 +109,8 @@ private final class ProjectRowCell: NSTableCellView {
     @MainActor func style(_ r: SidebarRow, selected: Bool, theme: Theme) {
         if !label.isEditable { label.stringValue = r.name }
         let empty = r.tabCount == 0
-        label.textColor = selected ? .white : empty ? .secondaryLabelColor : .labelColor
-        detail.textColor = selected ? .white.withAlphaComponent(0.8) : .secondaryLabelColor
+        label.textColor = selected ? .labelColor : empty ? .secondaryLabelColor : .labelColor
+        detail.textColor = .secondaryLabelColor
         detail.stringValue = switch r.status {
         case .attention: "Needs you"
         case .busy: "Working…"
@@ -121,31 +121,17 @@ private final class ProjectRowCell: NSTableCellView {
         styleStatusDot(dot, r.status, theme: theme)
         dot.isHidden = false
         if r.status == .idle {   // idle: grey dot with tabs open, hollow ring without
-            let grey = selected ? NSColor.white.withAlphaComponent(0.7) : .tertiaryLabelColor
+            let grey = selected ? NSColor.secondaryLabelColor : .tertiaryLabelColor
             dot.layer?.backgroundColor = empty ? .clear : grey.cgColor
             dot.layer?.borderColor = grey.cgColor
             dot.layer?.borderWidth = empty ? 1.5 : 0
         } else {
-            dot.layer?.borderColor = NSColor.white.cgColor
-            dot.layer?.borderWidth = selected ? 1.5 : 0
+            dot.layer?.borderWidth = 0
         }
     }
 }
 
-/// Selected = a solid accent rounded fill with white text, as Mail selects; nothing else drawn. Drawn as the
-/// background: a source list draws its own (grey, glass) selection instead of calling drawSelection.
-private final class AccentRowView: NSTableRowView {
-    override func drawBackground(in dirtyRect: NSRect) {
-        guard isSelected else { return }
-        NSColor.controlAccentColor.setFill()
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 2), xRadius: 9, yRadius: 9).fill()
-    }
-    override func drawSelection(in dirtyRect: NSRect) {}
-    override var isSelected: Bool { didSet { if isSelected != oldValue { needsDisplay = true } } }
-    override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }   // the cell picks its own colors
-}
-
-/// Scratch rows: a soft rounded bar (5% label fill, 9% on hover), accent when selected; no glass, no border. The
+/// Scratch rows: a soft rounded bar (5% label fill, 9% on hover), soft grey fill when selected; no glass, no border. The
 /// spacing between rows is drawn inside the row.
 private final class FlatRowView: NSTableRowView {
     private var hovered = false { didSet { if hovered != oldValue { needsDisplay = true } } }
@@ -156,7 +142,7 @@ private final class FlatRowView: NSTableRowView {
         bar.fill()
     }
     override func drawSelection(in dirtyRect: NSRect) {
-        NSColor.controlAccentColor.setFill()
+        NSColor.labelColor.withAlphaComponent(0.14).setFill()
         bar.fill()
     }
     override func updateTrackingAreas() {
@@ -236,13 +222,11 @@ private final class FlatRowView: NSTableRowView {
     private func style(_ cell: ProjectCell, row: Int) {
         guard let theme else { return }
         defer {
-            let sel = rows.indices.contains(row) && row == selected
             cell.label.font = .systemFont(ofSize: 13, weight: .semibold)
-            cell.label.textColor = sel ? .white : NSColor.labelColor.withAlphaComponent(0.85)
-            if sel { cell.icon.contentTintColor = .white; cell.count.textColor = .white.withAlphaComponent(0.8) }
+            cell.label.textColor = NSColor.labelColor.withAlphaComponent(0.85)
             cell.hint.stringValue = "⇧⌘N"
             cell.hint.isHidden = row != 0
-            cell.hint.textColor = sel ? .white.withAlphaComponent(0.7) : .tertiaryLabelColor
+            cell.hint.textColor = .tertiaryLabelColor
         }
         if rows.indices.contains(row) { cell.style(rows[row], selected: row == selected, theme: theme); return }
         cell.style(Self.placeholder, selected: false, theme: theme)   // none open: the same row, not dimmed
@@ -468,8 +452,6 @@ private final class FlatRowView: NSTableRowView {
     // MARK: Table
 
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
-
-    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { AccentRowView() }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let cell = ProjectRowCell()
