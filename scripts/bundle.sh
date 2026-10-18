@@ -18,7 +18,10 @@ cp Resources/claude-hooks.json Resources/AppIcon.icns "$APP/Contents/Resources/"
 cp -R /Applications/Ghostty.app/Contents/Resources/terminfo "$APP/Contents/Resources/terminfo"
 cp -R "$SI" "$APP/Contents/Resources/ghostty/shell-integration"
 
-codesign --force --sign - --options runtime "$APP"
+# A real identity keeps macOS privacy grants (Full Disk Access, Documents, ...) across rebuilds: an ad-hoc
+# signature's designated requirement is the cdhash, which every build changes, so each build re-prompted.
+ID="${WORKBENCH_SIGN_ID:-$(security find-identity -v -p codesigning | awk -F'"' '/Apple Development/ {print $2; exit}')}"
+codesign --force --sign "${ID:--}" --options runtime "$APP"
 echo "built $APP"
 
 if [ "${1:-}" = "--install" ]; then
