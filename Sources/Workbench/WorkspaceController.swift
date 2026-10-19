@@ -54,6 +54,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
 
     private let sidebar = SidebarView(frame: .zero)
     private let tabBar = TabBarView(frame: .zero)
+    private let projectName = WorkspaceController.titleLabel(bold: true), projectPath = WorkspaceController.titleLabel(bold: false)
     private let content = NSView()
     private let findBar = FindBar(frame: .zero)
     private let emptyLabel = NSTextField(labelWithString: "")
@@ -366,13 +367,14 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         render()
     }
 
-    /// With the sidebar collapsed the toolbar names the active project (and its path); expanded, the sidebar does.
+    /// With the sidebar collapsed the `.projectTitle` toolbar item (right side) names the active project and its path; expanded, the sidebar does. The window title itself stays hidden.
     private func updateWindowTitle() {
         guard let window else { return }
-        let project = sidebarItem.isCollapsed ? activeProjectIndex.map { store.layout.projects[$0] } : nil
+        let project = activeProjectIndex.map { store.layout.projects[$0] }
         window.title = project?.name ?? ""
-        window.subtitle = (project?.path as NSString?)?.abbreviatingWithTildeInPath ?? ""
-        window.titleVisibility = project == nil ? .hidden : .visible
+        projectName.stringValue = project?.name ?? ""
+        projectPath.stringValue = (project?.path as NSString?)?.abbreviatingWithTildeInPath ?? ""
+        window.toolbar?.items.first { $0.itemIdentifier == .projectTitle }?.isHidden = project == nil || !sidebarItem.isCollapsed
     }
 
     private func updateChrome() {
@@ -1476,12 +1478,25 @@ extension WorkspaceController {
 extension NSToolbarItem.Identifier {
     static let tabs = NSToolbarItem.Identifier("tabs")
     static let addProject = NSToolbarItem.Identifier("addProject")
+    static let projectTitle = NSToolbarItem.Identifier("projectTitle")
 }
 
-/// Unified toolbar: sidebar toggle over the sidebar, the tab capsule over the terminals, inspector toggle over the preview.
+/// Unified toolbar: sidebar toggle over the sidebar, the tab capsule over the terminals, project name/path on its right (sidebar collapsed only), inspector toggle over the preview.
 extension WorkspaceController: NSToolbarDelegate {
+    /// Right-aligned single-line label styled like the native window title (bold 13) / subtitle (11, secondary).
+    static func titleLabel(bold: Bool) -> NSTextField {
+        let l = NSTextField(labelWithString: "")
+        l.font = bold ? .boldSystemFont(ofSize: 13) : .systemFont(ofSize: 11)
+        l.textColor = bold ? .labelColor : .secondaryLabelColor
+        l.alignment = .right
+        l.isBordered = false
+        l.lineBreakMode = bold ? .byTruncatingTail : .byTruncatingMiddle
+        l.maximumNumberOfLines = 1
+        l.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return l
+    }
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .addProject, .sidebarTrackingSeparator, .tabs, .flexibleSpace, .inspectorTrackingSeparator, .flexibleSpace, .toggleInspector]
+        [.toggleSidebar, .addProject, .sidebarTrackingSeparator, .tabs, .flexibleSpace, .projectTitle, .inspectorTrackingSeparator, .flexibleSpace, .toggleInspector]
     }
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(toolbar) }
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier, willBeInsertedIntoToolbar: Bool) -> NSToolbarItem? {
@@ -1492,6 +1507,15 @@ extension WorkspaceController: NSToolbarDelegate {
             item.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "Add Project")
             item.target = self
             item.action = #selector(addProject(_:))
+            return item
+        }
+        if id == .projectTitle {
+            let stack = NSStackView(views: [projectName, projectPath])
+            stack.orientation = .vertical
+            stack.alignment = .trailing
+            stack.spacing = 0
+            item.view = stack
+            item.isBordered = false
             return item
         }
         guard id == .tabs else { return nil }
