@@ -233,7 +233,7 @@ private final class FlatRowView: NSTableRowView {
         guard let theme else { return }
         defer {
             cell.label.font = .systemFont(ofSize: 13, weight: .semibold)
-            cell.label.textColor = NSColor.labelColor.withAlphaComponent(0.85)
+            cell.label.textColor = .labelColor   // dynamic: a withAlphaComponent copy freezes to the appearance it was made under
             cell.hint.stringValue = "⇧⌘N"
             cell.hint.isHidden = row != 0
             cell.hint.textColor = .tertiaryLabelColor
