@@ -50,6 +50,7 @@ private final class CheckCircle: NSButton {
     private let list = FlippedStack()
     private var rowFields: [NSTextField] = []
     private var circles: [CheckCircle] = []
+    private var newRow: NSView?   // the "New to-do" line: shown while the list is empty or you're adding
     private var rebuilding = false   // removing the field being edited fires its end-editing action; ignore it
 
     override init(frame: NSRect) {
@@ -87,7 +88,12 @@ private final class CheckCircle: NSButton {
         rebuild()
     }
 
-    override func mouseDown(with event: NSEvent) { window?.makeFirstResponder(rowFields.last) }   // empty space focuses the new line
+    override func mouseDown(with event: NSEvent) { beginNew() }   // empty space below the items starts a new one
+
+    private func beginNew() {
+        newRow?.isHidden = false
+        window?.makeFirstResponder(rowFields.last)
+    }
 
     private func rebuild() {
         rebuilding = true
@@ -114,6 +120,9 @@ private final class CheckCircle: NSButton {
             field.tag = i
             field.delegate = self
             field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            field.focusRingType = .none
+            field.placeholderAttributedString = NSAttributedString(string: "New to-do", attributes: [   // a borderless field draws a plain placeholder in label color
+                .foregroundColor: NSColor.tertiaryLabelColor, .font: NSFont.systemFont(ofSize: 14)])
             if let t {
                 circle.target = self
                 circle.action = #selector(toggle(_:))
@@ -125,8 +134,6 @@ private final class CheckCircle: NSButton {
             } else {
                 circle.isEnabled = false
                 circle.alphaValue = 0.5
-                field.placeholderAttributedString = NSAttributedString(string: "New to-do", attributes: [   // a borderless field draws a plain placeholder in label color
-                    .foregroundColor: NSColor.tertiaryLabelColor, .font: NSFont.systemFont(ofSize: 14)])
                 field.textColor = .labelColor
             }
             rowFields.append(field)
@@ -160,6 +167,7 @@ private final class CheckCircle: NSButton {
                 row.menu = menu
             }
             row.translatesAutoresizingMaskIntoConstraints = false
+            if t == nil { newRow = row; row.isHidden = !todos.isEmpty }
             list.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: list.widthAnchor, constant: -28).isActive = true
         }
@@ -195,12 +203,9 @@ private final class CheckCircle: NSButton {
         guard !rebuilding, rowFields.contains(field), field.tag <= todos.count else { return }
         let i = field.tag
         let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if i == todos.count {
-            guard !text.isEmpty else { return }
-            todos.append(Todo(id: UUID(), text: text, done: false))
-            rebuild()
-            onChange?(todos)
-            window?.makeFirstResponder(rowFields.last)
+        if i == todos.count {   // focus left the new line: keep what was typed, else hide it again
+            if !text.isEmpty { todos.append(Todo(id: UUID(), text: text, done: false)); rebuild(); onChange?(todos) }
+            else { newRow?.isHidden = !todos.isEmpty }
         } else if text.isEmpty {
             todos.remove(at: i)
             rebuild()
@@ -217,7 +222,15 @@ private final class CheckCircle: NSButton {
         let i = field.tag
         switch selector {
         case #selector(NSResponder.insertNewline(_:)):
-            guard i < todos.count else { return false }
+            if i == todos.count {   // Return on the new line: add it and keep going on a fresh one
+                let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { return true }
+                todos.append(Todo(id: UUID(), text: text, done: false))
+                rebuild()
+                onChange?(todos)
+                beginNew()
+                return true
+            }
             let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             if !text.isEmpty { todos[i].text = text }
             todos.insert(Todo(id: UUID(), text: "", done: false), at: i + 1)
