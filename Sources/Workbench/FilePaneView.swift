@@ -464,6 +464,8 @@ private final class CodeTextView: NSTextView {
                         self.textView.isAutomaticQuoteSubstitutionEnabled = false
                         self.textView.isAutomaticDashSubstitutionEnabled = false
                         self.textView.isAutomaticTextReplacementEnabled = false
+                        self.textView.inlinePredictionType = .no
+                        self.textView.writingToolsBehavior = .none
                         self.textView.isAutomaticSpellingCorrectionEnabled = false
                         self.textView.isContinuousSpellCheckingEnabled = false
                         self.textView.isGrammarCheckingEnabled = false

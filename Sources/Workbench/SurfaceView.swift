@@ -894,3 +894,20 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         }
     }
 }
+
+/// A terminal is not prose: no autocorrect, predictions, completions, smart punctuation or Writing Tools typing into it.
+extension SurfaceView: @preconcurrency NSTextInputTraits {
+    var autocorrectionType: NSTextInputTraitType { get { .no } set {} }
+    var spellCheckingType: NSTextInputTraitType { get { .no } set {} }
+    var grammarCheckingType: NSTextInputTraitType { get { .no } set {} }
+    var smartQuotesType: NSTextInputTraitType { get { .no } set {} }
+    var smartDashesType: NSTextInputTraitType { get { .no } set {} }
+    var smartInsertDeleteType: NSTextInputTraitType { get { .no } set {} }
+    var textReplacementType: NSTextInputTraitType { get { .no } set {} }
+    var dataDetectionType: NSTextInputTraitType { get { .no } set {} }
+    var linkDetectionType: NSTextInputTraitType { get { .no } set {} }
+    var textCompletionType: NSTextInputTraitType { get { .no } set {} }
+    var inlinePredictionType: NSTextInputTraitType { get { .no } set {} }
+    var mathExpressionCompletionType: NSTextInputTraitType { get { .no } set {} }
+    var writingToolsBehavior: NSWritingToolsBehavior { get { .none } set {} }
+}
