@@ -197,7 +197,7 @@ func readFile(_ url: URL, cap: Int) -> Data? {
 }
 
 @MainActor final class Store {
-    static let directory: URL = {
+    nonisolated static let directory: URL = {
         #if DEBUG
         // Test isolation: a debug instance can run beside the real app without sharing its socket or layout.
         if let dir = ProcessInfo.processInfo.environment["PANE_STATE_DIR"] { return URL(fileURLWithPath: dir) }

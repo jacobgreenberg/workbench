@@ -118,11 +118,13 @@ enum Agents {
         var result: [PaneID: Session] = [:]
         var unresolved: [(pane: PaneID, cmd: String, home: String, cwd: String, started: Int)] = []
         var claimed: Set<String> = []
+        let sock = Store.directory.appendingPathComponent("pane.sock").path
         for pid in allPIDs() {
             // Identify by argv, not process name: Claude's binary is a versioned file ("2.1.301") behind a symlink.
             guard let ppid = parentPID(pid), ["zsh", "bash", "fish", "sh", "dash"].contains(processName(ppid)),
                   let (argv, env) = processArgs(pid),
-                  let pane = env["PANE_ID"].flatMap(UUID.init(uuidString:))
+                  let pane = env["PANE_ID"].flatMap(UUID.init(uuidString:)),
+                  env["PANE_SOCK"] == sock   // another instance (a test copy of the same layout) reuses our pane ids
             else { continue }
             let words = argv.prefix(2).map { ($0 as NSString).lastPathComponent }
             // One-shot runs (`claude -p`, `codex exec`) are not sessions to resume.
