@@ -178,6 +178,7 @@ struct Layout: Codable, Equatable, Sendable {
     var showHidden: Bool? = nil   // sidebar lists the hidden projects instead of the active ones (nil = active)
     var workspaces: [Workspace]? = nil   // never empty after load (normalizeWorkspaces)
     var activeWorkspace: UUID? = nil
+    var backupRepo: String? = nil   // git repo Backup syncs workbench.json to (Settings > Backup); never exported
 
     static let `default` = Layout(
         projects: [],
@@ -209,6 +210,7 @@ func readFile(_ url: URL, cap: Int) -> Data? {
     static let workspaceImages = directory.appendingPathComponent("workspaces")
 
     var layout: Layout
+    var onChange: (() -> Void)?   // after every change (Backup's git sync debounces on it)
     private var pending: DispatchWorkItem?
     private let queue = DispatchQueue(label: "pane.store")
 
@@ -238,6 +240,7 @@ func readFile(_ url: URL, cap: Int) -> Data? {
     }
 
     func changed() {
+        onChange?()
         pending?.cancel()
         let item = DispatchWorkItem { [weak self] in
             MainActor.assumeIsolated { self?.save(wait: false) }

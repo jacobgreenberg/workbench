@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 
 /// ⌘, — a native tabbed settings window (toolbar tab style). Add a pane by adding another NSTabViewItem.
 @MainActor
@@ -11,6 +12,10 @@ final class SettingsWindowController: NSWindowController {
         item.label = "Themes"
         item.image = NSImage(systemSymbolName: "paintpalette", accessibilityDescription: "Themes")
         tabs.addTabViewItem(item)
+        let backupItem = NSTabViewItem(viewController: BackupViewController(workspace: workspace))
+        backupItem.label = "Backup"
+        backupItem.image = NSImage(systemSymbolName: "externaldrive", accessibilityDescription: "Backup")
+        tabs.addTabViewItem(backupItem)
         let window = NSWindow(contentViewController: tabs)
         window.styleMask = [.titled, .closable]
         window.title = "Settings"
@@ -76,6 +81,20 @@ private final class ThemeCard: NSButton {
 
 private final class FlippedStack: NSStackView { override var isFlipped: Bool { true } }
 
+@MainActor
+private func settingsHeader(_ title: String, _ caption: String) -> NSStackView {
+    let t = NSTextField(labelWithString: title)
+    t.font = .systemFont(ofSize: 13, weight: .semibold)
+    let c = NSTextField(wrappingLabelWithString: caption)
+    c.font = .systemFont(ofSize: 11)
+    c.textColor = .secondaryLabelColor
+    let s = NSStackView(views: [t, c])
+    s.orientation = .vertical
+    s.alignment = .leading
+    s.spacing = 2
+    return s
+}
+
 /// Settings > Themes: Dark / Light cards, then the bundled and user themes (user ones can be edited and deleted).
 @MainActor
 private final class ThemesViewController: NSViewController {
@@ -92,19 +111,6 @@ private final class ThemesViewController: NSViewController {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
-
-    private func header(_ title: String, _ caption: String) -> NSStackView {
-        let t = NSTextField(labelWithString: title)
-        t.font = .systemFont(ofSize: 13, weight: .semibold)
-        let c = NSTextField(wrappingLabelWithString: caption)
-        c.font = .systemFont(ofSize: 11)
-        c.textColor = .secondaryLabelColor
-        let s = NSStackView(views: [t, c])
-        s.orientation = .vertical
-        s.alignment = .leading
-        s.spacing = 2
-        return s
-    }
 
     override func loadView() {
         cards.orientation = .horizontal
@@ -127,9 +133,9 @@ private final class ThemesViewController: NSViewController {
 
         let add = NSButton(title: "Add Custom Theme…", target: self, action: #selector(addTheme(_:)))
         let stack = NSStackView(views: [
-            header("Appearance", "Dark and Light use Apple's colors and follow the Terminal app's default profile."),
+            settingsHeader("Appearance", "Dark and Light use Apple's colors and follow the Terminal app's default profile."),
             cards,
-            header("Custom Themes", "Bundled themes are read-only. Your own live in ~/Library/Application Support/Workbench/themes."),
+            settingsHeader("Custom Themes", "Bundled themes are read-only. Your own live in ~/Library/Application Support/Workbench/themes."),
             scroll,
             add,
         ])
@@ -232,6 +238,228 @@ private final class ThemesViewController: NSViewController {
         sheet.onCancel = { [unowned self] in editor = nil }
         editor = sheet
         window.beginSheet(sheet.window)
+    }
+}
+
+/// Accepts a dropped .json file (a backup).
+private final class DropStack: NSStackView {
+    var onDrop: (URL) -> Void = { _ in }
+
+    private func jsonURL(_ info: NSDraggingInfo) -> URL? {
+        let urls = info.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]
+        return urls?.first { $0.pathExtension.lowercased() == "json" }
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        jsonURL(sender) != nil ? .copy : []
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let url = jsonURL(sender) else { return false }
+        onDrop(url)
+        return true
+    }
+}
+
+/// Settings > Backup: export / import the whole setup as JSON, and optional git sync of it.
+@MainActor
+private final class BackupViewController: NSViewController {
+    private unowned let workspace: WorkspaceController
+    private var store: Store { workspace.store }
+    private let repoLabel = NSTextField(labelWithString: "")
+    private let statusLabel = NSTextField(labelWithString: "")
+    private var stopButton: NSButton!
+    private var syncButton: NSButton!
+    private var restoreButton: NSButton!
+
+    init(workspace: WorkspaceController) {
+        self.workspace = workspace
+        super.init(nibName: nil, bundle: nil)
+        title = "Backup"
+        NotificationCenter.default.addObserver(self, selector: #selector(refresh), name: .backupStatusChanged, object: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override func loadView() {
+        let buttons = NSStackView(views: [
+            NSButton(title: "Export…", target: self, action: #selector(export(_:))),
+            NSButton(title: "Import…", target: self, action: #selector(importDialog(_:))),
+            NSButton(title: "Copy JSON", target: self, action: #selector(copyJSON(_:))),
+            NSButton(title: "Paste JSON", target: self, action: #selector(pasteJSON(_:))),
+        ])
+        buttons.spacing = 8
+
+        repoLabel.font = .systemFont(ofSize: 12)
+        repoLabel.lineBreakMode = .byTruncatingMiddle
+        repoLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        stopButton = NSButton(title: "Stop Syncing", target: self, action: #selector(stopSync(_:)))
+        let repoRow = NSStackView(views: [
+            repoLabel, NSView(),
+            NSButton(title: "Choose Repository…", target: self, action: #selector(chooseRepo(_:))),
+            stopButton,
+        ])
+        repoRow.spacing = 8
+
+        syncButton = NSButton(title: "Sync Now", target: self, action: #selector(syncNow(_:)))
+        restoreButton = NSButton(title: "Restore from Repository…", target: self, action: #selector(restoreFromRepo(_:)))
+        statusLabel.font = .systemFont(ofSize: 11)
+        statusLabel.textColor = .secondaryLabelColor
+        let syncRow = NSStackView(views: [syncButton, restoreButton, statusLabel])
+        syncRow.spacing = 8
+
+        let stack = DropStack(views: [
+            settingsHeader("Backup", "Everything that makes Workbench yours, in one JSON file: projects and their order, tabs and splits, workspaces, themes and your Ghostty config. To restore one, import it, paste it, or drop the file on this window."),
+            buttons,
+            settingsHeader("Git Sync", "Keeps workbench.json in a git repository: a minute after each change it is committed and pushed, using your own git and credentials."),
+            repoRow,
+            syncRow,
+        ])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 12
+        stack.setCustomSpacing(24, after: buttons)
+        stack.edgeInsets = NSEdgeInsets(top: 20, left: 24, bottom: 20, right: 24)
+        repoRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -48).isActive = true
+        stack.registerForDraggedTypes([.fileURL])
+        stack.onDrop = { [unowned self] url in importFile(url) }
+        view = stack
+        stack.widthAnchor.constraint(equalToConstant: 560).isActive = true
+        refresh()
+    }
+
+    @objc private func refresh() {
+        let repo = store.layout.backupRepo
+        repoLabel.stringValue = repo.map { ($0 as NSString).abbreviatingWithTildeInPath } ?? "No repository chosen"
+        repoLabel.textColor = repo == nil ? .secondaryLabelColor : .labelColor
+        stopButton.isHidden = repo == nil
+        syncButton.isEnabled = repo != nil
+        restoreButton.isEnabled = repo != nil
+        statusLabel.stringValue = BackupSync.shared.status
+    }
+
+    @objc private func export(_ sender: Any?) {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "Workbench Backup.json"
+        guard let window = view.window else { return }
+        panel.beginSheetModal(for: window) { [self] r in
+            guard r == .OK, let url = panel.url else { return }
+            do { try Backup.current(store.layout).encoded().write(to: url, options: .atomic) } catch { fail("Couldn't export the backup", error.localizedDescription) }
+        }
+    }
+
+    @objc private func importDialog(_ sender: Any?) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.canChooseDirectories = false
+        guard let window = view.window else { return }
+        panel.beginSheetModal(for: window) { [self] r in
+            guard r == .OK, let url = panel.url else { return }
+            importFile(url)
+        }
+    }
+
+    private func importFile(_ url: URL) {
+        guard let data = readFile(url, cap: 64 << 20) else { return fail("Couldn't read the backup", "\(url.lastPathComponent) is missing, not a file, or too large.") }
+        importData(data)
+    }
+
+    @objc private func copyJSON(_ sender: Any?) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(String(decoding: Backup.current(store.layout).encoded(), as: UTF8.self), forType: .string)
+    }
+
+    @objc private func pasteJSON(_ sender: Any?) {
+        guard let text = NSPasteboard.general.string(forType: .string), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return fail("Nothing to paste", "Copy a Workbench backup's JSON first.")
+        }
+        importData(Data(text.utf8))
+    }
+
+    @objc private func chooseRepo(_ sender: Any?) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.prompt = "Choose"
+        panel.message = "Choose a git repository to keep workbench.json in."
+        guard let window = view.window else { return }
+        panel.beginSheetModal(for: window) { [self] r in
+            guard r == .OK, let url = panel.url else { return }
+            store.layout.backupRepo = url.path
+            store.changed()
+            BackupSync.shared.syncNow(store)
+            refresh()
+        }
+    }
+
+    @objc private func stopSync(_ sender: Any?) {
+        store.layout.backupRepo = nil
+        store.changed()
+        refresh()
+    }
+
+    @objc private func syncNow(_ sender: Any?) { BackupSync.shared.syncNow(store) }
+
+    @objc private func restoreFromRepo(_ sender: Any?) {
+        guard let repo = store.layout.backupRepo else { return }
+        BackupSync.shared.pull(repo: repo) { [weak self] result in
+            switch result {
+            case .success(let b): self?.begin(b)
+            case .failure(let e): self?.fail("Couldn't restore from the repository", e.message)
+            }
+        }
+    }
+
+    private func importData(_ data: Data) {
+        do { begin(try Backup.decode(data)) } catch { fail("Couldn't read the backup", (error as? BackupError)?.message ?? error.localizedDescription) }
+    }
+
+    private func begin(_ backup: Backup) {
+        var b = backup
+        for p in backup.missingProjects {
+            while true {
+                let alert = NSAlert()
+                alert.messageText = "Folder for “\(p.name)” not found"
+                alert.informativeText = "\(p.path) doesn't exist on this Mac. Locate the folder, or leave the project out of the restore."
+                alert.addButton(withTitle: "Locate…")
+                alert.addButton(withTitle: "Remove Project")
+                alert.addButton(withTitle: "Cancel Import")
+                switch alert.runModal() {
+                case .alertFirstButtonReturn:
+                    let panel = NSOpenPanel()
+                    panel.canChooseDirectories = true
+                    panel.canChooseFiles = false
+                    panel.prompt = "Choose"
+                    panel.message = "Choose the folder for \(p.name)."
+                    if panel.runModal() == .OK, let url = panel.url { b.relocate(project: p.id, to: url.path) } else { continue }
+                case .alertSecondButtonReturn:
+                    b.remove(project: p.id)
+                default:
+                    return
+                }
+                break
+            }
+        }
+        let backupsPath = (Store.directory.appendingPathComponent("backups").path as NSString).abbreviatingWithTildeInPath
+        let confirm = NSAlert()
+        confirm.alertStyle = .warning
+        confirm.messageText = "Replace your current setup?"
+        confirm.informativeText = "Workbench quits and reopens with the \(b.layout.projects.count) projects in this backup. Open terminals close, and tabs rerun their saved commands, so only restore backups you made. Your current setup is saved to \(backupsPath) first."
+            + (b.ghosttyConfig != nil ? " It also replaces ~/.config/ghostty/config." : "")
+        confirm.addButton(withTitle: "Replace and Relaunch").hasDestructiveAction = true
+        confirm.addButton(withTitle: "Cancel")
+        guard confirm.runModal() == .alertFirstButtonReturn else { return }
+        do { _ = try Backup.saveCurrent(store.layout) } catch { return fail("Couldn't save your current setup, so nothing was replaced", error.localizedDescription) }
+        (NSApp.delegate as? AppDelegate)?.restore(b)
+    }
+
+    private func fail(_ title: String, _ message: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = message
+        alert.runModal()
     }
 }
 

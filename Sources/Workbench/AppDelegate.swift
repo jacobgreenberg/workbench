@@ -8,12 +8,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var workspace: WorkspaceController!
     private var control: ControlServer?
     private var settings: SettingsWindowController?
+    private var pendingRestore: Backup?   // Settings > Backup import: installed at quit, then we relaunch into it
     private let themeMenu = NSMenu(title: "Theme")
     private var reserved: [String: NSMenuItem] = [:]   // "key|mods" → item; looked up on every ⌘/⌃ keyDown in a terminal
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Agents.discoverLaunchers()
         store = Store()
+        store.onChange = { [unowned self] in BackupSync.shared.scheduleSync(store) }
         runtime = Runtime(overrides: WorkspaceController.overrides(Theme.named(store.layout.theme)))
         NSApp.mainMenu = buildMenu()
         rebuildThemeMenu()
@@ -40,7 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func applicationDidResignActive(_ notification: Notification) { runtime?.setFocus(false) }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard workspace.needsConfirmQuit else { return .terminateNow }
+        guard pendingRestore == nil, workspace.needsConfirmQuit else { return .terminateNow }   // an import already confirmed
         let alert = NSAlert()
         alert.messageText = "Quit Workbench?"
         alert.informativeText = "Running processes will be closed. Claude and Codex sessions resume on next launch."
@@ -54,6 +56,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func applicationWillTerminate(_ notification: Notification) {
         control?.stop()
         workspace.terminateAll()
+        if let backup = pendingRestore {
+            do { try backup.install(backupRepo: store.layout.backupRepo) } catch { NSLog("Backup restore failed: \(error)") }
+            relaunch()
+        }
+    }
+
+    /// Replaces the whole setup with `backup`: quit (surfaces retire, the old layout saves), install, reopen.
+    func restore(_ backup: Backup) {
+        pendingRestore = backup
+        NSApp.terminate(nil)
+    }
+
+    /// Reopens this app once this process has exited (the instance lock refuses a second copy while we live).
+    private func relaunch() {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        var open = ["open", "-n", "\"$2\""]
+        if let dir = ProcessInfo.processInfo.environment["PANE_STATE_DIR"] { open += ["--env", "PANE_STATE_DIR=\"$3\""] }
+        p.arguments = ["-c", "while kill -0 \"$1\" 2>/dev/null; do sleep 0.1; done; " + open.joined(separator: " "), "sh",
+                       String(ProcessInfo.processInfo.processIdentifier), Bundle.main.bundlePath,
+                       ProcessInfo.processInfo.environment["PANE_STATE_DIR"] ?? ""]
+        try? p.run()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
