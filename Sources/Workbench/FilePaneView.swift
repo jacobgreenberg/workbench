@@ -237,6 +237,8 @@ private final class CodeTextView: NSTextView {
     private var diskText: String?
     private var sourceMode = false
     private let toggle = NSButton()
+    private let undoButton = NSButton(), redoButton = NSButton()
+    private let undo = UndoManager()   // per file, not the window's: undo never reaches a terminal or another file
     private var highlightGen = 0
     private var highlightWork: DispatchWorkItem?
     private var observers: [NSObjectProtocol] = []
@@ -268,11 +270,22 @@ private final class CodeTextView: NSTextView {
         toggle.isHidden = true
         toggle.target = self
         toggle.action = #selector(toggleMode(_:))
-        toggle.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(toggle)
+        for (b, symbol, tip, sel) in [(undoButton, "arrow.uturn.backward", "Undo", #selector(undoEdit(_:))),
+                                      (redoButton, "arrow.uturn.forward", "Redo", #selector(redoEdit(_:)))] {
+            b.isBordered = false
+            b.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)
+            b.toolTip = tip
+            b.target = self
+            b.action = sel
+            b.isHidden = true
+        }
+        let controls = NSStackView(views: [undoButton, redoButton, toggle])
+        controls.spacing = 10
+        controls.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(controls)
         NSLayoutConstraint.activate([
-            toggle.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
-            toggle.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            controls.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            controls.topAnchor.constraint(equalTo: topAnchor, constant: 8),
         ])
         for name in [NSApplication.willResignActiveNotification, NSApplication.willTerminateNotification] {
             observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
@@ -314,6 +327,19 @@ private final class CodeTextView: NSTextView {
     func textDidChange(_ notification: Notification) {
         isDirty = true
         scheduleHighlight()
+        DispatchQueue.main.async { [weak self] in MainActor.assumeIsolated { self?.updateUndoButtons() } }   // after the typing group closes
+    }
+
+    func undoManager(for view: NSTextView) -> UndoManager? { undo }
+
+    @objc private func undoEdit(_ sender: Any?) { window?.makeFirstResponder(textView); textView.undoManager?.undo() }
+    @objc private func redoEdit(_ sender: Any?) { window?.makeFirstResponder(textView); textView.undoManager?.redo() }
+
+    private func updateUndoButtons() {
+        undoButton.isHidden = !isEditable
+        redoButton.isHidden = !isEditable
+        undoButton.isEnabled = textView.undoManager?.canUndo ?? false
+        redoButton.isEnabled = textView.undoManager?.canRedo ?? false
     }
 
     private func scheduleHighlight() {
@@ -446,6 +472,7 @@ private final class CodeTextView: NSTextView {
                         self.textView.isIncrementalSearchingEnabled = true
                         self.textView.undoManager?.removeAllActions()
                     }
+                    self.updateUndoButtons()
                     let len = (self.textView.string as NSString).length
                     self.textView.selectedRanges = ranges.map { v in
                         let r = v.rangeValue

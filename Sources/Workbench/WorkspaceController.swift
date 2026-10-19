@@ -1441,7 +1441,10 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         f.close()   // autosaves
         f.removeFromSuperview()
         previewFile = nil
+        let tree = column.frame.width
         preview.isHidden = true
+        // Hand the preview's width back to the terminals, so the tree keeps its own size.
+        if !inspectorItem.isCollapsed { split.splitView.setPosition(split.splitView.bounds.width - tree, ofDividerAt: 1) }
         previewTitle.stringValue = "No file. ⌘-click a path to preview it here."
         previewTitle.toolTip = nil
         if let id = focusedPane, let v = views[id] { window?.makeFirstResponder(v) }

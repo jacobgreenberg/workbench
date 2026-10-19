@@ -203,6 +203,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             item("Close Tab", #selector(w.closeTab(_:)), "w", [.command, .shift]),
         ]))
         main.addItem(menu("Edit", [
+            item("Undo", Selector(("undo:")), "z", reserved: false),
+            item("Redo", Selector(("redo:")), "z", [.command, .shift], reserved: false),
+            .separator(),
+            item("Cut", #selector(NSText.cut(_:)), "x", reserved: false),
             item("Copy", #selector(SurfaceView.copy(_:)), "c", reserved: false),
             item("Paste", #selector(SurfaceView.paste(_:)), "v"),
             item("Select All", #selector(SurfaceView.selectAll(_:)), "a", reserved: false),
