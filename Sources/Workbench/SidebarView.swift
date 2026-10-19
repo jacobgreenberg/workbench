@@ -198,7 +198,6 @@ private final class FlatRowView: NSTableRowView {
         menu.addItem(close)
         table.menu = menu
         scroll.drawsBackground = false
-        scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.documentView = table
         height.isActive = true
@@ -215,8 +214,11 @@ private final class FlatRowView: NSTableRowView {
         self.rows = rows
         self.selected = selected
         self.theme = theme
-        height.constant = CGFloat(min(max(rows.count, 1), Self.maxRows)) * (Self.rowHeight + Self.spacing)
         if changed { table.reloadData() }
+        // Hug the table's real height (the source-list style pads beyond rowHeight × rows); scroll only past maxRows.
+        table.tile()
+        height.constant = min(table.frame.height, CGFloat(Self.maxRows) * (Self.rowHeight + Self.spacing))
+        scroll.hasVerticalScroller = rows.count > Self.maxRows
         syncing = true
         if selected >= 0, selected < rows.count { table.selectRowIndexes([selected], byExtendingSelection: false) } else { table.deselectAll(nil) }
         syncing = false
