@@ -118,7 +118,6 @@ private let tints: [(name: String, top: NSColor, bottom: NSColor)] = [
     static let width: CGFloat = 60
     private let stack = NSStackView()
     private let marker = NSView()
-    private let divider = NSBox()   // the rail and the sidebar share a color; this keeps them apart
     private var markerY: NSLayoutConstraint?
     private var icons: [WorkspaceIcon] = []
     private var items: [WorkspaceItem] = []
@@ -139,8 +138,7 @@ private let tints: [(name: String, top: NSColor, bottom: NSColor)] = [
         marker.wantsLayer = true
         marker.layer?.cornerRadius = 2
         marker.layer?.maskedCorners = [.layerMaxXMinYCorner, .layerMaxXMaxYCorner]
-        divider.boxType = .separator
-        for v in [stack, marker, divider] as [NSView] {
+        for v in [stack, marker] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
@@ -151,10 +149,6 @@ private let tints: [(name: String, top: NSColor, bottom: NSColor)] = [
             marker.leadingAnchor.constraint(equalTo: leadingAnchor),
             marker.widthAnchor.constraint(equalToConstant: 4),
             marker.heightAnchor.constraint(equalToConstant: 22),
-            divider.trailingAnchor.constraint(equalTo: trailingAnchor),
-            divider.topAnchor.constraint(equalTo: topAnchor),
-            divider.bottomAnchor.constraint(equalTo: bottomAnchor),
-            divider.widthAnchor.constraint(equalToConstant: 1),
         ])
         let menu = NSMenu()
         menu.delegate = self
