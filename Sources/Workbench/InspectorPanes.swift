@@ -2,23 +2,62 @@ import AppKit
 
 private final class FlippedStack: NSStackView { override var isFlipped: Bool { true } }
 
-/// The right sidebar's checklist for one project: tick, edit in place (an emptied item is deleted), add at the bottom, Clear Completed.
-@MainActor final class TodoListView: NSView {
+private final class CheckCircle: NSButton {
+    init() {
+        super.init(frame: .zero)
+        isBordered = false
+        title = ""
+        setButtonType(.toggle)
+        setAccessibilityRole(.checkBox)
+        translatesAutoresizingMaskIntoConstraints = false
+        widthAnchor.constraint(equalToConstant: 20).isActive = true
+        heightAnchor.constraint(equalToConstant: 20).isActive = true
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var intrinsicContentSize: NSSize { NSSize(width: 20, height: 20) }
+    override func accessibilityValue() -> Any? { state == .on ? 1 : 0 }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let circle = NSBezierPath(ovalIn: bounds.insetBy(dx: 1, dy: 1))
+        if state == .on {
+            NSColor.controlAccentColor.setFill()
+            circle.fill()
+            guard let image = NSImage(systemSymbolName: "checkmark", accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: 10, weight: .bold)) else { return }
+            let rect = NSRect(x: (bounds.width - image.size.width) / 2, y: (bounds.height - image.size.height) / 2, width: image.size.width, height: image.size.height)
+            let white = NSImage(size: image.size, flipped: false) { r in
+                image.draw(in: r)
+                NSColor.white.set()
+                r.fill(using: .sourceAtop)
+                return true
+            }
+            white.draw(in: rect)
+        } else {
+            circle.lineWidth = 1.5
+            NSColor.tertiaryLabelColor.setStroke()
+            circle.stroke()
+        }
+    }
+}
+
+/// The right sidebar's checklist for one project, edited like an Apple Notes checklist: tick the circle, type in place, Return for a new item, Backspace on an empty one to delete it; a "New to-do" line always waits at the bottom.
+@MainActor final class TodoListView: NSView, NSTextFieldDelegate {
     var onChange: (([Todo]) -> Void)?
     private(set) var todos: [Todo] = []
     private let scroll = NSScrollView()
     private let list = FlippedStack()
-    private let addField = NSTextField()
-    private let clearButton = NSButton(title: "Clear Completed", target: nil, action: nil)
-    private let emptyLabel = NSTextField(labelWithString: "No to-dos for this project yet.")
     private var rowFields: [NSTextField] = []
+    private var circles: [CheckCircle] = []
+    private var rebuilding = false   // removing the field being edited fires its end-editing action; ignore it
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         list.orientation = .vertical
         list.alignment = .leading
-        list.spacing = 2
-        list.edgeInsets = NSEdgeInsets(top: 4, left: 12, bottom: 4, right: 12)
+        list.spacing = 0
+        list.edgeInsets = NSEdgeInsets(top: 6, left: 14, bottom: 6, right: 14)
         list.translatesAutoresizingMaskIntoConstraints = false
         scroll.documentView = list
         scroll.drawsBackground = false
@@ -26,41 +65,17 @@ private final class FlippedStack: NSStackView { override var isFlipped: Bool { t
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.translatesAutoresizingMaskIntoConstraints = false
-
-        addField.placeholderString = "Add a to-do"
-        addField.bezelStyle = .roundedBezel
-        addField.font = .systemFont(ofSize: 13)
-        addField.target = self
-        addField.action = #selector(add(_:))   // Return (or Accessibility's confirm) adds
-        clearButton.controlSize = .small
-        clearButton.bezelStyle = .rounded
-        clearButton.target = self
-        clearButton.action = #selector(clearCompleted)
-        clearButton.setContentHuggingPriority(.required, for: .horizontal)
-        emptyLabel.font = .systemFont(ofSize: 12)
-        emptyLabel.textColor = .secondaryLabelColor
-        emptyLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        let bar = NSStackView(views: [addField, clearButton])   // a hidden Clear Completed gives its room to the field
-        bar.spacing = 8
-        bar.translatesAutoresizingMaskIntoConstraints = false
         addSubview(scroll)
-        addSubview(emptyLabel)
-        addSubview(bar)
         let clip = scroll.contentView
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: topAnchor),
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
             list.topAnchor.constraint(equalTo: clip.topAnchor),
             list.leadingAnchor.constraint(equalTo: clip.leadingAnchor),
             list.trailingAnchor.constraint(equalTo: clip.trailingAnchor),
-            bar.topAnchor.constraint(equalTo: scroll.bottomAnchor, constant: 8),
-            bar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            bar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            bar.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
-            emptyLabel.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-            emptyLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            list.heightAnchor.constraint(greaterThanOrEqualTo: clip.heightAnchor),
         ])
         rebuild()
     }
@@ -72,18 +87,23 @@ private final class FlippedStack: NSStackView { override var isFlipped: Bool { t
         rebuild()
     }
 
+    override func mouseDown(with event: NSEvent) { window?.makeFirstResponder(rowFields.last) }   // empty space focuses the new line
+
     private func rebuild() {
+        rebuilding = true
+        defer { rebuilding = false }
         for v in list.arrangedSubviews { list.removeArrangedSubview(v); v.removeFromSuperview() }
         rowFields = []
-        for (i, t) in todos.enumerated() {
-            let box = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggle(_:)))
-            box.tag = i
-            box.state = t.done ? .on : .off
+        circles = []
+        let anyDone = todos.contains { $0.done }
+        for i in 0...todos.count {
+            let t = todos.indices.contains(i) ? todos[i] : nil
+            let circle = CheckCircle()
             let field = NSTextField()
             field.isBordered = false
             field.drawsBackground = false
             field.isEditable = true
-            field.font = .systemFont(ofSize: 13)
+            field.font = .systemFont(ofSize: 14)
             field.lineBreakMode = .byWordWrapping
             field.cell?.wraps = true
             field.usesSingleLineMode = false
@@ -92,43 +112,63 @@ private final class FlippedStack: NSStackView { override var isFlipped: Bool { t
             field.action = #selector(commit(_:))
             field.cell?.sendsActionOnEndEditing = true   // clicking away saves too
             field.tag = i
+            field.delegate = self
             field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            style(field, t)
+            if let t {
+                circle.target = self
+                circle.action = #selector(toggle(_:))
+                circle.tag = i
+                circle.state = t.done ? .on : .off
+                circle.setAccessibilityLabel(t.text)
+                field.stringValue = t.text
+                field.textColor = t.done ? .secondaryLabelColor : .labelColor
+            } else {
+                circle.isEnabled = false
+                circle.alphaValue = 0.5
+                field.placeholderAttributedString = NSAttributedString(string: "New to-do", attributes: [   // a borderless field draws a plain placeholder in label color
+                    .foregroundColor: NSColor.tertiaryLabelColor, .font: NSFont.systemFont(ofSize: 14)])
+                field.textColor = .labelColor
+            }
             rowFields.append(field)
-            let row = NSStackView(views: [box, field])
-            row.spacing = 6
-            row.alignment = .firstBaseline
-            let menu = NSMenu()
-            let del = NSMenuItem(title: "Delete", action: #selector(deleteItem(_:)), keyEquivalent: "")
-            del.target = self
-            del.tag = i
-            menu.addItem(del)
-            row.menu = menu
+            circles.append(circle)
+            // A plain row, not a stack: the circle centers on the text's first line (baseline − half the cap height).
+            let row = NSView()
+            field.translatesAutoresizingMaskIntoConstraints = false
+            row.addSubview(circle)
+            row.addSubview(field)
+            let font = field.font!
+            NSLayoutConstraint.activate([
+                circle.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+                circle.centerYAnchor.constraint(equalTo: field.firstBaselineAnchor, constant: -font.capHeight / 2),
+                field.leadingAnchor.constraint(equalTo: circle.trailingAnchor, constant: 10),
+                field.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+                field.topAnchor.constraint(equalTo: row.topAnchor, constant: 5),
+                field.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -5),
+            ])
+            if t != nil {
+                let menu = NSMenu()
+                menu.autoenablesItems = false
+                let del = NSMenuItem(title: "Delete", action: #selector(deleteItem(_:)), keyEquivalent: "")
+                del.tag = i
+                menu.addItem(del)
+                menu.addItem(.separator())
+                menu.addItem(NSMenuItem(title: "Uncheck All", action: #selector(uncheckAll(_:)), keyEquivalent: ""))
+                menu.addItem(NSMenuItem(title: "Delete Checked Items", action: #selector(deleteChecked(_:)), keyEquivalent: ""))
+                for item in menu.items where item.action != nil { item.target = self; item.isEnabled = true }
+                menu.items[2].isEnabled = anyDone
+                menu.items[3].isEnabled = anyDone
+                row.menu = menu
+            }
             row.translatesAutoresizingMaskIntoConstraints = false
             list.addArrangedSubview(row)
-            row.widthAnchor.constraint(equalTo: list.widthAnchor, constant: -24).isActive = true
-        }
-        emptyLabel.isHidden = !todos.isEmpty
-        clearButton.isHidden = !todos.contains { $0.done }
-    }
-
-    private func style(_ field: NSTextField, _ t: Todo) {
-        if t.done {
-            field.textColor = .secondaryLabelColor
-            field.attributedStringValue = NSAttributedString(string: t.text, attributes: [
-                .strikethroughStyle: NSUnderlineStyle.single.rawValue,
-                .foregroundColor: NSColor.secondaryLabelColor, .font: NSFont.systemFont(ofSize: 13)])
-        } else {
-            field.textColor = .labelColor
-            field.stringValue = t.text
+            row.widthAnchor.constraint(equalTo: list.widthAnchor, constant: -28).isActive = true
         }
     }
 
     @objc private func toggle(_ sender: NSButton) {
         guard todos.indices.contains(sender.tag) else { return }
         todos[sender.tag].done.toggle()
-        style(rowFields[sender.tag], todos[sender.tag])
-        clearButton.isHidden = !todos.contains { $0.done }
+        rowFields[sender.tag].textColor = todos[sender.tag].done ? .secondaryLabelColor : .labelColor
         onChange?(todos)
     }
 
@@ -139,34 +179,70 @@ private final class FlippedStack: NSStackView { override var isFlipped: Bool { t
         onChange?(todos)
     }
 
-    @objc private func clearCompleted() {
+    @objc private func uncheckAll(_ sender: NSMenuItem) {
+        for i in todos.indices { todos[i].done = false }
+        rebuild()
+        onChange?(todos)
+    }
+
+    @objc private func deleteChecked(_ sender: NSMenuItem) {
         todos.removeAll { $0.done }
         rebuild()
         onChange?(todos)
     }
 
     @objc private func commit(_ field: NSTextField) {
-        guard rowFields.contains(field), todos.indices.contains(field.tag) else { return }
+        guard !rebuilding, rowFields.contains(field), field.tag <= todos.count else { return }
         let i = field.tag
         let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if text.isEmpty {
+        if i == todos.count {
+            guard !text.isEmpty else { return }
+            todos.append(Todo(id: UUID(), text: text, done: false))
+            rebuild()
+            onChange?(todos)
+            window?.makeFirstResponder(rowFields.last)
+        } else if text.isEmpty {
             todos.remove(at: i)
             rebuild()
+            onChange?(todos)
         } else if text != todos[i].text {
             todos[i].text = text
-            style(field, todos[i])
-        } else { return }
-        onChange?(todos)
+            circles[i].setAccessibilityLabel(text)
+            onChange?(todos)
+        }
     }
 
-    @objc private func add(_ sender: NSTextField) {
-        let text = addField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        todos.append(Todo(id: UUID(), text: text, done: false))
-        addField.stringValue = ""
-        rebuild()
-        onChange?(todos)
-        window?.makeFirstResponder(addField)
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        guard let field = control as? NSTextField, rowFields.contains(field) else { return false }
+        let i = field.tag
+        switch selector {
+        case #selector(NSResponder.insertNewline(_:)):
+            guard i < todos.count else { return false }
+            let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty { todos[i].text = text }
+            todos.insert(Todo(id: UUID(), text: "", done: false), at: i + 1)
+            rebuild()
+            onChange?(todos)
+            window?.makeFirstResponder(rowFields[i + 1])
+            return true
+        case #selector(NSResponder.deleteBackward(_:)):
+            guard i < todos.count, field.stringValue.isEmpty else { return false }
+            todos.remove(at: i)
+            rebuild()
+            onChange?(todos)
+            window?.makeFirstResponder(rowFields[max(i - 1, 0)])
+            (window?.firstResponder as? NSTextView)?.moveToEndOfDocument(nil)
+            return true
+        case #selector(NSResponder.moveUp(_:)):
+            guard i > 0 else { return false }
+            window?.makeFirstResponder(rowFields[i - 1])
+            return true
+        case #selector(NSResponder.moveDown(_:)):
+            guard i + 1 < rowFields.count else { return false }
+            window?.makeFirstResponder(rowFields[i + 1])
+            return true
+        default: return false
+        }
     }
 }
 

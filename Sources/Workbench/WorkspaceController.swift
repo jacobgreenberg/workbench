@@ -67,7 +67,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private var collapseObservation: NSKeyValueObservation?
     private let preview = NSView()
     private let inspector = NSView()
-    private let inspectorTabs = GlassSegments(labels: ["To-dos", "Preview", "More"])
+    private let inspectorTabs = GlassSegments(labels: ["TODO", "Preview", "More"])
     private let todoList = TodoListView()
     private let morePane = PlaceholderPane(text: "More tools are coming here.")
     private var todoProject: UUID?   // whose to-dos the list shows
@@ -186,7 +186,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         showInspectorTab(0)
     }
 
-    /// 0 To-dos, 1 Preview, 2 More.
+    /// 0 TODO, 1 Preview, 2 More.
     private func showInspectorTab(_ i: Int) {
         inspectorTabs.select(i, animated: true)
         todoList.isHidden = i != 0
