@@ -53,7 +53,6 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private var sidebarItem: NSSplitViewItem!
     private var inspectorItem: NSSplitViewItem!
     private var collapseObservation: NSKeyValueObservation?
-    private var inspectorObservation: NSKeyValueObservation?   // the TODO/Files toolbar item shows only with the inspector
     private let preview = NSView()
     private let inspector = NSView()
     private let inspectorTabs = GlassSegments(labels: ["TODO", "Files"])
@@ -133,6 +132,18 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         preview.isHidden = true   // until a file opens; the column fills the inspector
         files.translatesAutoresizingMaskIntoConstraints = false
         inspector.addSubview(files)
+        // In the toolbar row but part of the inspector, so it slides with it on collapse (a toolbar item would stay put).
+        inspectorTabs.translatesAutoresizingMaskIntoConstraints = false
+        inspector.addSubview(inspectorTabs)
+        let titlebar = NSLayoutGuide()
+        inspector.addLayoutGuide(titlebar)
+        NSLayoutConstraint.activate([
+            titlebar.topAnchor.constraint(equalTo: inspector.topAnchor),
+            titlebar.bottomAnchor.constraint(equalTo: inspector.safeAreaLayoutGuide.topAnchor),
+            inspectorTabs.centerYAnchor.constraint(equalTo: titlebar.centerYAnchor),
+            inspectorTabs.trailingAnchor.constraint(equalTo: inspector.trailingAnchor, constant: -64),   // left of the inspector toggle
+            inspectorTabs.widthAnchor.constraint(equalToConstant: 200),
+        ])
         for v in [todoList, fileTree] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             column.addSubview(v)
@@ -187,24 +198,6 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             }
         }
         inspectorTabs.onSelect = { [unowned self] i in showInspectorTab(i) }
-        inspectorTabs.widthAnchor.constraint(equalToConstant: 200).isActive = true
-        // Fade, don't hide the toolbar item: hiding it reflows the whole toolbar mid-collapse. The item keeps its slot.
-        inspectorTabs.isHidden = inspectorItem.isCollapsed
-        inspectorObservation = inspectorItem.observe(\.isCollapsed) { [weak self] item, _ in
-            let collapsed = item.isCollapsed
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard let tabs = self?.inspectorTabs else { return }
-                    if !collapsed { tabs.alphaValue = 0; tabs.isHidden = false }
-                    NSAnimationContext.runAnimationGroup({ ctx in
-                        ctx.duration = collapsed ? 0.12 : 0.25
-                        tabs.animator().alphaValue = collapsed ? 0 : 1
-                    }, completionHandler: {
-                        MainActor.assumeIsolated { if collapsed, self?.inspectorItem.isCollapsed == true { tabs.isHidden = true } }
-                    })
-                }
-            }
-        }
         showInspectorTab(0)
         fileTree.hideClutter = store.layout.showClutterFiles != true
     }
@@ -1609,7 +1602,6 @@ extension NSToolbarItem.Identifier {
     static let tabs = NSToolbarItem.Identifier("tabs")
     static let addProject = NSToolbarItem.Identifier("addProject")
     static let projectTitle = NSToolbarItem.Identifier("projectTitle")
-    static let inspectorTabs = NSToolbarItem.Identifier("inspectorTabs")
 }
 
 /// Unified toolbar: sidebar toggle over the sidebar, the tab capsule over the terminals, project name/path on its right (sidebar collapsed only), inspector toggle over the preview.
@@ -1627,7 +1619,7 @@ extension WorkspaceController: NSToolbarDelegate {
         return l
     }
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .addProject, .sidebarTrackingSeparator, .tabs, .flexibleSpace, .projectTitle, .inspectorTrackingSeparator, .flexibleSpace, .inspectorTabs, .toggleInspector]
+        [.toggleSidebar, .addProject, .sidebarTrackingSeparator, .tabs, .flexibleSpace, .projectTitle, .inspectorTrackingSeparator, .flexibleSpace, .toggleInspector]
     }
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(toolbar) }
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier, willBeInsertedIntoToolbar: Bool) -> NSToolbarItem? {
@@ -1647,11 +1639,6 @@ extension WorkspaceController: NSToolbarDelegate {
             stack.spacing = 0
             item.view = stack
             item.isBordered = false
-            return item
-        }
-        if id == .inspectorTabs {
-            item.view = inspectorTabs
-            item.isBordered = false   // GlassSegments draws its own capsule
             return item
         }
         guard id == .tabs else { return nil }
