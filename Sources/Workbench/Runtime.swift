@@ -4,7 +4,7 @@ import Synchronization
 
 enum PaneEvent: Sendable {
     case title(String), pwd(String), bell, notification(title: String, body: String)
-    case commandFinished(exitCode: Int, durationNs: UInt64)
+    case commandFinished(exitCode: Int, durationNs: UInt64), progress(active: Bool)
     case openURL(String), closeRequested(processAlive: Bool)
     case startSearch(String), endSearch, searchTotal(Int), searchSelected(Int)
 }
@@ -121,6 +121,9 @@ enum PaneEvent: Sendable {
         case GHOSTTY_ACTION_COMMAND_FINISHED:
             let c = action.action.command_finished
             post(id, .commandFinished(exitCode: Int(c.exit_code), durationNs: c.duration))
+        case GHOSTTY_ACTION_PROGRESS_REPORT:
+            // Claude Code holds OSC 9;4 indeterminate for a whole turn and clears it at the end.
+            post(id, .progress(active: action.action.progress_report.state != GHOSTTY_PROGRESS_STATE_REMOVE))
         case GHOSTTY_ACTION_OPEN_URL:
             let u = action.action.open_url
             guard let p = u.url else { return true }

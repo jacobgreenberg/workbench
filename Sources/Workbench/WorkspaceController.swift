@@ -40,6 +40,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private var views: [PaneID: NSView] = [:]
     private var status: [PaneID: PaneStatus] = [:]
     private var titles: [PaneID: String] = [:]
+    private var progressing: Set<PaneID> = []   // panes with an OSC 9;4 progress report up
     private var searchCounts: (total: Int, selected: Int) = (-1, -1)
     private var findPane: PaneID?
     /// Find on an agent pane searches its session transcript (the terminal only holds the screen; the agent scrolls internally),
@@ -564,7 +565,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             titles[id] = t
             // One chrome update per event: setStatus does it when the state flips.
             if spinning, status[id] != .busy { setStatus(id, .busy) }
-            else if !spinning, status[id] == .busy { setStatus(id, .done) }
+            else if !spinning, status[id] == .busy, !progressing.contains(id) { setStatus(id, .done) }
             else if titleChanged { updateChrome() }
         case let .pwd(path):
             mutatePane(id) { spec in
@@ -574,7 +575,12 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             setStatus(id, .attention, body: "Bell")
         case let .notification(title, body):
             setStatus(id, .attention, title: title.isEmpty ? nil : title, body: body)
+        case let .progress(active):
+            if active { progressing.insert(id) } else { progressing.remove(id) }
+            if active, status[id] != .busy { setStatus(id, .busy) }
+            else if !active, status[id] == .busy { setStatus(id, .done) }
         case let .commandFinished(_, ns):
+            progressing.remove(id)
             if ns > 5_000_000_000 {
                 setStatus(id, .done, body: "Command finished")
             } else if status[id] == .busy {
@@ -844,6 +850,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         views[id] = nil
         status[id] = nil
         titles[id] = nil
+        progressing.remove(id)
         if findPane == id { hideFind(refocus: false) }
     }
 
