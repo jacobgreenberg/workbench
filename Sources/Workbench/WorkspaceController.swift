@@ -71,7 +71,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private let inspectorTabs = GlassSegments(labels: ["TODO", "Files"])
     private let todoList = TodoListView()
     private let fileTree = FileTreeView()
-    private let files = NSSplitView()
+    private let files = NSSplitView()   // preview | column (tabs over the TODO list or the tree)
+    private let column = NSView()
     private var fileTreeRoot: String?   // whose folder the tree shows
     private var todoProject: UUID?   // whose TODOs the list shows
     private let previewTitle = NSTextField(labelWithString: "No file. ⌘-click a path to preview it here.")
@@ -136,12 +137,14 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         files.isVertical = true
         files.dividerStyle = .thin
         files.addArrangedSubview(preview)
-        files.addArrangedSubview(fileTree)
-        files.setHoldingPriority(.defaultLow + 1, forSubviewAt: 1)   // resizing the inspector grows the preview, not the tree
-        preview.isHidden = true   // until a file opens; the tree fills the tab
-        for v in [inspectorTabs, todoList, files] as [NSView] {
+        files.addArrangedSubview(column)
+        files.setHoldingPriority(.defaultLow + 1, forSubviewAt: 1)   // resizing the inspector grows the preview, not the column
+        preview.isHidden = true   // until a file opens; the column fills the inspector
+        files.translatesAutoresizingMaskIntoConstraints = false
+        inspector.addSubview(files)
+        for v in [inspectorTabs, todoList, fileTree] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
-            inspector.addSubview(v)
+            column.addSubview(v)
         }
 
         NSLayoutConstraint.activate([
@@ -153,19 +156,23 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             emptyLabel.centerYAnchor.constraint(equalTo: content.centerYAnchor),
             findBar.topAnchor.constraint(equalTo: content.topAnchor, constant: 8),
             findBar.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
-            previewTitle.topAnchor.constraint(equalTo: preview.topAnchor),
-            inspectorTabs.topAnchor.constraint(equalTo: inspector.safeAreaLayoutGuide.topAnchor, constant: 6),
-            inspectorTabs.leadingAnchor.constraint(equalTo: inspector.leadingAnchor, constant: 12),
-            inspectorTabs.widthAnchor.constraint(equalToConstant: 236),   // the collapsed inspector's width; doesn't stretch with it
+            previewTitle.topAnchor.constraint(equalTo: preview.topAnchor, constant: 14),   // level with the tabs
+            files.topAnchor.constraint(equalTo: inspector.safeAreaLayoutGuide.topAnchor),
+            files.leadingAnchor.constraint(equalTo: inspector.leadingAnchor),
+            files.trailingAnchor.constraint(equalTo: inspector.trailingAnchor),
+            files.bottomAnchor.constraint(equalTo: inspector.bottomAnchor),
+            inspectorTabs.topAnchor.constraint(equalTo: column.topAnchor, constant: 6),
+            inspectorTabs.leadingAnchor.constraint(equalTo: column.leadingAnchor, constant: 12),
+            inspectorTabs.trailingAnchor.constraint(equalTo: column.trailingAnchor, constant: -12),
             previewTitle.leadingAnchor.constraint(equalTo: preview.leadingAnchor, constant: 16),
             previewTitle.trailingAnchor.constraint(lessThanOrEqualTo: preview.trailingAnchor, constant: -16),
         ])
-        for v in [todoList, files] as [NSView] {
+        for v in [todoList, fileTree] as [NSView] {
             NSLayoutConstraint.activate([
                 v.topAnchor.constraint(equalTo: inspectorTabs.bottomAnchor, constant: 8),
-                v.leadingAnchor.constraint(equalTo: inspector.leadingAnchor),
-                v.trailingAnchor.constraint(equalTo: inspector.trailingAnchor),
-                v.bottomAnchor.constraint(equalTo: inspector.bottomAnchor),
+                v.leadingAnchor.constraint(equalTo: column.leadingAnchor),
+                v.trailingAnchor.constraint(equalTo: column.trailingAnchor),
+                v.bottomAnchor.constraint(equalTo: column.bottomAnchor),
             ])
         }
 
@@ -200,7 +207,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private func showInspectorTab(_ i: Int) {
         inspectorTabs.select(i, animated: true)
         todoList.isHidden = i != 0
-        files.isHidden = i != 1
+        fileTree.isHidden = i != 1
     }
 
     private func wireCallbacks() {

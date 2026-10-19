@@ -15,6 +15,7 @@ cp -R .build/release/TreeSitter*.bundle "$APP/Contents/Resources/"   # grammar h
 mkdir -p "$APP/Contents/Helpers"; ln -s ../MacOS/Workbench "$APP/Contents/Helpers/pane"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp -R Resources/themes "$APP/Contents/Resources/themes"
+cp -R Resources/fileicons "$APP/Contents/Resources/fileicons"
 cp Resources/claude-hooks.json Resources/AppIcon.icns "$APP/Contents/Resources/"
 cp -R /Applications/Ghostty.app/Contents/Resources/terminfo "$APP/Contents/Resources/terminfo"
 cp -R "$SI" "$APP/Contents/Resources/ghostty/shell-integration"
