@@ -87,6 +87,10 @@ struct Backup: Codable, Sendable {
             for t in b.layout.projects[p].tabs.indices {
                 b.layout.projects[p].tabs[t].focused = nil
                 b.layout.projects[p].tabs[t].title = ""
+                // Resume ids change every agent turn and name sessions on this Mac: syncing them is a commit per turn.
+                b.layout.projects[p].tabs[t].root = b.layout.projects[p].tabs[t].root.mapLeaves { s in
+                    if case let .terminal(cwd, _) = s.kind { s.kind = .terminal(cwd: cwd, launch: nil) }
+                }
             }
         }
         for w in (b.layout.workspaces ?? []).indices { b.layout.workspaces?[w].lastProject = nil }
@@ -175,7 +179,7 @@ struct Backup: Codable, Sendable {
     }
 }
 
-/// Git sync into a clone Workbench owns (Store.directory/sync), so it never touches the user's other repositories: a minute after the last change it writes this Mac's file, commits it if it changed, rebases onto the remote and pushes. The user's own git and credentials.
+/// Git sync into a clone Workbench owns (Store.directory/sync), so it never touches the user's other repositories: at most every 10 minutes (and at quit) it writes this Mac's file, commits it if it changed, rebases onto the remote and pushes. The user's own git and credentials.
 @MainActor final class BackupSync {
     static let shared = BackupSync()
     nonisolated static let clone = Store.directory.appendingPathComponent("sync")
@@ -202,13 +206,12 @@ struct Backup: Codable, Sendable {
     }
 
     func scheduleSync(_ store: Store) {
-        guard store.layout.backupRemote != nil else { return }
-        pending?.cancel()
+        guard store.layout.backupRemote != nil, pending == nil else { return }   // a waiting sync picks this change up too
         let item = DispatchWorkItem { [weak self, weak store] in
             MainActor.assumeIsolated { if let store { self?.syncNow(store) } }
         }
         pending = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 60, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 600, execute: item)   // at most one commit per 10 minutes; quit flushes
     }
 
     func syncNow(_ store: Store) { start(store, wait: false) }
@@ -390,6 +393,9 @@ struct Backup: Codable, Sendable {
     assert(s.layout.projects[0].tabs[0].title == "")
     assert(s.layout.projects[0].tabs[0].focused == nil)
     assert(s.layout.activeWorkspace == nil)
+    var bl = b
+    bl.layout.projects[0].tabs[0].root = .leaf(PaneSpec(id: leafA.id, kind: .terminal(cwd: "/x", launch: Launch(command: "claude --resume 1"))))
+    assert(bl.forSync.layout.projects[0].tabs[0].root == .leaf(PaneSpec(id: leafA.id, kind: .terminal(cwd: "/x", launch: nil))))
     var bf = b
     bf.layout.projects[0].tabs[0].focused = leafA.id
     assert((try! bf.forSync.encoded()) == (try! { var x = bf; x.layout.projects[0].tabs[0].focused = leafB.id; x.layout.activeProject = 0; return x }().forSync.encoded()))

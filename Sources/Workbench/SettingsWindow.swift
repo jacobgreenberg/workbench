@@ -311,7 +311,7 @@ private final class BackupViewController: NSViewController {
         let stack = DropStack(views: [
             settingsHeader("Backup", "Everything that makes Workbench yours, in one JSON file: projects and their order, tabs and splits, workspaces, themes and your Ghostty config. To restore one, import it, paste it, or drop the file on this window."),
             buttons,
-            settingsHeader("Git Sync", "Keeps a copy in a git repository that only Workbench uses. Make it private: it holds your project names, folders and commands. Each Mac writes its own file, committed and pushed a minute after a change."),
+            settingsHeader("Git Sync", "Keeps a copy in a git repository that only Workbench uses. Make it private: it holds your project names, folders and commands. Each Mac writes its own file, committed and pushed at most every 10 minutes and at quit. Agent sessions aren't synced; panes restore as shells."),
             repoRow,
             syncRow,
         ])
