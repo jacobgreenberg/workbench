@@ -125,17 +125,9 @@ private let tints: [(name: String, top: NSColor, bottom: NSColor)] = [
     private var menuTarget = -1
     private var themeID = ""
 
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        // Darker strip; a light sidebar needs far less to read as one, or it turns muddy grey.
-        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        layer?.backgroundColor = NSColor.black.withAlphaComponent(dark ? 0.16 : 0.05).cgColor
-    }
-
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        viewDidChangeEffectiveAppearance()
         stack.orientation = .vertical
         stack.spacing = 12
         let add = HandButton.glass("plus", "New Workspace")

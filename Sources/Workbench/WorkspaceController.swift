@@ -71,6 +71,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private let inspectorTabs = GlassSegments(labels: ["TODO", "Files"])
     private let todoList = TodoListView()
     private let fileTree = FileTreeView()
+    private let mainPane = NSView()   // the terminals' split item, toolbar strip included
     private let files = NSSplitView()   // preview | column (tabs over the TODO list or the tree)
     private let column = NSView()
     private var fileTreeRoot: String?   // whose folder the tree shows
@@ -100,6 +101,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         toolbar.allowsUserCustomization = false
         window.toolbar = toolbar
         window.toolbarStyle = .unified
+        window.titlebarAppearsTransparent = true   // the theme background shows under the toolbar, not the toolbar's grey
         window.center()
         window.setFrameAutosaveName("Main")
         wireCallbacks()
@@ -114,7 +116,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private func buildLayout() {
         func controller(_ v: NSView) -> NSViewController { let c = NSViewController(); c.view = v; return c }
 
-        let main = NSView()
+        let main = mainPane
         main.wantsLayer = true
         for v in [content, findBar, emptyLabel] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false }
         main.addSubview(content)
@@ -521,6 +523,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         window?.appearance = theme.appearance
         window?.backgroundColor = theme.color("background")
         content.layer?.backgroundColor = theme.color("background").cgColor
+        mainPane.layer?.backgroundColor = theme.color("background").cgColor   // under the toolbar too, or it shows the toolbar's own grey
         for v in views.values { (v as? FilePaneView)?.apply(theme: theme) }
         previewFile?.apply(theme: theme)
         findBar.apply(theme: theme)
