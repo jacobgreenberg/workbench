@@ -16,7 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         Agents.discoverLaunchers()
         store = Store()
         store.onChange = { [unowned self] in BackupSync.shared.scheduleSync(store) }
-        runtime = Runtime(overrides: WorkspaceController.overrides(Theme.named(store.layout.theme)))
+        runtime = Runtime(overrides: WorkspaceController.overrides(Theme.named(store.layout.theme), jira: store.layout.jira))
         NSApp.mainMenu = buildMenu()
         rebuildThemeMenu()
         NotificationCenter.default.addObserver(self, selector: #selector(rebuildThemeMenu), name: .themeChanged, object: nil)

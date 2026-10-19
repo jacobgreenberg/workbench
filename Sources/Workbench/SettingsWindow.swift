@@ -16,6 +16,10 @@ final class SettingsWindowController: NSWindowController {
         backupItem.label = "Backup"
         backupItem.image = NSImage(systemSymbolName: "externaldrive", accessibilityDescription: "Backup")
         tabs.addTabViewItem(backupItem)
+        let linksItem = NSTabViewItem(viewController: LinksViewController(workspace: workspace))
+        linksItem.label = "Links"
+        linksItem.image = NSImage(systemSymbolName: "link", accessibilityDescription: "Links")
+        tabs.addTabViewItem(linksItem)
         let window = NSWindow(contentViewController: tabs)
         window.styleMask = [.titled, .closable]
         window.title = "Settings"
@@ -258,6 +262,67 @@ private final class DropStack: NSStackView {
         guard let url = jsonURL(sender) else { return false }
         onDrop(url)
         return true
+    }
+}
+
+/// Settings > Links: the Jira browse URL and project keys that ⌘-click in a terminal.
+@MainActor
+private final class LinksViewController: NSViewController {
+    private unowned let workspace: WorkspaceController
+    private let browseField = NSTextField(string: "")
+    private let projectsField = NSTextField(string: "")
+    private let statusLabel = NSTextField(labelWithString: "")
+
+    init(workspace: WorkspaceController) {
+        self.workspace = workspace
+        super.init(nibName: nil, bundle: nil)
+        title = "Links"
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override func loadView() {
+        let jira = workspace.store.layout.jira
+        browseField.stringValue = jira?.browse ?? ""
+        browseField.placeholderString = "https://yourcompany.atlassian.net/browse/"
+        projectsField.stringValue = jira?.projects.joined(separator: ", ") ?? ""
+        projectsField.placeholderString = "MER, OPS, PLAT"
+        func row(_ label: String, _ field: NSTextField) -> NSStackView {
+            field.widthAnchor.constraint(equalToConstant: 380).isActive = true
+            let r = NSStackView(views: [NSTextField(labelWithString: label), field])
+            r.spacing = 8
+            return r
+        }
+        let save = NSButton(title: "Save", target: self, action: #selector(save(_:)))
+        save.keyEquivalent = "\r"
+        statusLabel.font = .systemFont(ofSize: 11)
+        statusLabel.textColor = .secondaryLabelColor
+        let saveRow = NSStackView(views: [save, statusLabel])
+        saveRow.spacing = 8
+        let stack = NSStackView(views: [
+            settingsHeader("Jira Links", "⌘-click a ticket key like MER-123 in a terminal to open it. Only these project keys link, so UTF-8 or SHA-256 never do."),
+            row("Browse URL", browseField),
+            row("Project keys", projectsField),
+            saveRow,
+        ])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 12
+        stack.edgeInsets = NSEdgeInsets(top: 20, left: 24, bottom: 20, right: 24)
+        view = stack
+        stack.widthAnchor.constraint(equalToConstant: 560).isActive = true
+    }
+
+    @objc private func save(_ sender: Any?) {
+        let browse = browseField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !browse.isEmpty && !browse.hasPrefix("https://") && !browse.hasPrefix("http://") {
+            statusLabel.stringValue = "The URL must start with https://"
+            return
+        }
+        let projects = JiraLinks.parseProjects(projectsField.stringValue)
+        workspace.applyJira(JiraLinks(browse: browse, projects: projects))
+        projectsField.stringValue = projects.joined(separator: ", ")
+        statusLabel.stringValue = projects.isEmpty || browse.isEmpty ? "Saved. Ticket links are off." : "Saved. \(projects.count) project keys."
     }
 }
 

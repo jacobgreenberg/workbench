@@ -2,25 +2,13 @@ import AppKit
 @preconcurrency import GhosttyKit
 import UserNotifications
 
-/// Jira tickets of the kwimpos projects active in the last 30 days (not a generic KEY-123 shape, which would hit UTF-8, SHA-256, ISO-8601).
-/// The one list: libghostty highlights the pattern on ⌘-hover (`link` override) and `openURL` maps a click to `browse`.
-enum Jira {
-    static let browse = "https://kwimpos.atlassian.net/browse/"
-    static let projects = ["IN", "OPS", "MER", "ECOM", "MPOS", "PLAT", "BOP", "WS", "STOR", "MOD", "TES", "OMS", "CS", "CRISIS", "MS",
-        "HELPDESK", "AIR", "PMI", "DS", "KIT", "BOSS", "MFA", "BIJA", "SHOP"]
-    static let pattern = "\\b(?:\(projects.joined(separator: "|")))-[0-9]+\\b"
-    /// The browse URL if `text` is exactly one ticket key, else nil.
-    static func url(_ text: String) -> URL? {
-        text.range(of: pattern, options: .regularExpression) == text.startIndex..<text.endIndex ? URL(string: browse + text) : nil
-    }
-}
-
 @MainActor
 final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDelegate {
     /// Idle cost: blink's 600 ms timer, and vsync's CVDisplayLink, which ticks at the display rate per visible
     /// surface even with nothing to draw (~300 → ~40 wakeups/s idle with it off; same CPU under heavy output).
-    static func overrides(_ theme: Theme) -> String {
-        """
+    static func overrides(_ theme: Theme, jira: JiraLinks?) -> String {
+        let link = jira?.pattern.map { "link = regex:\($0),action:open,highlight:hover_mods\n" } ?? ""
+        return """
         cursor-style-blink = false
         window-vsync = false
         scrollback-limit = 10000000
@@ -28,8 +16,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         window-padding-x = 8
         window-padding-y = 4
         window-padding-balance = true
-        link = regex:\(Jira.pattern),action:open,highlight:hover_mods
-
+        \(link)
         """ + theme.ghosttyConfig
     }
 
@@ -509,11 +496,13 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         tab.customTitle ?? (tab.focused ?? tab.root.leaves.first?.id).flatMap { titles[$0] } ?? tab.title
     }
 
+    func applyJira(_ j: JiraLinks) { store.layout.jira = j; store.changed(); runtime.reload(overrides: Self.overrides(theme, jira: j)) }
+
     func applyTheme(_ id: String) {
         store.layout.theme = id
         store.changed()
         theme = Theme.named(id)
-        runtime.reload(overrides: Self.overrides(theme))
+        runtime.reload(overrides: Self.overrides(theme, jira: store.layout.jira))
         paintTheme()
         render()
         NotificationCenter.default.post(name: .themeChanged, object: nil)
@@ -741,7 +730,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     }
 
     private func openURL(_ url: String, from id: PaneID) {
-        if let u = Jira.url(url) { open(u); return }
+        if let u = store.layout.jira?.url(url) { open(u); return }
         if let u = URL(string: url), u.scheme != nil { open(u); return }
         var path = (url as NSString).expandingTildeInPath
         if !path.hasPrefix("/"), let spec = spec(id), case let .terminal(cwd, _) = spec.kind {

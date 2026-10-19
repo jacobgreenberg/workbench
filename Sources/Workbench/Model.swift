@@ -177,6 +177,31 @@ func reorderedProjects(_ projects: [Project], map: [Int], from: Int, to: Int) ->
     return p
 }
 
+/// Jira ticket keys of the listed projects (not a generic KEY-123 shape, which would hit UTF-8, SHA-256, ISO-8601).
+/// libghostty highlights `pattern` on ⌘-hover (the `link` override) and openURL maps a click to `browse` + key.
+struct JiraLinks: Codable, Equatable, Sendable {
+    var browse: String
+    var projects: [String]
+
+    /// Keys are re-checked here, not only in Settings: they reach the Ghostty config from imported backups too.
+    var pattern: String? {
+        let keys = projects.filter { $0.range(of: "^[A-Z][A-Z0-9]*$", options: .regularExpression) != nil }
+        return keys.isEmpty || browse.isEmpty ? nil : "\\b(?:" + keys.joined(separator: "|") + ")-[0-9]+\\b"
+    }
+
+    /// The browse URL if `text` is exactly one ticket key, else nil.
+    func url(_ text: String) -> URL? {
+        guard let pattern else { return nil }
+        return text.range(of: pattern, options: .regularExpression) == text.startIndex..<text.endIndex ? URL(string: browse + text) : nil
+    }
+
+    static func parseProjects(_ s: String) -> [String] {
+        var seen = Set<String>()
+        return s.split(whereSeparator: { $0 == "," || $0.isWhitespace }).map { $0.uppercased() }
+            .filter { $0.range(of: "^[A-Z][A-Z0-9]*$", options: .regularExpression) != nil && seen.insert($0).inserted }
+    }
+}
+
 struct Layout: Codable, Equatable, Sendable {
     var projects: [Project]
     var activeProject: Int
@@ -187,6 +212,7 @@ struct Layout: Codable, Equatable, Sendable {
     var activeWorkspace: UUID? = nil
     var backupRemote: String? = nil   // git remote Backup syncs to (Settings > Backup; clone in Store.directory/sync); never exported
     var showClutterFiles: Bool? = nil   // Files tab lists dotfiles and build folders (nil = hidden)
+    var jira: JiraLinks? = nil   // ticket keys ⌘-click to the browse URL (Settings > Links); nil = off
 
     static let `default` = Layout(
         projects: [],
@@ -232,6 +258,10 @@ func readFile(_ url: URL, cap: Int) -> Data? {
             try? FileManager.default.moveItem(at: url, to: url.appendingPathExtension("bak"))
         }
         var l = decoded ?? Layout.default
+        // migration: the links used to be built in; existing setups keep them (clearing in Settings stores an empty list, not nil)
+        if decoded != nil && l.jira == nil {
+            l.jira = JiraLinks(browse: "https://kwimpos.atlassian.net/browse/", projects: ["IN", "OPS", "MER", "ECOM", "MPOS", "PLAT", "BOP", "WS", "STOR", "MOD", "TES", "OMS", "CS", "CRISIS", "MS", "HELPDESK", "AIR", "PMI", "DS", "KIT", "BOSS", "MFA", "BIJA", "SHOP"])
+        }
         let active = l.projects.indices.contains(l.activeProject) ? l.projects[l.activeProject].id : nil
         l.projects.removeAll { $0.scratch == true }
         // -1 = no project selected (every active one hidden); keep it rather than surfacing a hidden project.
