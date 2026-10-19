@@ -399,7 +399,13 @@ private final class FlatRowView: NSTableRowView {
 
     private func beginRename(_ row: Int) {
         guard rows.indices.contains(row), let cell = table.view(atColumn: 0, row: row, makeIfNecessary: false) as? ProjectRowCell else { return }
-        InlineRename(cell.label) { [weak self] name in self?.onRename?(row, name) }
+        // The label hugs its text; stretch it to the row edge while editing so there is room to type.
+        let fill = cell.label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -16)
+        fill.isActive = true
+        InlineRename(cell.label) { [weak self] name in
+            fill.isActive = false
+            self?.onRename?(row, name)
+        }
     }
 
     private func select() {
