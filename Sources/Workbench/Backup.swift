@@ -61,7 +61,7 @@ struct Backup: Codable, Sendable {
         for k in b.themes.keys where !valid(k) || !k.hasSuffix(".json") {
             throw BackupError(message: "The backup contains an invalid file name: \(k)")
         }
-        for k in b.images.keys where !valid(k) {
+        for k in Array(b.images.keys) + (b.layout.workspaces ?? []).compactMap(\.image) where !valid(k) {   // image names are paths under Store.workspaceImages
             throw BackupError(message: "The backup contains an invalid file name: \(k)")
         }
         return b
@@ -232,6 +232,9 @@ struct Backup: Codable, Sendable {
     assert((try? Backup.decode(bad.encoded())) == nil)
     bad = b
     bad.images = [".hidden": Data()]
+    assert((try? Backup.decode(bad.encoded())) == nil)
+    bad = b
+    bad.layout.workspaces = [Workspace(id: UUID(), name: "W", image: "../../.ssh/id_rsa")]
     assert((try? Backup.decode(bad.encoded())) == nil)
 
     var r = b
