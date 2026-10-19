@@ -8,7 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var workspace: WorkspaceController!
     private var control: ControlServer?
     private var settings: SettingsWindowController?
-    private var pendingRestore: Backup?   // Settings > Backup import: installed at quit, then we relaunch into it
+    private var pendingRestore: (backup: Backup, rollback: URL)?   // Settings > Backup import: installed at quit (rollback = the setup saved just before), then we relaunch into it
     private let themeMenu = NSMenu(title: "Theme")
     private var reserved: [String: NSMenuItem] = [:]   // "key|mods" → item; looked up on every ⌘/⌃ keyDown in a terminal
 
@@ -36,9 +36,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         control = server
 
         NSApp.activate()
+
+        if let data = readFile(Store.restoreError, cap: 1 << 16) {
+            try? FileManager.default.removeItem(at: Store.restoreError)
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "The restore didn't finish"
+            alert.informativeText = String(decoding: data, as: UTF8.self)
+            alert.runModal()
+        }
     }
 
-    func applicationDidBecomeActive(_ notification: Notification) { runtime?.setFocus(true) }
+    func applicationDidBecomeActive(_ notification: Notification) {
+        runtime?.setFocus(true)
+        if let store { BackupSync.shared.scheduleSync(store) }   // themes and the Ghostty config change outside the layout; an unchanged file makes no commit
+    }
     func applicationDidResignActive(_ notification: Notification) { runtime?.setFocus(false) }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -56,15 +68,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func applicationWillTerminate(_ notification: Notification) {
         control?.stop()
         workspace.terminateAll()
-        if let backup = pendingRestore {
-            do { try backup.install(backupRepo: store.layout.backupRepo) } catch { NSLog("Backup restore failed: \(error)") }
+        if let (backup, rollback) = pendingRestore {
+            do { try backup.install(backupRemote: store.layout.backupRemote) } catch {
+                let previous = readFile(rollback, cap: Backup.maxSize).flatMap { try? Backup.decode($0) }
+                let undone = previous.map { (try? $0.install(backupRemote: store.layout.backupRemote)) != nil } ?? false
+                let note = (error as? BackupError)?.message ?? error.localizedDescription
+                try? Data((note + (undone ? " Workbench put back the setup you had before." : " Your previous setup couldn't be put back; it is saved in \(rollback.path).")).utf8)
+                    .write(to: Store.restoreError, options: .atomic)
+            }
             relaunch()
+        } else {
+            BackupSync.shared.flush(store)   // a change still waiting for its debounce
         }
     }
 
-    /// Replaces the whole setup with `backup`: quit (surfaces retire, the old layout saves), install, reopen.
-    func restore(_ backup: Backup) {
-        pendingRestore = backup
+    /// Replaces the whole setup with `backup`: quit (surfaces retire, the old layout saves), install, reopen; if installing fails, the saved setup is put back and the error shown after relaunch.
+    func restore(_ backup: Backup, rollback: URL) {
+        pendingRestore = (backup, rollback)
         NSApp.terminate(nil)
     }
 
@@ -237,4 +257,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         NSApp.windowsMenu = window.submenu
         return main
     }
+}
+
+private extension Store {
+    /// Why the last restore failed; shown (then deleted) at the next launch.
+    static var restoreError: URL { directory.appendingPathComponent("restore-error.txt") }
 }

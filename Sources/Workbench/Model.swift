@@ -123,6 +123,13 @@ struct Project: Codable, Identifiable, Equatable, Sendable {
     var scratch: Bool? = nil   // temporary home-folder project: gone when its last tab closes, never restored
     var hidden: Bool? = nil    // off the Active list, shown under Hidden; its terminals and agents keep running
     var workspace: UUID? = nil // the workspace it is listed in (nil only for scratch terminals; fixed up at load)
+    var todos: [Todo]? = nil   // the right sidebar's checklist
+}
+
+struct Todo: Codable, Identifiable, Equatable, Sendable {
+    var id: UUID
+    var text: String
+    var done: Bool
 }
 
 /// A group of projects (Personal, Work…), picked in the sidebar's rail. Its icon is `image` (cropped and downscaled
@@ -178,7 +185,7 @@ struct Layout: Codable, Equatable, Sendable {
     var showHidden: Bool? = nil   // sidebar lists the hidden projects instead of the active ones (nil = active)
     var workspaces: [Workspace]? = nil   // never empty after load (normalizeWorkspaces)
     var activeWorkspace: UUID? = nil
-    var backupRepo: String? = nil   // git repo Backup syncs workbench.json to (Settings > Backup); never exported
+    var backupRemote: String? = nil   // git remote Backup syncs to (Settings > Backup; clone in Store.directory/sync); never exported
 
     static let `default` = Layout(
         projects: [],

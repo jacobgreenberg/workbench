@@ -16,6 +16,7 @@ import AppKit
         label.font = .systemFont(ofSize: 12)
         label.lineBreakMode = .byTruncatingTail
         label.translatesAutoresizingMaskIntoConstraints = false
+        label.setAccessibilityElement(false)   // the segment itself is the radio button
         addSubview(label)
         NSLayoutConstraint.activate([
             label.centerXAnchor.constraint(equalTo: centerXAnchor),
@@ -37,6 +38,11 @@ import AppKit
     override func mouseEntered(with event: NSEvent) { hovering = true }
     override func mouseExited(with event: NSEvent) { hovering = false }
     override func mouseDown(with event: NSEvent) { onClick?() }
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .radioButton }
+    override func accessibilityLabel() -> String? { label.stringValue }
+    override func accessibilityValue() -> Any? { selected ? 1 : 0 }
+    override func accessibilityPerformPress() -> Bool { onClick?(); return true }
 
     private func refresh() {
         label.textColor = selected || hovering ? .labelColor : .secondaryLabelColor

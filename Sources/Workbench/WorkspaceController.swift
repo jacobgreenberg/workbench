@@ -59,13 +59,18 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private let findBar = FindBar(frame: .zero)
     private let emptyLabel = NSTextField(labelWithString: "")
     private lazy var tree = SplitTreeView { [unowned self] spec in self.view(for: spec) }
-    /// Native split: glass sidebar (projects) | terminals | inspector (the file ⌘-clicked last). AppKit owns the
+    /// Native split: glass sidebar (projects) | terminals | inspector (tabs: the project's to-dos, the file ⌘-clicked last, more to come). AppKit owns the
     /// materials, divider dragging and the collapse animations.
     private let split = NSSplitViewController()
     private var sidebarItem: NSSplitViewItem!
     private var inspectorItem: NSSplitViewItem!
     private var collapseObservation: NSKeyValueObservation?
     private let preview = NSView()
+    private let inspector = NSView()
+    private let inspectorTabs = GlassSegments(labels: ["To-dos", "Preview", "More"])
+    private let todoList = TodoListView()
+    private let morePane = PlaceholderPane(text: "More tools are coming here.")
+    private var todoProject: UUID?   // whose to-dos the list shows
     private let previewTitle = NSTextField(labelWithString: "No file. ⌘-click a path to preview it here.")
     private var previewFile: FilePaneView?
 
@@ -125,6 +130,10 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         previewTitle.lineBreakMode = .byTruncatingMiddle
         previewTitle.translatesAutoresizingMaskIntoConstraints = false
         preview.addSubview(previewTitle)
+        for v in [inspectorTabs, todoList, preview, morePane] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            inspector.addSubview(v)
+        }
 
         NSLayoutConstraint.activate([
             content.topAnchor.constraint(equalTo: main.safeAreaLayoutGuide.topAnchor),   // below the toolbar
@@ -135,10 +144,21 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             emptyLabel.centerYAnchor.constraint(equalTo: content.centerYAnchor),
             findBar.topAnchor.constraint(equalTo: content.topAnchor, constant: 8),
             findBar.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
-            previewTitle.topAnchor.constraint(equalTo: preview.safeAreaLayoutGuide.topAnchor, constant: 6),
+            previewTitle.topAnchor.constraint(equalTo: preview.topAnchor),
+            inspectorTabs.topAnchor.constraint(equalTo: inspector.safeAreaLayoutGuide.topAnchor, constant: 6),
+            inspectorTabs.leadingAnchor.constraint(equalTo: inspector.leadingAnchor, constant: 12),
+            inspectorTabs.trailingAnchor.constraint(equalTo: inspector.trailingAnchor, constant: -12),
             previewTitle.leadingAnchor.constraint(equalTo: preview.leadingAnchor, constant: 16),
             previewTitle.trailingAnchor.constraint(lessThanOrEqualTo: preview.trailingAnchor, constant: -16),
         ])
+        for v in [todoList, preview, morePane] as [NSView] {
+            NSLayoutConstraint.activate([
+                v.topAnchor.constraint(equalTo: inspectorTabs.bottomAnchor, constant: 8),
+                v.leadingAnchor.constraint(equalTo: inspector.leadingAnchor),
+                v.trailingAnchor.constraint(equalTo: inspector.trailingAnchor),
+                v.bottomAnchor.constraint(equalTo: inspector.bottomAnchor),
+            ])
+        }
 
         sidebarItem = NSSplitViewItem(sidebarWithViewController: controller(sidebar))
         sidebarItem.minimumThickness = 240 + WorkspaceRail.width
@@ -146,7 +166,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         sidebarItem.isCollapsed = !store.layout.sidebarVisible
         let mainItem = NSSplitViewItem(viewController: controller(main))
         mainItem.minimumThickness = 300
-        inspectorItem = NSSplitViewItem(inspectorWithViewController: controller(preview))
+        inspectorItem = NSSplitViewItem(inspectorWithViewController: controller(inspector))
         inspectorItem.minimumThickness = 260
         inspectorItem.maximumThickness = 1600
         inspectorItem.isCollapsed = true
@@ -162,9 +182,24 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                 self.store.changed()
             }
         }
+        inspectorTabs.onSelect = { [unowned self] i in showInspectorTab(i) }
+        showInspectorTab(0)
+    }
+
+    /// 0 To-dos, 1 Preview, 2 More.
+    private func showInspectorTab(_ i: Int) {
+        inspectorTabs.select(i, animated: true)
+        todoList.isHidden = i != 0
+        preview.isHidden = i != 1
+        morePane.isHidden = i != 2
     }
 
     private func wireCallbacks() {
+        todoList.onChange = { [unowned self] todos in
+            guard let p = activeProjectIndex, store.layout.projects[p].id == todoProject else { return }
+            store.layout.projects[p].todos = todos
+            store.changed()
+        }
         sidebar.onSelect = { [unowned self] i in project(atRow: i).map(selectProject) }
         sidebar.onRemove = { [unowned self] i in project(atRow: i).map(removeProject) }
         sidebar.onShowHidden = { [unowned self] on in setShowHidden(on) }
@@ -425,6 +460,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             ProcessInfo.processInfo.endActivity(a)
             activity = nil
         }
+        let shownProject = activeProjectIndex.map { store.layout.projects[$0].id }
+        if shownProject != todoProject {
+            todoProject = shownProject
+            todoList.show(activeProjectIndex.map { store.layout.projects[$0].todos ?? [] } ?? [])
+        }
     }
 
     /// A project's tabs as the tab bar and the sidebar show them: title, and the busiest status among their panes.
@@ -612,6 +652,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         previewTitle.stringValue = "Session transcript"
         previewTitle.toolTip = url.path
         inspectorWasCollapsed = inspectorItem.isCollapsed
+        showInspectorTab(1)
         if inspectorWasCollapsed { togglePreview(nil) }
         transcriptView = v
     }
@@ -1118,6 +1159,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         previewFile = f
         previewTitle.stringValue = (path as NSString).abbreviatingWithTildeInPath
         previewTitle.toolTip = path
+        showInspectorTab(1)
         if inspectorItem.isCollapsed { togglePreview(nil) }
     }
     @objc func togglePreview(_ sender: Any?) { split.toggleInspector(sender) }
@@ -1150,8 +1192,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     }
 
     /// Record, per terminal pane, the command that resumes the agent running in it (through the launcher it was
-    /// started with); a pane with no agent running forgets any earlier one.
-    private func captureAgents() { apply(Agents.running()) }
+    /// started with); a pane with no agent running forgets any earlier one. Also run right before a backup snapshot.
+    func captureAgents() { apply(Agents.running()) }
 
     private func apply(_ running: [PaneID: String?]) {
         var layout = store.layout

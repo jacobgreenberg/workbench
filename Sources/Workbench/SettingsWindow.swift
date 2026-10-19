@@ -296,7 +296,7 @@ private final class BackupViewController: NSViewController {
         stopButton = NSButton(title: "Stop Syncing", target: self, action: #selector(stopSync(_:)))
         let repoRow = NSStackView(views: [
             repoLabel, NSView(),
-            NSButton(title: "Choose Repository…", target: self, action: #selector(chooseRepo(_:))),
+            NSButton(title: "Connect…", target: self, action: #selector(connect(_:))),
             stopButton,
         ])
         repoRow.spacing = 8
@@ -311,7 +311,7 @@ private final class BackupViewController: NSViewController {
         let stack = DropStack(views: [
             settingsHeader("Backup", "Everything that makes Workbench yours, in one JSON file: projects and their order, tabs and splits, workspaces, themes and your Ghostty config. To restore one, import it, paste it, or drop the file on this window."),
             buttons,
-            settingsHeader("Git Sync", "Keeps workbench.json in a git repository: a minute after each change it is committed and pushed, using your own git and credentials."),
+            settingsHeader("Git Sync", "Keeps a copy in a git repository that only Workbench uses. Make it private: it holds your project names, folders and commands. Each Mac writes its own file, committed and pushed a minute after a change."),
             repoRow,
             syncRow,
         ])
@@ -329,8 +329,8 @@ private final class BackupViewController: NSViewController {
     }
 
     @objc private func refresh() {
-        let repo = store.layout.backupRepo
-        repoLabel.stringValue = repo.map { ($0 as NSString).abbreviatingWithTildeInPath } ?? "No repository chosen"
+        let repo = store.layout.backupRemote
+        repoLabel.stringValue = repo ?? "Not connected"
         repoLabel.textColor = repo == nil ? .secondaryLabelColor : .labelColor
         stopButton.isHidden = repo == nil
         syncButton.isEnabled = repo != nil
@@ -345,7 +345,8 @@ private final class BackupViewController: NSViewController {
         guard let window = view.window else { return }
         panel.beginSheetModal(for: window) { [self] r in
             guard r == .OK, let url = panel.url else { return }
-            do { try Backup.current(store.layout).encoded().write(to: url, options: .atomic) } catch { fail("Couldn't export the backup", error.localizedDescription) }
+            workspace.captureAgents()
+            do { try Backup.current(store.layout).encoded().write(to: url, options: .atomic) } catch { fail("Couldn't export the backup", message(error)) }
         }
     }
 
@@ -366,27 +367,42 @@ private final class BackupViewController: NSViewController {
     }
 
     @objc private func copyJSON(_ sender: Any?) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(String(decoding: Backup.current(store.layout).encoded(), as: UTF8.self), forType: .string)
+        workspace.captureAgents()
+        do {
+            let data = try Backup.current(store.layout).encoded()
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(String(decoding: data, as: UTF8.self), forType: .string)
+        } catch { fail("Couldn't copy the backup", message(error)) }
     }
+
+    private func message(_ error: Error) -> String { (error as? BackupError)?.message ?? error.localizedDescription }
 
     @objc private func pasteJSON(_ sender: Any?) {
         guard let text = NSPasteboard.general.string(forType: .string), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return fail("Nothing to paste", "Copy a Workbench backup's JSON first.")
         }
+        guard text.utf8.count <= Backup.maxSize else { return fail("Couldn't read the backup", "The pasted text is over 64 MB.") }
         importData(Data(text.utf8))
     }
 
-    @objc private func chooseRepo(_ sender: Any?) {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.prompt = "Choose"
-        panel.message = "Choose a git repository to keep workbench.json in."
-        guard let window = view.window else { return }
-        panel.beginSheetModal(for: window) { [self] r in
-            guard r == .OK, let url = panel.url else { return }
-            store.layout.backupRepo = url.path
+    @objc private func connect(_ sender: Any?) {
+        let alert = NSAlert()
+        alert.messageText = "Connect a git repository"
+        alert.informativeText = "Paste the URL of an empty private repository, e.g. git@github.com:you/workbench-backup.git. Workbench clones it and syncs your setup there."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.placeholderString = "git@github.com:you/workbench-backup.git"
+        field.stringValue = store.layout.backupRemote ?? ""
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Connect")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let url = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        statusLabel.stringValue = "Connecting…"
+        BackupSync.shared.connect(remote: url) { [weak self] err in
+            guard let self else { return }
+            if let err { refresh(); return fail("Couldn't connect", err.message) }
+            store.layout.backupRemote = url
             store.changed()
             BackupSync.shared.syncNow(store)
             refresh()
@@ -394,7 +410,8 @@ private final class BackupViewController: NSViewController {
     }
 
     @objc private func stopSync(_ sender: Any?) {
-        store.layout.backupRepo = nil
+        BackupSync.shared.stop()
+        store.layout.backupRemote = nil
         store.changed()
         refresh()
     }
@@ -402,17 +419,39 @@ private final class BackupViewController: NSViewController {
     @objc private func syncNow(_ sender: Any?) { BackupSync.shared.syncNow(store) }
 
     @objc private func restoreFromRepo(_ sender: Any?) {
-        guard let repo = store.layout.backupRepo else { return }
-        BackupSync.shared.pull(repo: repo) { [weak self] result in
+        guard store.layout.backupRemote != nil else { return }
+        statusLabel.stringValue = "Fetching…"
+        BackupSync.shared.fetchBackups { [weak self] result in
+            guard let self else { return }
+            refresh()
             switch result {
-            case .success(let b): self?.begin(b)
-            case .failure(let e): self?.fail("Couldn't restore from the repository", e.message)
+            case .failure(let e):
+                fail("Couldn't restore from the repository", e.message)
+            case .success(let list):
+                if list.isEmpty { fail("Nothing to restore yet", "The repository has no Workbench backups.") }
+                else if list.count == 1 { begin(list[0]) }
+                else { pickMachine(list) }
             }
         }
     }
 
+    private func pickMachine(_ list: [Backup]) {
+        let alert = NSAlert()
+        alert.messageText = "Restore which Mac's setup?"
+        alert.informativeText = "Each Mac that syncs to this repository has its own backup."
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 260, height: 26), pullsDown: false)
+        for b in list {
+            popup.addItem(withTitle: b.machine.map { $0 == Backup.thisMachine ? "\($0) (this Mac)" : $0 } ?? "Unknown Mac")
+        }
+        alert.accessoryView = popup
+        alert.addButton(withTitle: "Continue")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        begin(list[popup.indexOfSelectedItem])
+    }
+
     private func importData(_ data: Data) {
-        do { begin(try Backup.decode(data)) } catch { fail("Couldn't read the backup", (error as? BackupError)?.message ?? error.localizedDescription) }
+        do { begin(try Backup.decode(data)) } catch { fail("Couldn't read the backup", message(error)) }
     }
 
     private func begin(_ backup: Backup) {
@@ -447,11 +486,14 @@ private final class BackupViewController: NSViewController {
         confirm.messageText = "Replace your current setup?"
         confirm.informativeText = "Workbench quits and reopens with the \(b.layout.projects.count) projects in this backup. Open terminals close, and tabs rerun their saved commands, so only restore backups you made. Your current setup is saved to \(backupsPath) first."
             + (b.ghosttyConfig != nil ? " It also replaces ~/.config/ghostty/config." : "")
+            + (workspace.needsConfirmQuit ? " Running commands, and agents in the middle of a turn, are stopped." : "")
         confirm.addButton(withTitle: "Replace and Relaunch").hasDestructiveAction = true
         confirm.addButton(withTitle: "Cancel")
         guard confirm.runModal() == .alertFirstButtonReturn else { return }
-        do { _ = try Backup.saveCurrent(store.layout) } catch { return fail("Couldn't save your current setup, so nothing was replaced", error.localizedDescription) }
-        (NSApp.delegate as? AppDelegate)?.restore(b)
+        workspace.captureAgents()
+        let rollback: URL
+        do { rollback = try Backup.saveCurrent(store.layout) } catch { return fail("Couldn't save your current setup, so nothing was replaced", message(error)) }
+        (NSApp.delegate as? AppDelegate)?.restore(b, rollback: rollback)
     }
 
     private func fail(_ title: String, _ message: String) {
