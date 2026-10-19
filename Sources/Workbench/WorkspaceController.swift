@@ -1,7 +1,6 @@
 import AppKit
 @preconcurrency import GhosttyKit
 import UserNotifications
-import UniformTypeIdentifiers
 
 /// Jira tickets of the kwimpos projects active in the last 30 days (not a generic KEY-123 shape, which would hit UTF-8, SHA-256, ISO-8601).
 /// The one list: libghostty highlights the pattern on ⌘-hover (`link` override) and `openURL` maps a click to `browse`.
@@ -134,11 +133,12 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         previewTitle.lineBreakMode = .byTruncatingMiddle
         previewTitle.translatesAutoresizingMaskIntoConstraints = false
         preview.addSubview(previewTitle)
-        files.isVertical = false
+        files.isVertical = true
         files.dividerStyle = .thin
-        files.autosaveName = "Workbench.files"
-        files.addArrangedSubview(fileTree)
         files.addArrangedSubview(preview)
+        files.addArrangedSubview(fileTree)
+        files.setHoldingPriority(.defaultLow + 1, forSubviewAt: 1)   // resizing the inspector grows the preview, not the tree
+        preview.isHidden = true   // until a file opens; the tree fills the tab
         for v in [inspectorTabs, todoList, files] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             inspector.addSubview(v)
@@ -204,14 +204,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     }
 
     private func wireCallbacks() {
-        fileTree.onOpen = { [unowned self] path in
-            // Text previews here; images, archives and other binaries go to their default app.
-            if let t = UTType(filenameExtension: (path as NSString).pathExtension), !t.conforms(to: .text), !t.isDynamic {
-                NSWorkspace.shared.open(URL(fileURLWithPath: path))
-            } else {
-                openFile(path)
-            }
+        fileTree.onSelect = { [unowned self] path in
+            let file = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+            if previewable(file) { openFile(file.path) }
         }
+        fileTree.onOpen = { [unowned self] path in open(URL(fileURLWithPath: path)) }   // double-click: the ⌘-click policy
         fileTree.onToggleClutter = { [unowned self] hide in
             store.layout.showClutterFiles = hide ? nil : true
             store.changed()
@@ -683,8 +680,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         previewTitle.stringValue = "Session transcript"
         previewTitle.toolTip = url.path
         inspectorWasCollapsed = inspectorItem.isCollapsed
-        showInspectorTab(1)
-        if inspectorWasCollapsed { togglePreview(nil) }
+        showPreview()
         transcriptView = v
     }
 
@@ -746,15 +742,18 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     /// The one link policy for terminal ⌘-clicks and markdown links. Terminal output and documents are untrusted, so
     /// a click only opens passive files (text/source, images, PDF) and plain folders, and only follows http/https/mailto.
     /// Everything else, including scripts, .command/.terminal/.webloc files and bundles, is revealed in Finder, never run.
+    /// A file the preview shows: markdown, a highlighted language, or any text type (symlinks already resolved).
+    private func previewable(_ file: URL) -> Bool {
+        let v = try? file.resourceValues(forKeys: [.contentTypeKey, .isDirectoryKey])
+        return v?.isDirectory != true && (["md", "markdown"].contains(file.pathExtension.lowercased()) || Syntax.key(for: file.path) != nil
+            || v?.contentType.map({ $0.conforms(to: .text) }) == true)
+    }
+
     private func open(_ url: URL) {
         if url.isFileURL {
             let file = url.resolvingSymlinksInPath()
+            if previewable(file) { return openFile(file.path) }
             let v = try? file.resourceValues(forKeys: [.contentTypeKey, .isDirectoryKey, .isPackageKey])
-            if v?.isDirectory != true, ["md", "markdown"].contains(file.pathExtension.lowercased()) || Syntax.key(for: file.path) != nil
-                || v?.contentType.map({ $0.conforms(to: .text) }) == true {
-                openFile(file.path)
-                return
-            }
             let passive = v?.contentType.map {
                 ($0.conforms(to: .text) || $0.conforms(to: .image) || $0.conforms(to: .pdf))
                     && !$0.conforms(to: .script) && !$0.conforms(to: .propertyList)
@@ -1191,9 +1190,23 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         previewFile = f
         previewTitle.stringValue = (path as NSString).abbreviatingWithTildeInPath
         previewTitle.toolTip = path
-        if files.subviews.count == 2, preview.frame.height < 80 { files.setPosition(files.bounds.height * 0.4, ofDividerAt: 0) }
+        showPreview()
+    }
+
+    /// Files tab with the preview left of the tree. First time: the inspector widens so the tree keeps its width.
+    private func showPreview() {
         showInspectorTab(1)
-        if inspectorItem.isCollapsed { togglePreview(nil) }
+        let tree: CGFloat = 260, minPreview: CGFloat = 480
+        if inspectorItem.isCollapsed { inspectorItem.isCollapsed = false }
+        guard preview.isHidden else { return }
+        preview.isHidden = false
+        split.splitView.layoutSubtreeIfNeeded()
+        if inspector.frame.width < tree + minPreview {
+            split.splitView.setPosition(split.splitView.bounds.width - tree - minPreview, ofDividerAt: 1)
+            split.splitView.layoutSubtreeIfNeeded()
+        }
+        files.adjustSubviews()
+        files.setPosition(files.bounds.width - tree, ofDividerAt: 0)
     }
     @objc func togglePreview(_ sender: Any?) { split.toggleInspector(sender) }
 

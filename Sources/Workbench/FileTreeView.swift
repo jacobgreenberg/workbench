@@ -15,7 +15,8 @@ private final class Node {
 private let clutterNames: Set<String> = ["node_modules", "build", "dist", "DerivedData", "target", "__pycache__", "venv", "Pods", "coverage", ".build"]
 
 @MainActor final class FileTreeView: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate {
-    var onOpen: ((String) -> Void)?
+    var onSelect: ((String) -> Void)?   // a file row was selected (click or arrow keys)
+    var onOpen: ((String) -> Void)?     // a file row was double-clicked
     var onToggleClutter: ((Bool) -> Void)?
     var hideClutter = true {
         didSet {
@@ -71,6 +72,7 @@ private let clutterNames: Set<String> = ["node_modules", "build", "dist", "Deriv
         outline.delegate = self
         outline.target = self
         outline.action = #selector(clicked)
+        outline.doubleAction = #selector(doubleClicked)
         let menu = NSMenu()
         menu.delegate = self
         outline.menu = menu
@@ -284,6 +286,11 @@ private let clutterNames: Set<String> = ["node_modules", "build", "dist", "Deriv
     /// Selecting a file (click or arrow keys) previews it.
     func outlineViewSelectionDidChange(_ notification: Notification) {
         guard let n = outline.item(atRow: outline.selectedRow) as? Node, !n.isDirectory else { return }
+        onSelect?(n.url.path)
+    }
+
+    @objc private func doubleClicked() {
+        guard let n = outline.item(atRow: outline.clickedRow) as? Node, !n.isDirectory else { return }
         onOpen?(n.url.path)
     }
 
