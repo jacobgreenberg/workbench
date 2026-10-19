@@ -1196,6 +1196,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         ])
         previewFile = f
         previewTitle.stringValue = (path as NSString).abbreviatingWithTildeInPath
+        f.onDirtyChange = { [unowned self] dirty in
+            previewTitle.stringValue = (dirty ? "● " : "") + (path as NSString).abbreviatingWithTildeInPath
+        }
         previewTitle.toolTip = path
         showPreview()
     }
@@ -1427,7 +1430,21 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     @objc func splitRight(_ sender: Any?) { split(.horizontal, kind: .terminal(cwd: cwdForNewPane(), launch: nil)) }
     @objc func splitDown(_ sender: Any?) { split(.vertical, kind: .terminal(cwd: cwdForNewPane(), launch: nil)) }
     @objc func closePane(_ sender: Any?) {
+        // The keyboard is in the inspector: ⌘W closes the open file, never the terminal behind it.
+        if let r = window?.firstResponder as? NSView, r.isDescendant(of: inspector) { return closePreview() }
         if let id = focusedPane { closePane(id) }
+    }
+
+    private func closePreview() {
+        if transcript != nil { return closeFind() }
+        guard let f = previewFile else { return NSSound.beep() }
+        f.close()   // autosaves
+        f.removeFromSuperview()
+        previewFile = nil
+        preview.isHidden = true
+        previewTitle.stringValue = "No file. ⌘-click a path to preview it here."
+        previewTitle.toolTip = nil
+        if let id = focusedPane, let v = views[id] { window?.makeFirstResponder(v) }
     }
     @objc func closeTab(_ sender: Any?) {
         if let p = activeProjectIndex { closeTab(at: store.layout.projects[p].activeTab) }

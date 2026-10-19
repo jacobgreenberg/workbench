@@ -141,7 +141,7 @@ enum FocusDirection: Sendable { case left, right, up, down }
     func neighbor(of id: PaneID, _ direction: FocusDirection) -> PaneID?
 }
 
-// FilePaneView.swift — .md previewed, other files as monospace code highlighted via Syntax; reloads on file change. Shown in the right preview sidebar (⌘-click a path, `pane open`, Open File…; ⌥⌘B toggles), or as a .file pane from old layouts
+// FilePaneView.swift — .md previewed, other files as monospace code highlighted via Syntax; reloads on file change. Editable when it is valid UTF-8 ≤10 MB (markdown via its Edit/Done source toggle): CodeTextView (plain paste, auto-indent, Tab = 4 spaces), 150 ms re-highlight in place, ⌘S (File > Save) and JetBrains-style autosave on app resign/quit/close (skipped if the disk changed; ⌘S then asks Overwrite/Reload); writes in place (keeps inode and permissions); our own save echo is ignored, external changes reload only while clean. ⌘W with the keyboard in the inspector closes the preview (WorkspaceController.closePreview), not a terminal. Shown in the right preview sidebar (⌘-click a path, `pane open`, Open File…; ⌥⌘B toggles), or as a .file pane from old layouts
 @MainActor final class FilePaneView: NSView { let paneID: PaneID; init(id: PaneID, path: String, theme: Theme); func apply(theme: Theme); func close() }
 
 // Syntax.swift — tree-sitter grammars (SwiftPM packages; queries read from their resource bundles in Contents/Resources)

@@ -3,7 +3,7 @@ import AppKit
 
 #if DEBUG
 if CommandLine.arguments.contains("--selfcheck") {
-    MainActor.assumeIsolated { modelSelfCheck(); backupSelfCheck(); FileIcons.selfCheck() }
+    MainActor.assumeIsolated { modelSelfCheck(); backupSelfCheck(); FileIcons.selfCheck(); filePaneSelfCheck() }
     themeSelfCheck()
     controlSelfCheck()
     agentsSelfCheck()
