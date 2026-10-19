@@ -132,6 +132,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         previewTitle.font = .systemFont(ofSize: 12, weight: .medium)
         previewTitle.textColor = .secondaryLabelColor
         previewTitle.lineBreakMode = .byTruncatingMiddle
+        previewTitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)   // a long path truncates instead of widening the preview
         previewTitle.translatesAutoresizingMaskIntoConstraints = false
         preview.addSubview(previewTitle)
         files.isVertical = true
