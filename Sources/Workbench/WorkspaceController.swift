@@ -94,6 +94,15 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         wireCallbacks()
         paintTheme()
         restore()
+        mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.otherMouseDown, .otherMouseUp]) { [weak self] event in
+            nonisolated(unsafe) let event = event
+            let swallow = MainActor.assumeIsolated {
+                guard event.buttonNumber == 3 || event.buttonNumber == 4, event.window === self?.window else { return false }
+                if event.type == .otherMouseDown { if event.buttonNumber == 3 { self?.goBack(nil) } else { self?.goForward(nil) } }
+                return true
+            }
+            return swallow ? nil : event
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
@@ -377,6 +386,64 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         (view(for: spec) as? SurfaceView)?.setVisible(false)
     }
 
+    private struct Location: Equatable { var workspace: UUID?; var project: UUID?; var tab: UUID? }
+    private var history: [Location] = []
+    private var historyIndex = -1
+    private var navigating = false
+    private var mouseMonitor: Any?
+
+    private var currentLocation: Location {
+        var tabID: UUID?
+        if let p = activeProjectIndex {
+            let pr = store.layout.projects[p]
+            if pr.tabs.indices.contains(pr.activeTab) { tabID = pr.tabs[pr.activeTab].id }
+        }
+        return Location(workspace: store.layout.activeWorkspace, project: activeProjectIndex.map { store.layout.projects[$0].id }, tab: tabID)
+    }
+
+    private func recordLocation() {
+        guard !navigating else { return }
+        let loc = currentLocation
+        if history.indices.contains(historyIndex) && history[historyIndex] == loc { return }
+        if historyIndex + 1 < history.count { history.removeSubrange((historyIndex + 1)...) }
+        history.append(loc)
+        if history.count > 100 { history.removeFirst() }
+        historyIndex = history.count - 1
+    }
+
+    private func resolve(_ l: Location) -> Location? {
+        if let id = l.project, let pr = store.layout.projects.first(where: { $0.id == id }) {
+            return Location(workspace: pr.workspace, project: id, tab: pr.tabs.contains { $0.id == l.tab } ? l.tab : nil)
+        }
+        if let w = l.workspace, workspaces.contains(where: { $0.id == w }) { return Location(workspace: w, project: nil, tab: nil) }
+        return nil
+    }
+
+    private func go(_ l: Location) {
+        if let id = l.project, let p = store.layout.projects.firstIndex(where: { $0.id == id }) {
+            activate(p)
+            if let t = store.layout.projects[p].tabs.firstIndex(where: { $0.id == l.tab }) { store.layout.projects[p].activeTab = t }
+        } else {
+            store.layout.activeWorkspace = l.workspace
+            store.layout.showHidden = nil
+            selectVisible(near: 0)
+        }
+        store.changed()
+        navigating = true; render(); navigating = false
+    }
+
+    private func step(_ d: Int) {
+        var i = historyIndex + d
+        while history.indices.contains(i) {
+            if let r = resolve(history[i]), r != currentLocation { historyIndex = i; go(r); return }
+            i += d
+        }
+        NSSound.beep()
+    }
+
+    @objc func goBack(_ sender: Any?) { step(-1) }
+    @objc func goForward(_ sender: Any?) { step(1) }
+
     private func render() {
         if let f = findPane, !(activeTab?.root.contains(f) ?? false) { closeFind(refocus: false) }
         var rebuilt = false
@@ -393,6 +460,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         syncVisibility(refresh: rebuilt)
         updateChrome()
         if !InlineRename.isEditing, let id = focusedPane, let v = views[id] { window?.makeFirstResponder(v) }
+        recordLocation()
     }
 
     /// `refresh`: the split hierarchy was rebuilt, so re-parented surfaces must redraw (else they show blank).

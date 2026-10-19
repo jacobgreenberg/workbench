@@ -240,7 +240,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             item("Previous Project", #selector(w.previousProject(_:)), arrow(NSUpArrowFunctionKey), [.command, .option]),
             item("Next Project", #selector(w.nextProject(_:)), arrow(NSDownArrowFunctionKey), [.command, .option]),
         ]
-        main.addItem(menu("Go", projectItems + [
+        main.addItem(menu("Go", [item("Back", #selector(w.goBack(_:)), arrow(NSLeftArrowFunctionKey), [.command, .control]), item("Forward", #selector(w.goForward(_:)), arrow(NSRightArrowFunctionKey), [.command, .control]), .separator()] + projectItems + [
             .separator(),
             item("Previous Tab", #selector(w.previousTab(_:)), "[", [.command, .shift]),
             item("Next Tab", #selector(w.nextTab(_:)), "]", [.command, .shift]),
