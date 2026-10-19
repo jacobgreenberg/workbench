@@ -182,7 +182,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         let mainItem = NSSplitViewItem(viewController: controller(main))
         mainItem.minimumThickness = 300
         inspectorItem = NSSplitViewItem(inspectorWithViewController: controller(inspector))
-        inspectorItem.minimumThickness = 260
+        inspectorItem.minimumThickness = 280   // fits the TODO/Files switch (12 + 200 + 64 for the toggle)
         inspectorItem.maximumThickness = 1600
         inspectorItem.isCollapsed = true
         for item in [sidebarItem!, mainItem, inspectorItem!] { split.addSplitViewItem(item) }
@@ -1208,7 +1208,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     /// Files tab with the preview left of the tree. First time: the inspector widens so the tree keeps its width.
     private func showPreview() {
         showInspectorTab(1)
-        let tree: CGFloat = 260, minPreview: CGFloat = 480
+        let tree: CGFloat = 280, minPreview: CGFloat = 480
         if inspectorItem.isCollapsed { inspectorItem.isCollapsed = false }
         guard preview.isHidden else { return }
         preview.isHidden = false
