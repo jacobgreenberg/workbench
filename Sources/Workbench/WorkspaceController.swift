@@ -516,9 +516,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         case let .title(raw):
             // Agents animate a spinner glyph at the front of their title (Claude Code: ⠋⠙⠹…, ✳ when idle).
             // The status dot already shows busy/idle, so drop it; that also stops a chrome redraw per frame.
-            // A braille spinner means the agent is mid-turn: that drives the status dot for agents started any way,
+            // A spinner means the agent is mid-turn: that drives the status dot for agents started any way,
             // not only through hooked launchers. Spinner gone means the turn ended.
-            let spinning = raw.unicodeScalars.first.map { (0x2800...0x28FF).contains($0.value) } ?? false
+            let spinning = Self.isSpinning(raw)
             let t = Self.displayTitle(raw)
             let titleChanged = titles[id] != t
             titles[id] = t
@@ -1449,6 +1449,12 @@ extension WorkspaceController {
     /// A terminal title as tabs and headers show it. Agent spinner/status glyphs are dropped (the status dot shows
     /// them), and a shell prompt's title (`user@host:~/dir`, or a bare path) becomes the folder name: the same text a
     /// new tab starts with, so a tab doesn't change width when its shell comes up.
+    /// A title that starts with a turn spinner: braille (Codex, older Claude Code) or a quarter-filled circle
+    /// ◐◓◑◒ (Claude Code 2.1.3xx; its idle title starts with ✳).
+    nonisolated static func isSpinning(_ raw: String) -> Bool {
+        raw.unicodeScalars.first.map { (0x2800...0x28FF).contains($0.value) || (0x25D0...0x25D3).contains($0.value) } ?? false
+    }
+
     nonisolated static func displayTitle(_ raw: String) -> String {
         let t = String(String.UnicodeScalarView(raw.unicodeScalars.drop {
             $0.properties.generalCategory == .otherSymbol || $0 == "·" || $0.properties.isWhitespace
