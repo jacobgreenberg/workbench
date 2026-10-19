@@ -42,7 +42,7 @@ private final class CheckCircle: NSButton {
     }
 }
 
-/// The right sidebar's checklist for one project, edited like an Apple Notes checklist: tick the circle, type in place, Return for a new item, Backspace on an empty one to delete it; a "New to-do" line always waits at the bottom.
+/// The right sidebar's checklist for one project, edited like an Apple Notes checklist: tick the circle, type in place, Return for a new item, Backspace on an empty one to delete it; a "New TODO" line shows while the list is empty or you are adding.
 @MainActor final class TodoListView: NSView, NSTextFieldDelegate {
     var onChange: (([Todo]) -> Void)?
     private(set) var todos: [Todo] = []
@@ -50,7 +50,7 @@ private final class CheckCircle: NSButton {
     private let list = FlippedStack()
     private var rowFields: [NSTextField] = []
     private var circles: [CheckCircle] = []
-    private var newRow: NSView?   // the "New to-do" line: shown while the list is empty or you're adding
+    private var newRow: NSView?   // the "New TODO" line: shown while the list is empty or you're adding
     private var rebuilding = false   // removing the field being edited fires its end-editing action; ignore it
 
     override init(frame: NSRect) {
@@ -121,7 +121,7 @@ private final class CheckCircle: NSButton {
             field.delegate = self
             field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             field.focusRingType = .none
-            field.placeholderAttributedString = NSAttributedString(string: "New to-do", attributes: [   // a borderless field draws a plain placeholder in label color
+            field.placeholderAttributedString = NSAttributedString(string: "New TODO", attributes: [   // a borderless field draws a plain placeholder in label color
                 .foregroundColor: NSColor.tertiaryLabelColor, .font: NSFont.systemFont(ofSize: 14)])
             if let t {
                 circle.target = self

@@ -59,7 +59,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private let findBar = FindBar(frame: .zero)
     private let emptyLabel = NSTextField(labelWithString: "")
     private lazy var tree = SplitTreeView { [unowned self] spec in self.view(for: spec) }
-    /// Native split: glass sidebar (projects) | terminals | inspector (tabs: the project's to-dos, the file ⌘-clicked last, more to come). AppKit owns the
+    /// Native split: glass sidebar (projects) | terminals | inspector (tabs: the project's TODOs, the file ⌘-clicked last, more to come). AppKit owns the
     /// materials, divider dragging and the collapse animations.
     private let split = NSSplitViewController()
     private var sidebarItem: NSSplitViewItem!
@@ -70,7 +70,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private let inspectorTabs = GlassSegments(labels: ["TODO", "Preview", "More"])
     private let todoList = TodoListView()
     private let morePane = PlaceholderPane(text: "More tools are coming here.")
-    private var todoProject: UUID?   // whose to-dos the list shows
+    private var todoProject: UUID?   // whose TODOs the list shows
     private let previewTitle = NSTextField(labelWithString: "No file. ⌘-click a path to preview it here.")
     private var previewFile: FilePaneView?
 
