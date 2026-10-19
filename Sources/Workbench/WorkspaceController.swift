@@ -156,7 +156,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             previewTitle.topAnchor.constraint(equalTo: preview.topAnchor),
             inspectorTabs.topAnchor.constraint(equalTo: inspector.safeAreaLayoutGuide.topAnchor, constant: 6),
             inspectorTabs.leadingAnchor.constraint(equalTo: inspector.leadingAnchor, constant: 12),
-            inspectorTabs.trailingAnchor.constraint(equalTo: inspector.trailingAnchor, constant: -12),
+            inspectorTabs.widthAnchor.constraint(equalToConstant: 236),   // the collapsed inspector's width; doesn't stretch with it
             previewTitle.leadingAnchor.constraint(equalTo: preview.leadingAnchor, constant: 16),
             previewTitle.trailingAnchor.constraint(lessThanOrEqualTo: preview.trailingAnchor, constant: -16),
         ])
