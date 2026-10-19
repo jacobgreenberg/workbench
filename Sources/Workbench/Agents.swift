@@ -112,6 +112,27 @@ enum Agents {
         return nil
     }
 
+    /// Whether the pane's Claude session still has background subagents running. Each one leaves
+    /// `<session>/subagents/agent-*.meta.json`, marked "finished" when it ends; an unfinished one whose log hasn't moved
+    /// in 15 min is an orphan of a killed session. Scans processes and the disk: call off the main thread.
+    static func subagentsRunning(for pane: PaneID) -> Bool {
+        guard let t = transcript(for: pane), t.pathExtension == "jsonl" else { return false }
+        return subagentsRunning(in: t.deletingPathExtension().appendingPathComponent("subagents"))
+    }
+
+    static func subagentsRunning(in dir: URL) -> Bool {
+        let fm = FileManager.default
+        for name in (try? fm.contentsOfDirectory(atPath: dir.path)) ?? [] where name.hasSuffix(".meta.json") {
+            guard let data = fm.contents(atPath: dir.appendingPathComponent(name).path),
+                  let meta = try? JSONSerialization.jsonObject(with: data) as? [String: Any], meta["finished"] as? Bool != true,
+                  let moved = try? fm.attributesOfItem(atPath: dir.appendingPathComponent(name.replacingOccurrences(of: ".meta.json", with: ".jsonl")).path)[.modificationDate] as? Date,
+                  -moved.timeIntervalSinceNow < 900
+            else { continue }
+            return true
+        }
+        return false
+    }
+
     private static func sessions() -> [PaneID: Session] {
         let map = launchers.withLock { $0 }
         let home = NSHomeDirectory()
@@ -279,6 +300,19 @@ func agentsSelfCheck() {
     let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
     try! FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(atPath: dir) }
+    let sub = URL(fileURLWithPath: dir + "/subagents")
+    try! FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+    func agent(_ name: String, finished: Bool, age: TimeInterval) {
+        try! Data(finished ? #"{"finished":true}"#.utf8 : #"{"agentType":"x"}"#.utf8).write(to: sub.appendingPathComponent(name + ".meta.json"))
+        let log = sub.appendingPathComponent(name + ".jsonl").path
+        FileManager.default.createFile(atPath: log, contents: Data())
+        try! FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -age)], ofItemAtPath: log)
+    }
+    agent("agent-a", finished: true, age: 0)
+    agent("agent-b", finished: false, age: 3600)   // orphan of a killed session
+    assert(!Agents.subagentsRunning(in: sub))
+    agent("agent-c", finished: false, age: 10)
+    assert(Agents.subagentsRunning(in: sub))
     var db: OpaquePointer?
     sqlite3_open(dir + "/state_5.sqlite", &db)
     sqlite3_exec(db, """
