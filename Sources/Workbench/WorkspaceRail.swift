@@ -50,7 +50,6 @@ private let tints: [(name: String, top: NSColor, bottom: NSColor)] = [
         label.textColor = .white
         dot.wantsLayer = true
         dot.layer?.cornerRadius = 5
-        dot.layer?.borderWidth = 2
         for v in [label, dot] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
@@ -97,7 +96,6 @@ private let tints: [(name: String, top: NSColor, bottom: NSColor)] = [
             label.font = base.fontDescriptor.withDesign(.rounded).flatMap { NSFont(descriptor: $0, size: 0) } ?? base
         }
         styleStatusDot(dot, w.status, theme: theme)
-        dot.layer?.borderColor = theme.color("sidebar").cgColor   // cut out of the tile, like an app badge
     }
 
     override func mouseDown(with event: NSEvent) { onClick?() }
@@ -127,10 +125,17 @@ private let tints: [(name: String, top: NSColor, bottom: NSColor)] = [
     private var menuTarget = -1
     private var themeID = ""
 
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        // Darker strip; a light sidebar needs far less to read as one, or it turns muddy grey.
+        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(dark ? 0.16 : 0.05).cgColor
+    }
+
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.16).cgColor   // darker strip, reads in light and dark
+        viewDidChangeEffectiveAppearance()
         stack.orientation = .vertical
         stack.spacing = 12
         let add = HandButton.glass("plus", "New Workspace")

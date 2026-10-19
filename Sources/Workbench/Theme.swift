@@ -66,7 +66,7 @@ extension Theme {
     /// resolved (and flattened over the background) under the fixed appearance so they flow through plain hex strings.
     @MainActor static func system(dark: Bool) -> Theme {
         let ap = NSAppearance(named: dark ? .darkAqua : .aqua)!
-        let bg = dark ? "#1E1E1E" : "#FFFFFF", fg = dark ? "#D9D9D9" : "#000000"
+        let bg = dark ? "#1E1E1E" : "#F6F6F6", fg = dark ? "#D9D9D9" : "#000000"
         let b = parse(bg)!
         func css(_ color: NSColor) -> String {
             var out = bg
