@@ -163,7 +163,7 @@ enum Agents {
         return result
     }
 
-    /// Top-level CLI threads for a folder, most recently active first (subagent and IDE threads excluded).
+    /// Top-level terminal threads for a folder, most recently active first (subagent, Desktop and extension threads excluded).
     static func recentThreads(codexHome: String, cwd: String) -> [String] {
         let files = (try? FileManager.default.contentsOfDirectory(atPath: codexHome)) ?? []
         // state_5.sqlite today; take the highest schema version present.
@@ -175,7 +175,8 @@ enum Agents {
         sqlite3_busy_timeout(db, 200)
         var stmt: OpaquePointer?
         defer { sqlite3_finalize(stmt) }
-        let sql = "select id from threads where cwd = ?1 and source = 'cli' and archived = 0 order by updated_at_ms desc limit 32"
+        // Terminal threads: originator codex-tui (`source` became "vscode" for them in newer Codex), not a subagent.
+        let sql = "select id from threads where cwd = ?1 and originator = 'codex-tui' and thread_source = 'user' and archived = 0 order by updated_at_ms desc limit 32"
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
         sqlite3_bind_text(stmt, 1, cwd, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
         var ids: [String] = []
@@ -281,9 +282,10 @@ func agentsSelfCheck() {
     var db: OpaquePointer?
     sqlite3_open(dir + "/state_5.sqlite", &db)
     sqlite3_exec(db, """
-        create table threads (id text, cwd text, source text, archived int, updated_at_ms int);
-        insert into threads values ('A', '/p', 'cli', 0, 1), ('B', '/p', 'cli', 0, 3), ('C', '/p', '{"subagent":1}', 0, 9),
-            ('D', '/p', 'cli', 1, 9), ('E', '/q', 'cli', 0, 9);
+        create table threads (id text, cwd text, originator text, thread_source text, archived int, updated_at_ms int);
+        insert into threads values ('A', '/p', 'codex-tui', 'user', 0, 1), ('B', '/p', 'codex-tui', 'user', 0, 3),
+            ('C', '/p', 'codex-tui', 'subagent', 0, 9), ('D', '/p', 'codex-tui', 'user', 1, 9), ('E', '/q', 'codex-tui', 'user', 0, 9),
+            ('F', '/p', 'Codex Desktop', 'user', 0, 9), ('G', '/p', 'codex_exec', 'user', 0, 9);
         """, nil, nil, nil)
     sqlite3_close(db)
     assert(Agents.recentThreads(codexHome: dir, cwd: "/p") == ["b", "a"])
