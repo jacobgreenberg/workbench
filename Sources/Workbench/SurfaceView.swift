@@ -154,6 +154,20 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         return action.withCString { ghostty_surface_binding_action(s, $0, UInt(action.utf8.count)) }
     }
 
+    /// The visible screen as text (an agent on the alternate screen keeps its history here, not in scrollback).
+    func viewportText() -> String? {
+        guard let surface, !closed else { return nil }
+        let sel = ghostty_selection_s(
+            top_left: ghostty_point_s(tag: GHOSTTY_POINT_VIEWPORT, coord: GHOSTTY_POINT_COORD_TOP_LEFT, x: 0, y: 0),
+            bottom_right: ghostty_point_s(tag: GHOSTTY_POINT_VIEWPORT, coord: GHOSTTY_POINT_COORD_BOTTOM_RIGHT, x: 0, y: 0),
+            rectangle: false)
+        var text = ghostty_text_s()
+        guard ghostty_surface_read_text(surface, sel, &text) else { return nil }
+        defer { ghostty_surface_free_text(surface, &text) }
+        guard let p = text.text else { return "" }
+        return String(decoding: UnsafeRawBufferPointer(start: p, count: Int(text.text_len)), as: UTF8.self)
+    }
+
     var needsConfirmQuit: Bool {
         surface.map(ghostty_surface_needs_confirm_quit) ?? false
     }

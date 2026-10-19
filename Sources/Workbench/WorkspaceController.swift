@@ -30,14 +30,15 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private var progressing: Set<PaneID> = []   // panes with an OSC 9;4 progress report up
     private var searchCounts: (total: Int, selected: Int) = (-1, -1)
     private var findPane: PaneID?
-    /// Find on an agent pane searches its session transcript (the terminal only holds the screen; the agent scrolls internally),
-    /// shown in the right sidebar. `transcript` is the file while that mode is on; `findResolving` while we look for it.
+    /// Find on an agent pane: the agent (Claude fullscreen, Codex) draws its history on the alternate screen and scrolls it
+    /// itself, so there is no scrollback to search. Find pages the agent's own view (PageUp/PageDown) until the query is on
+    /// screen, then highlights it there. `transcript` (the session file) counts matches, so a query with none never scrolls.
+    /// `transcript` is set while that mode is on; `findResolving` while we look for it.
     private var transcript: URL?
-    private var transcriptView: TranscriptSearchView?
     private var transcriptDebounce: DispatchWorkItem?
+    private var transcriptTotal = -1
+    private var seekWork: DispatchWorkItem?
     private var findResolving = false
-    private var inspectorWasCollapsed = true
-    private var savedPreviewTitle: (text: String, tip: String?) = ("", nil)
     private var activity: NSObjectProtocol?
 
     private let sidebar = SidebarView(frame: .zero)
@@ -598,7 +599,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     // MARK: - Focus & status
 
     private func paneFocused(_ id: PaneID) {
-        if let f = findPane, f != id, transcript != nil || findResolving { closeFind(refocus: false) }   // the transcript list belongs to one pane
+        if let f = findPane, f != id, transcript != nil || findResolving { closeFind(refocus: false) }   // agent find pages one pane
         if let (p, t) = locate(id), store.layout.projects[p].tabs[t].focused != id {
             store.layout.projects[p].tabs[t].focused = id
             store.changed()
@@ -722,10 +723,10 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     /// Closes the find bar (and the transcript list, restoring the sidebar); focus goes back to the terminal (`refocus`).
     private func hideFind(refocus: Bool = true) {
         let v = findSurface
+        endTranscript()
         findBar.isHidden = true
         findPane = nil
         findResolving = false
-        endTranscript()
         if refocus, let v { window?.makeFirstResponder(v) }
     }
 
@@ -735,75 +736,100 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         hideFind(refocus: refocus)
     }
 
-    /// Find is on an agent pane: list matches from its transcript in the right sidebar until the search ends.
+    /// Find is on an agent pane: page its own view to matches until the search ends.
     private func beginTranscriptFind(_ id: PaneID, _ url: URL) {
         transcript = url
+        transcriptTotal = -1
         findBar.isHidden = false
         findBar.setCounts(total: -1, selected: -1)
         findBar.show(needle: "")
-        let v = TranscriptSearchView()
-        v.onSelect = { [unowned self] _ in transcriptCounts() }
-        v.onCancel = { [unowned self] in closeFind() }
-        v.translatesAutoresizingMaskIntoConstraints = false
-        preview.addSubview(v)
-        NSLayoutConstraint.activate([
-            v.leadingAnchor.constraint(equalTo: preview.leadingAnchor),
-            v.trailingAnchor.constraint(equalTo: preview.trailingAnchor),
-            v.topAnchor.constraint(equalTo: previewTitle.bottomAnchor, constant: 4),
-            v.bottomAnchor.constraint(equalTo: preview.bottomAnchor),
-        ])
-        previewFile?.isHidden = true
-        savedPreviewTitle = (previewTitle.stringValue, previewTitle.toolTip)
-        previewTitle.stringValue = "Session transcript"
-        previewTitle.toolTip = url.path
-        inspectorWasCollapsed = inspectorItem.isCollapsed
-        showPreview()
-        transcriptView = v
     }
 
-    /// Puts the sidebar back as it was: the previous file (or nothing, collapsed).
     private func endTranscript() {
         guard transcript != nil else { return }
         transcript = nil
         transcriptDebounce?.cancel()
         transcriptDebounce = nil
+        seekWork?.cancel()
+        seekWork = nil
         TranscriptSearch.cancel()
-        transcriptView?.removeFromSuperview()
-        transcriptView = nil
-        previewFile?.isHidden = false
-        previewTitle.stringValue = savedPreviewTitle.text
-        previewTitle.toolTip = savedPreviewTitle.tip
-        if inspectorWasCollapsed, !inspectorItem.isCollapsed { togglePreview(nil) }
+        findSurface?.perform("end_search")
     }
 
     private func scheduleTranscriptSearch() {
         transcriptDebounce?.cancel()
+        seekWork?.cancel()
         let work = DispatchWorkItem { [weak self] in MainActor.assumeIsolated { self?.runTranscriptSearch() } }
         transcriptDebounce = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
     }
 
+    /// New query: count it in the transcript, then look for it from the screen shown now, upward (older).
     private func runTranscriptSearch() {
         guard let url = transcript else { return }
         transcriptDebounce?.cancel()
         transcriptDebounce = nil
         let query = findBar.text
+        guard !query.isEmpty else { findSurface?.perform("end_search"); findBar.setCounts(total: -1, selected: -1); return }
         TranscriptSearch.search(url, query) { [weak self] result in
-            guard let self, transcript == url, let v = transcriptView else { return }
-            v.show(result, query: query)
-            transcriptCounts()
+            guard let self, transcript == url, findBar.text == query else { return }
+            transcriptTotal = result.matches.count
+            findBar.setCounts(total: transcriptTotal, selected: -1)
+            if transcriptTotal > 0 { seek(up: true, skipScreen: false) } else { findSurface?.perform("end_search") }
         }
     }
 
-    private func transcriptCounts() {
-        guard let v = transcriptView else { return }
-        findBar.setCounts(total: findBar.text.isEmpty ? -1 : v.count, selected: v.selected)
+    /// Case-folded with all whitespace gone: the agent hard-wraps and indents text (even mid-word in a narrow pane) that
+    /// the transcript holds on one line. Looser than the query; the transcript count already confirmed it exists.
+    private static func folded(_ s: String) -> String {
+        String(s.lowercased().unicodeScalars.filter { !CharacterSet.whitespacesAndNewlines.contains($0) })
+    }
+
+    /// Pages the agent's view until the query is on screen, then highlights it. `skipScreen`: the match shown now was
+    /// already visited (Next / Previous), so page at least once. After a page only the lines it brought in count (a page
+    /// overlaps the last screen). Stops when a page no longer changes the screen (the end) and pages back to the start.
+    private func seek(up: Bool, skipScreen: Bool, last: String? = nil, pages: Int = 0) {
+        seekWork?.cancel()
+        guard transcript != nil, let v = findSurface, let screen = v.viewportText() else { return }
+        let q = Self.folded(findBar.text)
+        guard !q.isEmpty else { return }
+        let seen = Set((last ?? "").split(separator: "\n", omittingEmptySubsequences: false))
+        let fresh = pages == 0 ? screen : screen.split(separator: "\n", omittingEmptySubsequences: false).filter { !seen.contains($0) }.joined(separator: "\n")
+        if !(skipScreen && pages == 0), Self.folded(fresh).contains(q) {
+            v.perform("search:\(findBar.text)")
+            return
+        }
+        let pageUp = "text:\\x1b[5~", pageDown = "text:\\x1b[6~"   // both agents scroll their history on these
+        if screen == last || pages >= 400 {   // ponytail: 400 pages caps a runaway on a huge session
+            NSSound.beep()
+            // No further match: back to the last one, or (a new query only the transcript has, e.g. in a collapsed tool
+            // result) to about where the search began; usually the bottom, where extra pages are harmless.
+            if skipScreen { restore(up ? pageDown : pageUp, tries: pages + 3) } else { for _ in 0..<pages { v.perform(up ? pageDown : pageUp) } }
+            return
+        }
+        v.perform(up ? pageUp : pageDown)
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated { self?.seek(up: up, skipScreen: skipScreen, last: screen, pages: pages + 1) }
+        }
+        seekWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: work)   // let the agent redraw
+    }
+
+    /// Pages back to the match the search started from: nothing matched beyond it, so the first screen showing the query
+    /// again is that one (pages aren't symmetric near an end, so counting them back would overshoot).
+    private func restore(_ key: String, tries: Int) {
+        guard tries > 0, transcript != nil, let v = findSurface, let screen = v.viewportText() else { return }
+        if Self.folded(screen).contains(Self.folded(findBar.text)) { v.perform("search:\(findBar.text)"); return }
+        v.perform(key)
+        let work = DispatchWorkItem { [weak self] in MainActor.assumeIsolated { self?.restore(key, tries: tries - 1) } }
+        seekWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: work)
     }
 
     private func stepTranscript(_ d: Int) {
-        if transcriptDebounce != nil { runTranscriptSearch(); return }   // typed just now: results first
-        guard let v = transcriptView, v.count > 0 else { return }
-        v.select((max(v.selected, 0) + d + v.count) % v.count)
+        if transcriptDebounce != nil { runTranscriptSearch(); return }   // typed just now: search first
+        guard transcriptTotal > 0 else { return }
+        seek(up: d > 0, skipScreen: true)
     }
 
     private func openURL(_ url: String, from id: PaneID) {
@@ -1251,7 +1277,6 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
 
     /// Shows `path` in the right sidebar, replacing the file shown there.
     func openFile(_ path: String) {
-        if transcript != nil { closeFind(refocus: false) }
         previewFile?.close()
         previewFile?.removeFromSuperview()
         let f = FilePaneView(id: UUID(), path: path, theme: theme)
@@ -1506,7 +1531,6 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     }
 
     private func closePreview() {
-        if transcript != nil { return closeFind() }
         guard let f = previewFile else { return NSSound.beep() }
         f.close()   // autosaves
         f.removeFromSuperview()
