@@ -186,6 +186,7 @@ struct Layout: Codable, Equatable, Sendable {
     var workspaces: [Workspace]? = nil   // never empty after load (normalizeWorkspaces)
     var activeWorkspace: UUID? = nil
     var backupRemote: String? = nil   // git remote Backup syncs to (Settings > Backup; clone in Store.directory/sync); never exported
+    var showClutterFiles: Bool? = nil   // Files tab lists dotfiles and build folders (nil = hidden)
 
     static let `default` = Layout(
         projects: [],

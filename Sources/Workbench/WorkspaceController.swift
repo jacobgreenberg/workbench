@@ -1,6 +1,7 @@
 import AppKit
 @preconcurrency import GhosttyKit
 import UserNotifications
+import UniformTypeIdentifiers
 
 /// Jira tickets of the kwimpos projects active in the last 30 days (not a generic KEY-123 shape, which would hit UTF-8, SHA-256, ISO-8601).
 /// The one list: libghostty highlights the pattern on ⌘-hover (`link` override) and `openURL` maps a click to `browse`.
@@ -68,9 +69,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private var collapseObservation: NSKeyValueObservation?
     private let preview = NSView()
     private let inspector = NSView()
-    private let inspectorTabs = GlassSegments(labels: ["TODO", "Preview", "More"])
+    private let inspectorTabs = GlassSegments(labels: ["TODO", "Files"])
     private let todoList = TodoListView()
-    private let morePane = PlaceholderPane(text: "More tools are coming here.")
+    private let fileTree = FileTreeView()
+    private let files = NSSplitView()
+    private var fileTreeRoot: String?   // whose folder the tree shows
     private var todoProject: UUID?   // whose TODOs the list shows
     private let previewTitle = NSTextField(labelWithString: "No file. ⌘-click a path to preview it here.")
     private var previewFile: FilePaneView?
@@ -131,7 +134,12 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         previewTitle.lineBreakMode = .byTruncatingMiddle
         previewTitle.translatesAutoresizingMaskIntoConstraints = false
         preview.addSubview(previewTitle)
-        for v in [inspectorTabs, todoList, preview, morePane] as [NSView] {
+        files.isVertical = false
+        files.dividerStyle = .thin
+        files.autosaveName = "Workbench.files"
+        files.addArrangedSubview(fileTree)
+        files.addArrangedSubview(preview)
+        for v in [inspectorTabs, todoList, files] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             inspector.addSubview(v)
         }
@@ -152,7 +160,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             previewTitle.leadingAnchor.constraint(equalTo: preview.leadingAnchor, constant: 16),
             previewTitle.trailingAnchor.constraint(lessThanOrEqualTo: preview.trailingAnchor, constant: -16),
         ])
-        for v in [todoList, preview, morePane] as [NSView] {
+        for v in [todoList, files] as [NSView] {
             NSLayoutConstraint.activate([
                 v.topAnchor.constraint(equalTo: inspectorTabs.bottomAnchor, constant: 8),
                 v.leadingAnchor.constraint(equalTo: inspector.leadingAnchor),
@@ -185,17 +193,29 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         }
         inspectorTabs.onSelect = { [unowned self] i in showInspectorTab(i) }
         showInspectorTab(0)
+        fileTree.hideClutter = store.layout.showClutterFiles != true
     }
 
-    /// 0 TODO, 1 Preview, 2 More.
+    /// 0 TODO, 1 Files.
     private func showInspectorTab(_ i: Int) {
         inspectorTabs.select(i, animated: true)
         todoList.isHidden = i != 0
-        preview.isHidden = i != 1
-        morePane.isHidden = i != 2
+        files.isHidden = i != 1
     }
 
     private func wireCallbacks() {
+        fileTree.onOpen = { [unowned self] path in
+            // Text previews here; images, archives and other binaries go to their default app.
+            if let t = UTType(filenameExtension: (path as NSString).pathExtension), !t.conforms(to: .text), !t.isDynamic {
+                NSWorkspace.shared.open(URL(fileURLWithPath: path))
+            } else {
+                openFile(path)
+            }
+        }
+        fileTree.onToggleClutter = { [unowned self] hide in
+            store.layout.showClutterFiles = hide ? nil : true
+            store.changed()
+        }
         todoList.onChange = { [unowned self] todos in
             guard let p = activeProjectIndex, store.layout.projects[p].id == todoProject else { return }
             store.layout.projects[p].todos = todos
@@ -465,6 +485,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         if shownProject != todoProject {
             todoProject = shownProject
             todoList.show(activeProjectIndex.map { store.layout.projects[$0].todos ?? [] } ?? [])
+        }
+        let root = activeProjectIndex.map { store.layout.projects[$0].path }
+        if root != fileTreeRoot {
+            fileTreeRoot = root
+            fileTree.show(root: root)
         }
     }
 
@@ -1166,6 +1191,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         previewFile = f
         previewTitle.stringValue = (path as NSString).abbreviatingWithTildeInPath
         previewTitle.toolTip = path
+        if files.subviews.count == 2, preview.frame.height < 80 { files.setPosition(files.bounds.height * 0.4, ofDividerAt: 0) }
         showInspectorTab(1)
         if inspectorItem.isCollapsed { togglePreview(nil) }
     }

@@ -256,24 +256,3 @@ private final class CheckCircle: NSButton {
         }
     }
 }
-
-/// A tab that isn't built yet.
-@MainActor final class PlaceholderPane: NSView {
-    init(text: String) {
-        super.init(frame: .zero)
-        let label = NSTextField(wrappingLabelWithString: text)
-        label.font = .systemFont(ofSize: 12)
-        label.textColor = .secondaryLabelColor
-        label.alignment = .center
-        label.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(label)
-        NSLayoutConstraint.activate([
-            label.topAnchor.constraint(equalTo: topAnchor, constant: 12),
-            label.centerXAnchor.constraint(equalTo: centerXAnchor),
-            label.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 16),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -16),
-        ])
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-}
