@@ -153,7 +153,7 @@ enum Syntax {
 // SidebarView.swift
 struct SidebarRow: Equatable, Sendable { let id: UUID; let name: String; let path: String; let status: PaneStatus; var tabCount = 0 }   // status = busiest pane of the project; tabCount = its tabs (shown right of the row, omitted when 0; a project with none is dimmed unless selected)
 enum PaneStatus: Int, Comparable, Sendable { case idle = 0, busy = 1, done = 2, attention = 3 }   // Comparable by rawValue
-@MainActor final class SidebarView: NSView {   // the WorkspaceRail at the leading edge; right of it the workspace's name as a large bold title, the Active/Hidden GlassSegments under it, then a native .sourceList table. Two lines per project (ProjectRowCell, 46 pt): status dot (grey idle, hollow ring with nothing open), name, then "Needs you / Working… / Done / N tabs / Nothing open". Selection = the active project, drawn natively by the .sourceList table (subtle grey glass, normal label colors). update() restyles cells in place and reloads only when the row ids change. Native drag-and-drop reorders projects. Pinned below the list (no separator above): scratch terminal rows (own small source-list table, ProjectCell with a terminal symbol, named "Scratch Terminal [n]", cwd as tooltip); with none open, one "Scratch Terminal ⇧⌘N" row that is itself the button
+@MainActor final class SidebarView: NSView {   // the WorkspaceRail at the leading edge; right of it the workspace's name as a large bold title, the Active/Hidden GlassSegments under it, then a native .sourceList table. Two lines per project (ProjectRowCell, 46 pt): status dot (grey idle, hollow ring with nothing open), name, then "Needs you / Working… / Done / N tabs / Nothing open". Selection = the active project, drawn natively by the .sourceList table (subtle grey glass, normal label colors). update() restyles cells in place and reloads only when the row ids change. Projects reorder by press-and-drag on a row (SidebarTable.onPress → Reorder(vertical: true); a press released before the 4 pt threshold selects the row): the row lifts and follows the pointer, the others slide aside. Pinned below the list (no separator above): scratch terminal rows (own small source-list table, ProjectCell with a terminal symbol, named "Scratch Terminal [n]", cwd as tooltip); with none open, one "Scratch Terminal ⇧⌘N" row that is itself the button
     var onSelect: ((Int) -> Void)?; var onRemove: ((Int) -> Void)?         // project indices are rows of the list shown; WorkspaceController maps rows to projects (visibleProjectIndices / reorderedProjects in Model.swift)
     var onShowHidden: ((Bool) -> Void)?                  // Active/Hidden segmented control above the list
     var onToggleHidden: ((Int) -> Void)?                 // context menu Hide Project (Active view) / Show Project (Hidden view)
@@ -185,8 +185,8 @@ struct TabItem: Equatable, Sendable { let title: String; let status: PaneStatus 
     func update(items: [TabItem], selected: Int, theme: Theme)
 }
 
-// Reorder.swift — the one drag gesture: trackDrag(from:in:_:) (4 pt threshold, closed hand; tabs, pane headers),
-// and Reorder().drag(views, from, by: offset, done:, commit:) for pick-up, drag and snap in a row of views (x axis only).
+// Reorder.swift — the one drag gesture: trackDrag(from:in:_:) (4 pt threshold, closed hand; tabs, pane headers, sidebar rows),
+// and Reorder().drag(views, from, by: offset, done:, commit:) for pick-up, drag and snap in a row of views (x axis; `Reorder(vertical: true)` for the sidebar's rows, y axis in the flipped table, +offset = down).
 
 // InlineRename (TabBarView.swift): makes a label editable in place; Return/click away commits, Esc cancels. static var isEditing (render() skips refocusing the terminal while true)
 

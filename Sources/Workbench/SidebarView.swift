@@ -12,6 +12,14 @@ enum PaneStatus: Int, Comparable, Sendable {
 
 private final class SidebarTable: NSTableView {
     override var acceptsFirstResponder: Bool { false }
+    /// A single left press on a row; return true when handled (the project table's drag-to-reorder). Else normal handling.
+    var onPress: ((NSEvent, Int) -> Bool)?
+
+    override func mouseDown(with event: NSEvent) {
+        let row = row(at: convert(event.locationInWindow, from: nil))
+        if event.clickCount == 1, row >= 0, onPress?(event, row) == true { return }
+        super.mouseDown(with: event)
+    }
 }
 
 /// One line for a scratch terminal: SF Symbol, name, then status dot (hidden when idle) and tab count on the
@@ -254,7 +262,7 @@ private final class FlatRowView: NSTableRowView {
 /// source list inside the split view's sidebar item (AppKit supplies the glass, the collapse and the insets).
 /// The workspace's name as a large title, then a segmented control that switches between active and hidden
 /// projects; project indices here are rows of the list being shown (the controller maps them to projects).
-/// Two lines per project; selection is the active project. Reordering is native table drag and drop.
+/// Two lines per project; selection is the active project. Reordering is a press-and-drag on a row (Reorder, as with tabs): the row lifts, the others slide aside.
 /// Pinned below the list: the scratch terminals (not projects; the first row is also the button).
 @MainActor final class SidebarView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
     var onSelect: ((Int) -> Void)?
@@ -269,7 +277,6 @@ private final class FlatRowView: NSTableRowView {
     var onMoveToWorkspace: ((Int, Int) -> Void)?   // project row, workspace index
     let rail = WorkspaceRail()
 
-    private static let dragType = NSPasteboard.PasteboardType("dev.workbench.sidebar-row")
     private var rows: [SidebarRow] = []
     private var selected = -1
     private var theme: Theme?
@@ -298,13 +305,11 @@ private final class FlatRowView: NSTableRowView {
         table.intercellSpacing = .zero
         table.selectionHighlightStyle = .regular
         table.allowsEmptySelection = true
-        table.draggingDestinationFeedbackStyle = .gap
-        table.registerForDraggedTypes([Self.dragType])
-        table.setDraggingSourceOperationMask(.move, forLocal: true)
         table.dataSource = self
         table.delegate = self
         table.target = self
         table.doubleAction = #selector(rowDoubleClicked)
+        table.onPress = { [unowned self] e, row in press(e, row: row) }
         let menu = NSMenu()
         menu.delegate = self
         table.menu = menu
@@ -459,32 +464,35 @@ private final class FlatRowView: NSTableRowView {
         if !syncing, r >= 0, r != selected { onSelect?(r) }   // the controller's update() confirms
     }
 
-    // MARK: Drag and drop
+    // MARK: Reorder
 
-    func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> NSPasteboardWriting? {
-        let item = NSPasteboardItem()
-        item.setString(String(row), forType: Self.dragType)
-        return item
-    }
+    private let reorder = Reorder(vertical: true)
 
-    func tableView(_ tableView: NSTableView, validateDrop info: NSDraggingInfo, proposedRow row: Int, proposedDropOperation op: NSTableView.DropOperation) -> NSDragOperation {
-        guard info.draggingSource as AnyObject === table else { return [] }
-        if op == .on { tableView.setDropRow(row, dropOperation: .above) }
-        return .move
-    }
-
-    func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo, row: Int, dropOperation: NSTableView.DropOperation) -> Bool {
-        guard let s = info.draggingPasteboard.string(forType: Self.dragType), let from = Int(s), rows.indices.contains(from) else { return false }
-        let to = row > from ? row - 1 : row
-        guard to != from else { return false }
-        rows.insert(rows.remove(at: from), at: to)
-        if selected == from { selected = to } else if from < selected, selected <= to { selected -= 1 } else if to <= selected, selected < from { selected += 1 }
-        syncing = true
-        table.moveRow(at: from, to: to)
-        syncing = false
-        select()
-        restyleVisible()
-        onMove?(from, to)
+    /// Press on a row: a drag lifts it and slides the others (rows are layer-backed views moved by transforms); a press
+    /// released before the 4 pt threshold is a click and selects the row, which reports once via the selection change.
+    private func press(_ event: NSEvent, row: Int) -> Bool {
+        let views = rows.indices.compactMap { table.rowView(atRow: $0, makeIfNecessary: false) }
+        guard views.count == rows.count, !InlineRename.isEditing else { return false }
+        views.forEach { $0.wantsLayer = true }
+        let y0 = table.convert(event.locationInWindow, from: nil).y
+        var dragged = false
+        trackDrag(from: event, in: table.window) { [self] p, done in
+            dragged = true
+            reorder.drag(views, row, by: table.convert(p, from: nil).y - y0, done: done) { [self] from, to in
+                rows.insert(rows.remove(at: from), at: to)
+                if selected == from { selected = to } else if from < selected, selected <= to { selected -= 1 } else if to <= selected, selected < from { selected += 1 }
+                syncing = true
+                NSAnimationContext.beginGrouping()
+                NSAnimationContext.current.duration = 0   // the transforms already show the result; don't slide again
+                table.moveRow(at: from, to: to)
+                NSAnimationContext.endGrouping()
+                syncing = false
+                select()
+                restyleVisible()
+                onMove?(from, to)
+            }
+        }
+        if !dragged { table.selectRowIndexes([row], byExtendingSelection: false) }
         return true
     }
 }

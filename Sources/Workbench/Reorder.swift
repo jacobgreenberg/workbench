@@ -17,16 +17,18 @@ import AppKit
     }
 }
 
-/// Pick up, drag and snap for a row of sibling views (tabs). The dragged view follows the
+/// Pick up, drag and snap for a row (or, `vertical`, a column) of sibling views (tabs, sidebar rows). The dragged view follows the
 /// pointer, lifted; the others slide aside to open the slot it would drop into; on release it snaps there. Everything
 /// moves by layer transforms, so autolayout never runs mid-drag. Then `commit(from, to)` reorders for real, with
 /// actions disabled and before the transforms reset, so nothing jumps.
 @MainActor final class Reorder {
     private var slot: Int?
+    private let vertical: Bool   // rows of a flipped table: y grows downward in the superview and in its layer, so +offset is down
 
+    init(vertical: Bool = false) { self.vertical = vertical }
 
-    private func lo(_ v: NSView) -> CGFloat { v.frame.minX }
-    private func hi(_ v: NSView) -> CGFloat { v.frame.maxX }
+    private func lo(_ v: NSView) -> CGFloat { vertical ? v.frame.minY : v.frame.minX }
+    private func hi(_ v: NSView) -> CGFloat { vertical ? v.frame.maxY : v.frame.maxX }
     private func mid(_ v: NSView) -> CGFloat { (lo(v) + hi(v)) / 2 }
 
     /// `offset`: pointer movement since the press, in the views' superview coordinates.
@@ -60,7 +62,7 @@ import AppKit
 
     private func shift(_ v: NSView, _ d: CGFloat, animated: Bool) {
         guard let l = v.layer else { return }
-        let t = CATransform3DMakeTranslation(d, 0, 0)
+        let t = vertical ? CATransform3DMakeTranslation(0, d, 0) : CATransform3DMakeTranslation(d, 0, 0)
         if animated {
             let a = CABasicAnimation(keyPath: "transform")
             a.fromValue = l.presentation()?.transform ?? l.transform
