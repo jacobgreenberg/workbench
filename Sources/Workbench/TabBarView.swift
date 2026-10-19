@@ -150,9 +150,9 @@ extension NSView {
 
     /// Updates in place.
     func apply(item: TabItem, selected: Bool, theme: Theme) {
-        if label.stringValue != item.title, !label.isEditable {
-            label.stringValue = item.title
-            width.constant = Self.width(for: item.title)
+        if !label.isEditable {
+            if label.stringValue != item.title { label.stringValue = item.title }
+            width.constant = Self.width(for: item.title)   // also after a rename, where the label already shows the new title
         }
         status = item.status
         self.selected = selected
