@@ -188,11 +188,20 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         }
         inspectorTabs.onSelect = { [unowned self] i in showInspectorTab(i) }
         inspectorTabs.widthAnchor.constraint(equalToConstant: 200).isActive = true
-        inspectorObservation = inspectorItem.observe(\.isCollapsed, options: [.initial]) { [weak self] item, _ in
+        // Fade, don't hide the toolbar item: hiding it reflows the whole toolbar mid-collapse. The item keeps its slot.
+        inspectorTabs.isHidden = inspectorItem.isCollapsed
+        inspectorObservation = inspectorItem.observe(\.isCollapsed) { [weak self] item, _ in
             let collapsed = item.isCollapsed
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    self?.window?.toolbar?.items.first { $0.itemIdentifier == .inspectorTabs }?.isHidden = collapsed
+                    guard let tabs = self?.inspectorTabs else { return }
+                    if !collapsed { tabs.alphaValue = 0; tabs.isHidden = false }
+                    NSAnimationContext.runAnimationGroup({ ctx in
+                        ctx.duration = collapsed ? 0.12 : 0.25
+                        tabs.animator().alphaValue = collapsed ? 0 : 1
+                    }, completionHandler: {
+                        MainActor.assumeIsolated { if collapsed, self?.inspectorItem.isCollapsed == true { tabs.isHidden = true } }
+                    })
                 }
             }
         }
@@ -1643,7 +1652,6 @@ extension WorkspaceController: NSToolbarDelegate {
         if id == .inspectorTabs {
             item.view = inspectorTabs
             item.isBordered = false   // GlassSegments draws its own capsule
-            item.isHidden = inspectorItem.isCollapsed
             return item
         }
         guard id == .tabs else { return nil }
