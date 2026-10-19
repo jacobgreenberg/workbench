@@ -85,7 +85,7 @@ enum Agents {
 
     /// An agent found in a pane: its resume command (nil when the session id can't be read yet), the profile dir it
     /// runs with, and the Claude session id / Codex thread id (nil = not known).
-    struct Session { let cmd: String?; let claude: Bool; let home: String; let id: String? }
+    struct Session { let cmd: String?; let claude: Bool; let home: String; let id: String?; var pid: pid_t = 0 }
 
     /// Every pane with an agent running in it → its resume command; nil when the session id can't be read yet (Claude
     /// writes it shortly after starting), so the pane's saved command, typically the exact resume it launched with, stands.
@@ -93,8 +93,10 @@ enum Agents {
 
     /// The pane's session transcript (Claude `projects/*/<session>.jsonl`, Codex `sessions/Y/M/D/rollout-*-<thread>.jsonl`),
     /// nil if no agent runs there or the file can't be found. Scans processes and the disk: call off the main thread.
-    static func transcript(for pane: PaneID) -> URL? {
-        guard let s = sessions()[pane], let id = s.id?.lowercased() else { return nil }
+    static func transcript(for pane: PaneID) -> URL? { sessions()[pane].flatMap(transcript) }
+
+    private static func transcript(_ s: Session) -> URL? {
+        guard let id = s.id?.lowercased() else { return nil }
         let fm = FileManager.default
         if s.claude {   // the folder is a slug of the cwd; find the file by name instead
             let root = s.home + "/projects"
@@ -112,14 +114,18 @@ enum Agents {
         return nil
     }
 
-    /// Whether the pane's Claude session still has background subagents running. Each one leaves
-    /// `<session>/subagents/agent-*.meta.json`, marked "finished" when it ends; an unfinished one whose log hasn't moved
-    /// in 15 min is an orphan of a killed session. Scans processes and the disk: call off the main thread.
-    static func subagentsRunning(for pane: PaneID) -> Bool {
-        guard let t = transcript(for: pane), t.pathExtension == "jsonl" else { return false }
-        return subagentsRunning(in: t.deletingPathExtension().appendingPathComponent("subagents"))
+    /// Whether the pane's Claude agent still has work going after its turn ended: background subagents not marked
+    /// finished, or background shells / Monitors it started still running, unless they only serve something (see
+    /// shellsWorking). Scans processes and the disk, may wait 1 s: call off the main thread.
+    static func backgroundWork(for pane: PaneID) -> Bool {
+        guard let s = sessions()[pane], s.claude else { return false }
+        if let t = transcript(s), t.pathExtension == "jsonl",
+           subagentsRunning(in: t.deletingPathExtension().appendingPathComponent("subagents")) { return true }
+        return shellsWorking(under: s.pid)
     }
 
+    /// Each subagent leaves `<session>/subagents/agent-*.meta.json`, marked "finished" when it ends; an unfinished one
+    /// whose log hasn't moved in 15 min is an orphan of a killed session.
     static func subagentsRunning(in dir: URL) -> Bool {
         let fm = FileManager.default
         for name in (try? fm.contentsOfDirectory(atPath: dir.path)) ?? [] where name.hasSuffix(".meta.json") {
@@ -155,7 +161,7 @@ enum Agents {
                 var cmd = map["claude:" + dir] ?? (env["CLAUDE_CONFIG_DIR"] == nil ? "claude" : "CLAUDE_CONFIG_DIR=\(Runtime.shellEscape(dir)) claude")
                 if argv.contains(where: { $0.hasSuffix("/claude-hooks.json") }) { cmd += " " + claudeHookArgs }
                 let session = sessionID(claudeDir: dir, pid: pid)
-                result[pane] = Session(cmd: session.map { cmd + " --resume \($0)" }, claude: true, home: dir, id: session)
+                result[pane] = Session(cmd: session.map { cmd + " --resume \($0)" }, claude: true, home: dir, id: session, pid: pid)
             } else if words.contains("codex") {
                 let dir = env["CODEX_HOME"].map { ($0 as NSString).standardizingPath } ?? home + "/.codex"
                 // Launchers (gpt1…) pass the bypass flag themselves and Codex rejects it twice; a bare codex gets it here.
@@ -203,6 +209,49 @@ enum Agents {
         var ids: [String] = []
         while sqlite3_step(stmt) == SQLITE_ROW, let c = sqlite3_column_text(stmt, 0) { ids.append(String(cString: c).lowercased()) }
         return ids
+    }
+
+    /// Claude runs Bash and Monitor commands as `zsh -c source <config>/shell-snapshots/snapshot-… && eval '…'`, children
+    /// of the agent; after a turn ends only background ones remain. A shell counts as work unless its process tree
+    /// listens on TCP and used under 2% of a core over 1 s: a dev server waiting for requests, not a job.
+    /// ponytail: a quiet watcher with no port (tsc --watch) still counts as work; match commands if that bites.
+    private static func shellsWorking(under agent: pid_t) -> Bool {
+        var children: [pid_t: [pid_t]] = [:]
+        for p in allPIDs() { if let pp = parentPID(p) { children[pp, default: []].append(p) } }
+        for sh in children[agent] ?? [] where processArgs(sh)?.argv.contains(where: { $0.contains("/shell-snapshots/snapshot-") }) == true {
+            var tree = [sh], i = 0
+            while i < tree.count { tree += children[tree[i]] ?? []; i += 1 }
+            guard tree.contains(where: listens) else { return true }
+            let before = cpuNanos(tree)
+            Thread.sleep(forTimeInterval: 1)
+            if cpuNanos(tree) - before > 20_000_000 { return true }
+        }
+        return false
+    }
+
+    private static func listens(_ pid: pid_t) -> Bool {
+        let bytes = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
+        guard bytes > 0 else { return false }
+        var fds = [proc_fdinfo](repeating: proc_fdinfo(), count: Int(bytes) / MemoryLayout<proc_fdinfo>.stride)
+        let got = Int(proc_pidinfo(pid, PROC_PIDLISTFDS, 0, &fds, bytes)) / MemoryLayout<proc_fdinfo>.stride
+        for fd in fds.prefix(max(got, 0)) where fd.proc_fdtype == UInt32(PROX_FDTYPE_SOCKET) {
+            var info = socket_fdinfo()
+            let size = Int32(MemoryLayout<socket_fdinfo>.size)
+            if proc_pidfdinfo(pid, fd.proc_fd, PROC_PIDFDSOCKETINFO, &info, size) == size,
+               info.psi.soi_kind == SOCKINFO_TCP, info.psi.soi_proto.pri_tcp.tcpsi_state == TSI_S_LISTEN { return true }
+        }
+        return false
+    }
+
+    private static func cpuNanos(_ pids: [pid_t]) -> UInt64 {
+        var tb = mach_timebase_info_data_t()
+        mach_timebase_info(&tb)
+        return pids.reduce(0) { sum, pid in
+            var info = proc_taskinfo()
+            let size = Int32(MemoryLayout<proc_taskinfo>.size)
+            guard proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &info, size) == size else { return sum }
+            return sum + (info.pti_total_user + info.pti_total_system) * UInt64(tb.numer) / UInt64(tb.denom)
+        }
     }
 
     private static func processCwd(_ pid: pid_t) -> String? {

@@ -126,7 +126,7 @@ enum Agents {
     static func discoverLaunchers()                       // once at launch, background
     static func running() -> [PaneID: String?]           // pane → resume command; nil = agent running but id unknown yet (keep the saved command), e.g. "cc2 --resume <id>", "gpt1 resume <thread id>" (id from argv, else a distinct recent CLI thread of its folder from CODEX_HOME/state_*.sqlite)
     static func transcript(for pane: PaneID) -> URL?    // the pane agent's session jsonl: Claude <config dir>/projects/*/<sessionId>.jsonl (globbed by name), Codex <CODEX_HOME>/sessions/Y/M/D/rollout-*-<threadId>.jsonl (newest dirs first); nil = no agent / not found. Scans processes + disk: off main
-    static func subagentsRunning(for pane: PaneID) -> Bool   // a Claude pane's background subagents still running: <session>/subagents/agent-*.meta.json without "finished", log touched in the last 15 min. WorkspaceController holds a busy→done turn end as busy while true, rechecking every 5 s off main. Off main
+    static func backgroundWork(for pane: PaneID) -> Bool   // a Claude pane still has work after its turn ended: subagents (<session>/subagents/agent-*.meta.json without "finished", log touched in the last 15 min) or background shells/Monitors (agent children `zsh -c source …/shell-snapshots/…`), except a shell tree listening on TCP and under 2% CPU over 1 s (a dev server). WorkspaceController holds a busy→done turn end as busy while true, rechecking every 5 s. Off main, may block 1 s
 }
 
 // SplitTreeView.swift

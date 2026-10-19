@@ -28,8 +28,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private var status: [PaneID: PaneStatus] = [:]
     private var titles: [PaneID: String] = [:]
     private var progressing: Set<PaneID> = []   // panes with an OSC 9;4 progress report up
-    private var subagents: Set<PaneID> = []   // turn ended, background subagents still running: stays busy
-    private var subagentPoll = false
+    private var background: Set<PaneID> = []   // turn ended, background subagents/shells still running: stays busy
+    private var backgroundPoll = false
     private var searchCounts: (total: Int, selected: Int) = (-1, -1)
     private var findPane: PaneID?
     /// Find on an agent pane: the agent (Claude fullscreen, Codex) draws its history on the alternate screen and scrolls it
@@ -630,12 +630,12 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private func setStatus(_ id: PaneID, _ new: PaneStatus, title: String? = nil, body: String? = nil, settled: Bool = false) {
         guard locate(id) != nil else { return }   // late event from a closed pane
         let old = status[id] ?? .idle
-        // A turn that ends with background subagents still running is not done: hold busy until they finish.
+        // A turn that ends with background subagents or shells still running is not done: hold busy until they finish.
         if new == .done, old == .busy, !settled {
-            if subagents.insert(id).inserted { pollSubagents(now: true) }
+            if background.insert(id).inserted { pollBackground(now: true) }
             return
         }
-        if new != .done { subagents.remove(id) }
+        if new != .done { background.remove(id) }
         if new == .busy, old != .busy { scheduleCapture() }   // a turn started: record its resume command now, not only at quit
         let watched = isWatched(id)
         status[id] = (watched && (new == .done || new == .attention)) ? .idle : new
@@ -645,20 +645,20 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         updateChrome()
     }
 
-    /// Check the held panes off main (now, then every 5 s while any are held); release each whose subagents finished.
-    private func pollSubagents(now: Bool = false) {
-        guard !subagentPoll else { return }
-        subagentPoll = true
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + (now ? 0 : 5)) { [ids = subagents] in
-            let running = Set(ids.filter { Agents.subagentsRunning(for: $0) })
+    /// Check the held panes off main (now, then every 5 s while any are held); release each whose background work finished.
+    private func pollBackground(now: Bool = false) {
+        guard !backgroundPoll else { return }
+        backgroundPoll = true
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + (now ? 0 : 5)) { [ids = background] in
+            let running = Set(ids.filter { Agents.backgroundWork(for: $0) })
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    self.subagentPoll = false
-                    for id in self.subagents.subtracting(running) where ids.contains(id) {
-                        self.subagents.remove(id)
+                    self.backgroundPoll = false
+                    for id in self.background.subtracting(running) where ids.contains(id) {
+                        self.background.remove(id)
                         if self.status[id] == .busy { self.setStatus(id, .done, settled: true) }
                     }
-                    if !self.subagents.isEmpty { self.pollSubagents() }
+                    if !self.background.isEmpty { self.pollBackground() }
                 }
             }
         }
@@ -691,7 +691,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             let titleChanged = titles[id] != t
             titles[id] = t
             // One chrome update per event: setStatus does it when the state flips.
-            if spinning, status[id] != .busy || subagents.contains(id) { setStatus(id, .busy) }
+            if spinning, status[id] != .busy || background.contains(id) { setStatus(id, .busy) }
             else if !spinning, status[id] == .busy, !progressing.contains(id) { setStatus(id, .done) }
             else if titleChanged { updateChrome() }
         case let .pwd(path):
@@ -1005,7 +1005,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         status[id] = nil
         titles[id] = nil
         progressing.remove(id)
-        subagents.remove(id)
+        background.remove(id)
         if findPane == id { hideFind(refocus: false) }
     }
 
