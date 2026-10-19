@@ -389,7 +389,10 @@ private final class BackupViewController: NSViewController {
         let alert = NSAlert()
         alert.messageText = "Connect a git repository"
         alert.informativeText = "Paste the URL of an empty private repository, e.g. git@github.com:you/workbench-backup.git. Workbench clones it and syncs your setup there."
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 460, height: 24))
+        field.usesSingleLineMode = true
+        field.cell?.wraps = false
+        field.cell?.isScrollable = true
         field.placeholderString = "git@github.com:you/workbench-backup.git"
         field.stringValue = store.layout.backupRemote ?? ""
         alert.accessoryView = field
