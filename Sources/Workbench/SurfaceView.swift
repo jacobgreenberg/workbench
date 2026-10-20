@@ -13,6 +13,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
     let box: SurfaceBox
     private(set) var surface: ghostty_surface_t?
     var onFocus: ((PaneID) -> Void)?
+    var onKey: ((PaneID) -> Void)?   // every key press sent to the terminal
     var contextMenu: ((PaneID) -> NSMenu?)?   // shown on every right-click
     static var isReservedShortcut: (NSEvent) -> Bool = { _ in false }
 
@@ -458,6 +459,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
             self.interpretKeyEvents([event])
             return
         }
+        onKey?(paneID)
 
         let translationModsGhostty = GhosttyInput.eventModifierFlags(
             mods: ghostty_surface_key_translation_mods(

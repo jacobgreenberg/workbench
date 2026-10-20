@@ -344,6 +344,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                                 initialInput: launch.map { $0.command + "\n" },
                                 env: env(for: spec.id), scrollbackLimit: launch?.scrollbackLimit)
             s.onFocus = { [unowned self] id in paneFocused(id) }
+            s.onKey = { [unowned self] id in paneKeyDown(id) }
             s.contextMenu = { [unowned self] id in paneMenu(id) }
             v = s
         case let .file(path):
@@ -620,6 +621,12 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate()
         render()
+    }
+
+    /// Claude keeps its progress report up while it waits on a question or plan approval (the bell marked it
+    /// attention); a key typed into it then is the answer, and the turn carries on.
+    private func paneKeyDown(_ id: PaneID) {
+        if progressing.contains(id), status[id] != .busy { setStatus(id, .busy) }
     }
 
     private func isWatched(_ id: PaneID) -> Bool {
