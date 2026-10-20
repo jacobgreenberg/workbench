@@ -887,9 +887,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             || ((v?.contentType ?? .data) == .data && Self.looksLikeText(file)))
     }
 
-    /// Untyped files (.env, Dockerfile, LICENSE) are text when their first 4 KB hold no NUL byte.
+    /// Untyped files (.env, Dockerfile, LICENSE) are text when their first 4 KB hold no NUL byte. Regular files only:
+    /// opening a FIFO or device would block.
     nonisolated static func looksLikeText(_ file: URL) -> Bool {
-        guard let h = try? FileHandle(forReadingFrom: file) else { return false }
+        guard (try? file.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true,
+              let h = try? FileHandle(forReadingFrom: file) else { return false }
         defer { try? h.close() }
         let head = (try? h.read(upToCount: 4096)) ?? nil
         return !(head ?? Data()).contains(0)

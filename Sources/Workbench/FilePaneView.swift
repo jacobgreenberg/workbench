@@ -565,6 +565,8 @@ private final class CodeTextView: NSTextView {
     try! Data([0x89, 0x50, 0x00, 0x01]).write(to: sniff.appendingPathComponent("blob"))
     assert(WorkspaceController.looksLikeText(sniff.appendingPathComponent(".env")))
     assert(!WorkspaceController.looksLikeText(sniff.appendingPathComponent("blob")))
+    mkfifo(sniff.appendingPathComponent("fifo").path, 0o600)
+    assert(!WorkspaceController.looksLikeText(sniff.appendingPathComponent("fifo")))   // returns, doesn't block
     let dir = FileManager.default.temporaryDirectory
     let good = dir.appendingPathComponent("\(UUID().uuidString).swift")
     let bad = dir.appendingPathComponent("\(UUID().uuidString).bin")
