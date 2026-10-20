@@ -242,7 +242,6 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         sidebar.onToggleHidden = { [unowned self] i in toggleHidden(row: i) }
         sidebar.onSelectScratch = { [unowned self] i in scratch(atRow: i).map(selectProject) }
         sidebar.onCloseScratch = { [unowned self] i in scratch(atRow: i).map(closeScratch) }
-        sidebar.onNewScratch = { [unowned self] in newScratchTerminal(nil) }
         tabBar.onSelect = { [unowned self] i in selectTab(i) }
         tabBar.onClose = { [unowned self] i in closeTab(at: i) }
         tabBar.onNew = { [unowned self] in newTab(nil) }
@@ -1739,6 +1738,7 @@ extension WorkspaceController {
 extension NSToolbarItem.Identifier {
     static let tabs = NSToolbarItem.Identifier("tabs")
     static let addProject = NSToolbarItem.Identifier("addProject")
+    static let newScratch = NSToolbarItem.Identifier("newScratch")
     static let projectTitle = NSToolbarItem.Identifier("projectTitle")
 }
 
@@ -1757,7 +1757,7 @@ extension WorkspaceController: NSToolbarDelegate {
         return l
     }
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .addProject, .sidebarTrackingSeparator, .tabs, .flexibleSpace, .projectTitle, .inspectorTrackingSeparator, .flexibleSpace, .toggleInspector]
+        [.toggleSidebar, .addProject, .newScratch, .sidebarTrackingSeparator, .tabs, .flexibleSpace, .projectTitle, .inspectorTrackingSeparator, .flexibleSpace, .toggleInspector]
     }
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(toolbar) }
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier, willBeInsertedIntoToolbar: Bool) -> NSToolbarItem? {
@@ -1768,6 +1768,14 @@ extension WorkspaceController: NSToolbarDelegate {
             item.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "Add Project")
             item.target = self
             item.action = #selector(addProject(_:))
+            return item
+        }
+        if id == .newScratch {
+            item.label = "New Scratch Terminal"
+            item.toolTip = "New Scratch Terminal (⇧⌘N)"
+            item.image = NSImage(systemSymbolName: "apple.terminal", accessibilityDescription: "New Scratch Terminal")
+            item.target = self
+            item.action = #selector(newScratchTerminal(_:))
             return item
         }
         if id == .projectTitle {

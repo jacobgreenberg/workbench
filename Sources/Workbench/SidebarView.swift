@@ -29,7 +29,6 @@ private final class ProjectCell: NSTableCellView {
     let label = NSTextField(labelWithString: "")
     let dot = NSView()
     let count = NSTextField(labelWithString: "")
-    let hint = NSTextField(labelWithString: "")   // optional shortcut hint, trailing (empty = hidden)
 
     init(symbol: String) {
         super.init(frame: .zero)
@@ -39,11 +38,8 @@ private final class ProjectCell: NSTableCellView {
         dot.wantsLayer = true
         dot.layer?.cornerRadius = 3.5
         count.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        hint.font = .systemFont(ofSize: 11)
-        hint.textColor = .tertiaryLabelColor
-        hint.isHidden = true
         textField = label
-        let trailing = NSStackView(views: [dot, count, hint])   // hidden members drop out of the stack
+        let trailing = NSStackView(views: [dot, count])   // hidden members drop out of the stack
         trailing.spacing = 8
         for v in [icon, label, trailing] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
@@ -164,12 +160,11 @@ private final class FlatRowView: NSTableRowView {
     override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }
 }
 
-/// The scratch terminals under the project list: one "Scratch Terminal" row that is also the button. With none open,
-/// clicking it makes one; otherwise it selects it. A flat table (no glass) that hugs its rows.
+/// The open scratch terminals under the project list (none = no rows, zero height; the toolbar's terminal button and
+/// ⇧⌘N make one). A flat table (no glass) that hugs its rows.
 @MainActor private final class ScratchList: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
-    var onNew: (() -> Void)?
     let scroll = NSScrollView()
     private let table = SidebarTable()
     private let height: NSLayoutConstraint
@@ -217,33 +212,24 @@ private final class FlatRowView: NSTableRowView {
         if changed { table.reloadData() }
         // Hug the table's real height (the source-list style pads beyond rowHeight × rows); scroll only past maxRows.
         table.tile()
-        height.constant = min(table.frame.height, CGFloat(Self.maxRows) * (Self.rowHeight + Self.spacing))
+        height.constant = rows.isEmpty ? 0 : min(table.frame.height, CGFloat(Self.maxRows) * (Self.rowHeight + Self.spacing))
         scroll.hasVerticalScroller = rows.count > Self.maxRows
         syncing = true
         if selected >= 0, selected < rows.count { table.selectRowIndexes([selected], byExtendingSelection: false) } else { table.deselectAll(nil) }
         syncing = false
-        for r in 0..<max(rows.count, 1) {
+        for r in 0..<rows.count {
             if let cell = table.view(atColumn: 0, row: r, makeIfNecessary: false) as? ProjectCell { style(cell, row: r) }
         }
     }
 
-    private static let placeholder = SidebarRow(id: UUID(), name: "Scratch Terminal", path: "New scratch terminal (⇧⌘N)", status: .idle)
-
     private func style(_ cell: ProjectCell, row: Int) {
-        guard let theme else { return }
-        defer {
-            cell.label.font = .systemFont(ofSize: 13, weight: .semibold)
-            cell.label.textColor = .labelColor   // dynamic: a withAlphaComponent copy freezes to the appearance it was made under
-            cell.hint.stringValue = "⇧⌘N"
-            cell.hint.isHidden = row != 0
-            cell.hint.textColor = .tertiaryLabelColor
-        }
-        if rows.indices.contains(row) { cell.style(rows[row], selected: row == selected, theme: theme); return }
-        cell.style(Self.placeholder, selected: false, theme: theme)   // none open: the same row, not dimmed
-        cell.icon.contentTintColor = .secondaryLabelColor
+        guard let theme, rows.indices.contains(row) else { return }
+        cell.style(rows[row], selected: row == selected, theme: theme)
+        cell.label.font = .systemFont(ofSize: 13, weight: .semibold)
+        cell.label.textColor = .labelColor   // dynamic: a withAlphaComponent copy freezes to the appearance it was made under
     }
 
-    func numberOfRows(in tableView: NSTableView) -> Int { max(rows.count, 1) }
+    func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { FlatRowView() }
 
@@ -256,7 +242,7 @@ private final class FlatRowView: NSTableRowView {
     func tableViewSelectionDidChange(_ notification: Notification) {
         let r = table.selectedRow
         guard !syncing, r >= 0, r != selected else { return }
-        if rows.isEmpty { table.deselectAll(nil); onNew?() } else { onSelect?(r) }
+        onSelect?(r)
     }
 }
 
@@ -275,7 +261,6 @@ private final class FlatRowView: NSTableRowView {
     var onMove: ((Int, Int) -> Void)?   // from, to (final index after removal)
     var onSelectScratch: ((Int) -> Void)?   // indices are rows of the scratch list
     var onCloseScratch: ((Int) -> Void)?
-    var onNewScratch: (() -> Void)?
     var onMoveToWorkspace: ((Int, Int) -> Void)?   // project row, workspace index
     let rail = WorkspaceRail()
 
@@ -323,7 +308,6 @@ private final class FlatRowView: NSTableRowView {
         scroll.documentView = table
 
         scratchList.onSelect = { [unowned self] i in onSelectScratch?(i) }
-        scratchList.onNew = { [unowned self] in onNewScratch?() }
         scratchList.onClose = { [unowned self] i in onCloseScratch?(i) }
 
         title.font = .systemFont(ofSize: 26, weight: .bold)   // a large title, like Mail's or Notes' sidebar
