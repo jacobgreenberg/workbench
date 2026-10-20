@@ -334,7 +334,8 @@ private final class TabScrollView: NSScrollView {
         NSLayoutConstraint.activate(indicatorPins)
         let slide = animated && !indicator.isHidden && !reduceMotion
         indicator.isHidden = false
-        revealSelected()
+        // Reveal after the slide starts: its layout pass would otherwise apply the new pins at once, and the pill jumps.
+        defer { revealSelected() }
         guard slide, let inner = indicator.superview else { return }
         NSAnimationContext.runAnimationGroup { c in
             c.duration = 0.28
