@@ -72,7 +72,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     // so ghostty_app_free is skipped to avoid racing the background surface frees.
     func applicationWillTerminate(_ notification: Notification) {
         control?.stop()
-        workspace.terminateAll()
+        workspace.terminateAll(keeping: Set(pendingRestore?.0.layout.projects.flatMap { $0.tabs.flatMap { $0.root.leaves.map(\.id) } } ?? []))
         Session.waitForEnds(timeout: 5)   // hosts give a shell up to 3 s to exit; under Restart nothing is ending
         if let (backup, rollback) = pendingRestore {
             do { try backup.install(backupRemote: store.layout.backupRemote) } catch {

@@ -1384,9 +1384,12 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     /// Something would be lost by quitting: a process other than an idle shell, or an agent mid-turn.
     var needsConfirmQuit: Bool { status.values.contains(.busy) || views.keys.contains { needsConfirm([$0]) } }
 
-    func terminateAll() {
+    /// `keeping`: panes a restore brings back; their sessions detach and reconnect after the relaunch, the rest end.
+    func terminateAll(keeping kept: Set<PaneID> = []) {
         captureAgents()
         store.flush()
+        for id in Array(views.keys) where !kept.contains(id) { destroy(id) }
+        if !kept.isEmpty { Session.keepOnClose = true }
         for id in Array(views.keys) { destroy(id) }
     }
 
@@ -1483,6 +1486,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             openFile(path)
             return "{}"
         #if DEBUG
+        case "restore":  // test harness: restore the backup file at `path`, skipping the Settings dialogs
+            guard let path = msg["path"], let data = readFile(URL(fileURLWithPath: path), cap: Backup.maxSize),
+                  let b = try? Backup.decode(data), let rollback = try? Backup.saveCurrent(store.layout) else { return #"{"error":"bad backup"}"# }
+            DispatchQueue.main.async { (NSApp.delegate as? AppDelegate)?.restore(b, rollback: rollback) }
+            return "{}"
         case "action":   // test harness: run a menu action, e.g. "newTab:", without needing keyboard focus
             let sel = NSSelectorFromString(msg["name"] ?? "")
             guard responds(to: sel) else { return #"{"error":"unknown action"}"# }

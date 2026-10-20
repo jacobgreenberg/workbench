@@ -552,7 +552,7 @@ private final class BackupViewController: NSViewController {
         let confirm = NSAlert()
         confirm.alertStyle = .warning
         confirm.messageText = "Replace your current setup?"
-        confirm.informativeText = "Workbench quits and reopens with the \(b.layout.projects.count) projects in this backup. Open terminals close, and tabs rerun their saved commands, so only restore backups you made. Your current setup is saved to \(backupsPath) first."
+        confirm.informativeText = "Workbench quits and reopens with the \(b.layout.projects.count) projects in this backup. Terminals the backup also has keep running; the rest close, and new tabs run their saved commands, so only restore backups you made. Your current setup is saved to \(backupsPath) first."
             + (b.ghosttyConfig != nil ? " It also replaces ~/.config/ghostty/config." : "")
             + (workspace.needsConfirmQuit ? " Running commands, and agents in the middle of a turn, are stopped." : "")
         confirm.addButton(withTitle: "Replace and Relaunch").hasDestructiveAction = true
