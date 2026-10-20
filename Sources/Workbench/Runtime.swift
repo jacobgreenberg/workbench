@@ -205,9 +205,10 @@ enum PaneEvent: Sendable {
         // A control character (newline, ESC, C1) typed raw into a terminal could act on the line editor, so a name
         // holding one is spelled out in ANSI-C quoting, which the shell reads back as the same bytes.
         if path.unicodeScalars.contains(where: { $0.value < 0x20 || (0x7F...0x9F).contains($0.value) }) {
+            // ' and \ go in as bytes too, so the body holds no quote: a shell without $'' can't end it early either.
             return "$'" + path.unicodeScalars.map { c -> String in
-                if c.value < 0x20 || (0x7F...0x9F).contains(c.value) { return String(c).utf8.map { String(format: "\\x%02x", $0) }.joined() }
-                return c == "\\" || c == "'" ? "\\" + String(c) : String(c)
+                guard c.value < 0x20 || (0x7F...0x9F).contains(c.value) || c == "'" || c == "\\" else { return String(c) }
+                return String(c).utf8.map { String(format: "\\x%02x", $0) }.joined()
             }.joined() + "'"
         }
         return "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
