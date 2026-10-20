@@ -711,7 +711,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             setStatus(id, .attention, title: title.isEmpty ? nil : title, body: body)
         case let .progress(active):
             if active { progressing.insert(id) } else { progressing.remove(id) }
-            if active, status[id] != .busy { setStatus(id, .busy) }
+            if active, status[id] != .busy || background.contains(id) { setStatus(id, .busy) }   // a turn started: it, not the hold, decides when it ends
             else if !active, status[id] == .busy { setStatus(id, .done) }
         case let .commandFinished(_, ns):
             progressing.remove(id)
