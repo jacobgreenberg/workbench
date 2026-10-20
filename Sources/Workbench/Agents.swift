@@ -224,7 +224,9 @@ enum Agents {
             guard tree.contains(where: listens) else { return true }
             let before = cpuNanos(tree)
             Thread.sleep(forTimeInterval: 1)
-            if cpuNanos(tree) - before > 20_000_000 { return true }
+            // Per process, and only those alive at both samples: one exiting in between must not count as negative time.
+            let used = cpuNanos(tree).reduce(UInt64(0)) { sum, p in sum + (p.value - min(p.value, before[p.key] ?? p.value)) }
+            if used > 20_000_000 { return true }
         }
         return false
     }
@@ -243,15 +245,18 @@ enum Agents {
         return false
     }
 
-    private static func cpuNanos(_ pids: [pid_t]) -> UInt64 {
+    /// CPU time used so far by each pid still alive.
+    private static func cpuNanos(_ pids: [pid_t]) -> [pid_t: UInt64] {
         var tb = mach_timebase_info_data_t()
         mach_timebase_info(&tb)
-        return pids.reduce(0) { sum, pid in
+        var result: [pid_t: UInt64] = [:]
+        for pid in pids {
             var info = proc_taskinfo()
             let size = Int32(MemoryLayout<proc_taskinfo>.size)
-            guard proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &info, size) == size else { return sum }
-            return sum + (info.pti_total_user + info.pti_total_system) * UInt64(tb.numer) / UInt64(tb.denom)
+            guard proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &info, size) == size else { continue }
+            result[pid] = (info.pti_total_user + info.pti_total_system) * UInt64(tb.numer) / UInt64(tb.denom)
         }
+        return result
     }
 
     private static func processCwd(_ pid: pid_t) -> String? {
