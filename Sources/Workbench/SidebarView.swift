@@ -368,6 +368,7 @@ private final class FlatRowView: NSTableRowView {
         if rows.indices.contains(table.clickedRow) {
             menu.addItem(toggleItem)
             menu.addItem(NSMenuItem(title: "Rename", action: #selector(renameTapped), keyEquivalent: ""))
+            menu.addItem(NSMenuItem(title: "Copy Path", action: #selector(copyPathTapped), keyEquivalent: ""))
             if workspaces.count > 1 {
                 let move = NSMenuItem(title: "Move to Workspace", action: nil, keyEquivalent: "")
                 move.submenu = NSMenu()
@@ -386,6 +387,12 @@ private final class FlatRowView: NSTableRowView {
     }
 
     @objc private func toggleHiddenTapped() { if rows.indices.contains(table.clickedRow) { onToggleHidden?(table.clickedRow) } }
+
+    @objc private func copyPathTapped() {
+        guard rows.indices.contains(table.clickedRow) else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(rows[table.clickedRow].path, forType: .string)
+    }
 
     @objc private func removeTapped() { if rows.indices.contains(table.clickedRow) { onRemove?(table.clickedRow) } }
 
