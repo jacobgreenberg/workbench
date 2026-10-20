@@ -883,7 +883,16 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private func previewable(_ file: URL) -> Bool {
         let v = try? file.resourceValues(forKeys: [.contentTypeKey, .isDirectoryKey])
         return v?.isDirectory != true && (["md", "markdown"].contains(file.pathExtension.lowercased()) || Syntax.key(for: file.path) != nil
-            || v?.contentType.map({ $0.conforms(to: .text) }) == true)
+            || v?.contentType.map({ $0.conforms(to: .text) }) == true
+            || ((v?.contentType ?? .data) == .data && Self.looksLikeText(file)))
+    }
+
+    /// Untyped files (.env, Dockerfile, LICENSE) are text when their first 4 KB hold no NUL byte.
+    nonisolated static func looksLikeText(_ file: URL) -> Bool {
+        guard let h = try? FileHandle(forReadingFrom: file) else { return false }
+        defer { try? h.close() }
+        let head = (try? h.read(upToCount: 4096)) ?? nil
+        return !(head ?? Data()).contains(0)
     }
 
     private func open(_ url: URL) {

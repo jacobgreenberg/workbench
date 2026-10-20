@@ -558,6 +558,13 @@ private final class CodeTextView: NSTextView {
 }
 
 @MainActor func filePaneSelfCheck() {
+    let sniff = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try! FileManager.default.createDirectory(at: sniff, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: sniff) }
+    try! Data("KEY=value\n".utf8).write(to: sniff.appendingPathComponent(".env"))
+    try! Data([0x89, 0x50, 0x00, 0x01]).write(to: sniff.appendingPathComponent("blob"))
+    assert(WorkspaceController.looksLikeText(sniff.appendingPathComponent(".env")))
+    assert(!WorkspaceController.looksLikeText(sniff.appendingPathComponent("blob")))
     let dir = FileManager.default.temporaryDirectory
     let good = dir.appendingPathComponent("\(UUID().uuidString).swift")
     let bad = dir.appendingPathComponent("\(UUID().uuidString).bin")
