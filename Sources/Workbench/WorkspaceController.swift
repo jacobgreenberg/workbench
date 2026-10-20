@@ -117,6 +117,10 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
 
         let main = mainPane
         main.wantsLayer = true
+        main.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: main, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.fitTabBar() }
+        }
         for v in [content, findBar, emptyLabel] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false }
         main.addSubview(content)
         content.wantsLayer = true
@@ -506,6 +510,21 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         projectName.stringValue = project?.name ?? ""
         projectPath.stringValue = (project?.path as NSString?)?.abbreviatingWithTildeInPath ?? ""
         window.toolbar?.items.first { $0.itemIdentifier == .projectTitle }?.isHidden = project == nil || !sidebarItem.isCollapsed
+        fitTabBar()
+    }
+
+    /// The tab bar may run from where the toolbar put it to the end of the terminals' column, less the project title
+    /// when that shows; past that its tabs scroll.
+    private func fitTabBar() {
+        guard tabBar.window != nil else { tabBar.maxWidth = TabBarView.startWidth; return }   // overflowed: come back, then measure
+        // The toolbar slot's leading edge, not the bar's: a bar wider than its stale slot is centered on it, left of it.
+        guard let slot = tabBar.superview else { return }
+        let start = slot.convert(NSPoint.zero, to: nil).x
+        let end = mainPane.convert(NSPoint(x: mainPane.bounds.maxX, y: 0), to: nil).x
+        let item = tabBar.window?.toolbar?.items.first { $0.itemIdentifier == .projectTitle }
+        let title = item.flatMap { $0.isHidden ? nil : $0.view.map { $0.fittingSize.width + 16 } } ?? 0
+        let toggle: CGFloat = inspectorItem.isCollapsed ? 52 : 0   // the inspector toggle and its separator sit in this column then
+        tabBar.maxWidth = max(0, end - start - title - toggle - 24)
     }
 
     private func updateChrome() {

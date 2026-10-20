@@ -93,7 +93,7 @@ extension NSView {
 
     static func width(for title: String) -> CGFloat {
         let w = (title as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 12)]).width
-        return min(max(ceil(w) + 56, 80), 220)
+        return max(ceil(w) + 56, 80)   // the full title: an overflowing bar scrolls instead of truncating
     }
 
     init(height: CGFloat) {
@@ -101,9 +101,7 @@ extension NSView {
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
         width = widthAnchor.constraint(equalToConstant: frame.width)
-        width.priority = .defaultHigh   // tabs give way (down to 48) when the bar runs out of room
         width.isActive = true
-        widthAnchor.constraint(greaterThanOrEqualToConstant: 48).isActive = true
         heightAnchor.constraint(equalToConstant: height).isActive = true
 
         dot.wantsLayer = true
@@ -200,22 +198,44 @@ extension NSView {
     }
 }
 
+/// Scrolls only sideways; a mouse wheel's vertical turn scrolls it too.
+private final class TabScrollView: NSScrollView {
+    override func scrollWheel(with event: NSEvent) {
+        guard abs(event.scrollingDeltaY) > abs(event.scrollingDeltaX), let cg = event.cgEvent?.copy() else { return super.scrollWheel(with: event) }
+        cg.setIntegerValueField(.scrollWheelEventDeltaAxis2, value: cg.getIntegerValueField(.scrollWheelEventDeltaAxis1))
+        cg.setIntegerValueField(.scrollWheelEventDeltaAxis1, value: 0)
+        for (y, x) in [(CGEventField.scrollWheelEventPointDeltaAxis1, CGEventField.scrollWheelEventPointDeltaAxis2),
+                       (.scrollWheelEventFixedPtDeltaAxis1, .scrollWheelEventFixedPtDeltaAxis2)] {
+            cg.setDoubleValueField(x, value: cg.getDoubleValueField(y))
+            cg.setDoubleValueField(y, value: 0)
+        }
+        super.scrollWheel(with: NSEvent(cgEvent: cg) ?? event)
+    }
+}
+
 /// A toolbar item's view: a glass capsule of tab pills plus a round glass +. Fixed height; the width hugs the tabs
-/// up to `maxWidth`, past which tabs shrink and truncate.
+/// up to the room the toolbar gives it, past which the tabs scroll sideways (trackpad, or the mouse wheel).
 @MainActor final class TabBarView: NSView {
     private static let pill: CGFloat = 26
     private static let height: CGFloat = 34   // pill + 4pt glass inset each side
-    private static let maxWidth: CGFloat = 760
 
     var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
     var onNew: (() -> Void)?
     var onRename: ((Int, String?) -> Void)?
     var onMove: ((Int, Int) -> Void)?   // from, to
+    /// The room the toolbar has for the bar, set by the owner as the window resizes (the toolbar itself only ever gives a
+    /// view item its minimum, its flexible spaces take the rest).
+    /// Starts modest: a bar wider than the toolbar's room drops into its overflow menu, out of the window, where the
+    /// owner can no longer measure it.
+    static let startWidth: CGFloat = 400
+    var maxWidth: CGFloat = startWidth { didSet { if maxWidth != oldValue { fit() } } }
+    private lazy var barWidth = widthAnchor.constraint(equalToConstant: 0)
 
     private let stack = NSStackView()
     private let plus = HandButton.glass("plus", "New Tab", .large)
     private let glass = NSGlassEffectView()
+    private let scroll = TabScrollView()   // the tabs, scrolling sideways once they outgrow the bar
     private let indicator = NSView()   // the selected pill, in the theme's foreground at 15%; one view, pinned to the selected tab, slides between tabs
     private var indicatorPins: [NSLayoutConstraint] = []
     private var plusAfterTabs: NSLayoutConstraint!
@@ -239,25 +259,35 @@ extension NSView {
         indicator.layer?.cornerRadius = Self.pill / 2
         indicator.isHidden = true
         indicator.translatesAutoresizingMaskIntoConstraints = false
+        plus.setContentHuggingPriority(.required, for: .horizontal)   // the glass takes the slack: it has no width of its own
         plus.target = self
         plus.action = #selector(newTapped)
         for v in [glass, stack, plus] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
         }
         setContentHuggingPriority(.required, for: .horizontal)
-        let inner = NSView()   // glass content: selection pill under the tabs
+        let inner = NSView()   // the scrolled content: selection pill under the tabs
+        inner.translatesAutoresizingMaskIntoConstraints = false
         inner.addSubview(indicator)
         inner.addSubview(stack)
-        glass.contentView = inner
+        scroll.drawsBackground = false
+        scroll.hasHorizontalScroller = false
+        scroll.hasVerticalScroller = false
+        scroll.verticalScrollElasticity = .none
+        scroll.documentView = inner
+        glass.contentView = scroll
         addSubview(glass)
         addSubview(plus)
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: Self.height),
-            widthAnchor.constraint(lessThanOrEqualToConstant: Self.maxWidth),
             stack.leadingAnchor.constraint(equalTo: inner.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: inner.trailingAnchor),
             stack.topAnchor.constraint(equalTo: inner.topAnchor),
             stack.bottomAnchor.constraint(equalTo: inner.bottomAnchor),
+            inner.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            inner.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            inner.heightAnchor.constraint(equalTo: scroll.contentView.heightAnchor),
+            inner.widthAnchor.constraint(greaterThanOrEqualTo: scroll.contentView.widthAnchor),
             glass.leadingAnchor.constraint(equalTo: leadingAnchor),
             glass.topAnchor.constraint(equalTo: topAnchor),
             glass.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -279,11 +309,16 @@ extension NSView {
     }
     #endif
 
-    /// What NSToolbarItem measures: hugs the tabs (plus), capped at `maxWidth`.
-    override var intrinsicContentSize: NSSize {
+    /// The bar's width: hugs the tabs (plus), up to `maxWidth`, past which the tabs scroll. Both a required constraint (the
+    /// toolbar sizes a view item to its minimum) and the intrinsic size (whose invalidation makes the toolbar re-measure).
+    override var intrinsicContentSize: NSSize { NSSize(width: barWidth.constant, height: Self.height) }
+
+    private func fit() {
         let tabs = buttons.reduce(CGFloat(8)) { $0 + $1.preferredWidth + 2 } - (buttons.isEmpty ? 0 : 2)
         let w = (buttons.isEmpty ? 0 : tabs + 8) + plus.fittingSize.width
-        return NSSize(width: min(w, Self.maxWidth), height: Self.height)
+        barWidth.constant = max(min(w, maxWidth), plus.fittingSize.width)
+        barWidth.isActive = true
+        invalidateIntrinsicContentSize()
     }
 
     /// Pins the pill to the selected tab, so layout keeps it there; a selection change slides it.
@@ -299,6 +334,7 @@ extension NSView {
         NSLayoutConstraint.activate(indicatorPins)
         let slide = animated && !indicator.isHidden && !reduceMotion
         indicator.isHidden = false
+        revealSelected()
         guard slide, let inner = indicator.superview else { return }
         NSAnimationContext.runAnimationGroup { c in
             c.duration = 0.28
@@ -306,6 +342,20 @@ extension NSView {
             c.allowsImplicitAnimation = true
             inner.layoutSubtreeIfNeeded()
         }
+    }
+
+    /// Scrolls the selected tab into view: on selection, and when the bar's width changes (the toolbar settles it late).
+    private func revealSelected() {
+        guard buttons.indices.contains(selectedIndex) else { return }
+        layoutSubtreeIfNeeded()
+        let b = buttons[selectedIndex]
+        b.scrollToVisible(b.bounds.insetBy(dx: -4, dy: 0))
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let changed = newSize.width != frame.width
+        super.setFrameSize(newSize)
+        if changed { revealSelected() }
     }
 
     private func endLift() {
@@ -353,7 +403,7 @@ extension NSView {
         selectedIndex = selected
         indicator.layer?.backgroundColor = theme.color("foreground").withAlphaComponent(0.15).cgColor
         for (i, b) in buttons.enumerated() { b.apply(item: newItems[i], selected: i == selected, theme: theme) }
-        invalidateIntrinsicContentSize()
+        fit()
         placeIndicator(animated: moved)
     }
 }

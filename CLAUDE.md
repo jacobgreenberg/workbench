@@ -186,7 +186,7 @@ func workspaceIconPNG(_ url: URL, px: Int = 128) -> Data?
 
 // TabBarView.swift
 struct TabItem: Equatable, Sendable { let title: String; let status: PaneStatus }
-@MainActor final class TabBarView: NSView {   // a toolbar item view: fixed 34 pt height, intrinsic width hugs the tabs (cap 760, tabs then shrink); system colors; selection pill is the theme foreground at 15% (a solid fill, not glass: it must read the same in active, inactive and fullscreen-reveal toolbars) and slides (reduce-motion respected)
+@MainActor final class TabBarView: NSView {   // a toolbar item view: fixed 34 pt height, width hugs the tabs (full titles, no per-tab cap) up to `maxWidth`, which WorkspaceController.fitTabBar sets from the toolbar slot to the end of the terminals column (less the project title and, inspector collapsed, its toggle) on every mainPane resize; the width is a required constraint plus the intrinsic size, since the toolbar sizes view items to their minimum and re-measures only on intrinsic invalidation; overflowing tabs scroll sideways in a TabScrollView (the mouse wheel scrolls it too) and the selected tab is scrolled into view on selection and resize; system colors; selection pill is the theme foreground at 15% (a solid fill, not glass: it must read the same in active, inactive and fullscreen-reveal toolbars) and slides (reduce-motion respected)
     var onSelect: ((Int) -> Void)?; var onClose: ((Int) -> Void)?; var onNew: (() -> Void)?
     var onRename: ((Int, String?) -> Void)?              // double-click a tab; nil = cancelled
     var onMove: ((Int, Int) -> Void)?                    // drag a tab: from, to (lifted tab follows the cursor, others slide aside, snaps on release; then the model follows)
