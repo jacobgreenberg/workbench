@@ -26,6 +26,9 @@ private let tints: [(name: String, top: NSColor, bottom: NSColor)] = [
     ("Green", NSColor(srgbRed: 0.76, green: 0.91, blue: 0.55, alpha: 1), NSColor(srgbRed: 0.36, green: 0.60, blue: 0.27, alpha: 1)),
 ]
 
+/// The workspace's palette slot; `color` comes from layout.json or a synced backup, so any Int is wrapped (abs(Int.min) traps).
+private func tintIndex(_ w: WorkspaceItem) -> Int { ((w.color ?? Int(w.id.uuid.0)) % tints.count + tints.count) % tints.count }
+
 @MainActor private final class WorkspaceIcon: NSView {
     static let size: CGFloat = 40
     let tile = CAGradientLayer()
@@ -81,7 +84,7 @@ private let tints: [(name: String, top: NSColor, bottom: NSColor)] = [
         item = w
         toolTip = w.name
         setAccessibilityLabel(w.name)
-        let (_, top, bottom) = tints[abs(w.color ?? Int(w.id.uuid.0)) % tints.count]
+        let (_, top, bottom) = tints[tintIndex(w)]
         let alpha: CGFloat = w.emoji == nil ? 1 : 0.28   // an emoji sits on a soft tint of the color
         tile.colors = [top.withAlphaComponent(alpha).cgColor, bottom.withAlphaComponent(alpha).cgColor]
         picture.isHidden = w.image == nil
@@ -199,7 +202,7 @@ private let tints: [(name: String, top: NSColor, bottom: NSColor)] = [
         menu.addItem(NSMenuItem(title: "Choose Image…", action: #selector(imageTapped), keyEquivalent: ""))
         let colorItem = NSMenuItem(title: "Color", action: nil, keyEquivalent: "")
         let colorMenu = NSMenu()
-        let current = abs(w.color ?? Int(w.id.uuid.0)) % tints.count
+        let current = tintIndex(w)
         for (n, t) in tints.enumerated() {
             let c = NSMenuItem(title: t.name, action: #selector(colorTapped(_:)), keyEquivalent: "")
             c.tag = n
