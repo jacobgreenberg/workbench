@@ -57,6 +57,8 @@ import AppKit
     static let height: CGFloat = 34   // pill + 4pt glass inset each side
 
     var onSelect: ((Int) -> Void)?
+    /// The selection pill's color: the theme's primary, set by the owner on every theme change.
+    var tint: NSColor = .controlAccentColor { didSet { indicator.layer?.backgroundColor = tint.withAlphaComponent(0.3).cgColor } }
 
     private let glass = NSGlassEffectView()
     private let indicator = NSView()   // the selected pill; pinned to the selected segment
@@ -107,10 +109,6 @@ import AppKit
     required init?(coder: NSCoder) { fatalError() }
 
     override var acceptsFirstResponder: Bool { false }
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        indicator.layer?.backgroundColor = cg(.tertiarySystemFill)
-    }
 
     func setLabel(_ text: String, at i: Int) {
         if buttons.indices.contains(i) { buttons[i].label.stringValue = text }
@@ -121,7 +119,7 @@ import AppKit
         let moved = animated && selectedIndex >= 0
         selectedIndex = i
         for (n, b) in buttons.enumerated() { b.selected = n == i }
-        indicator.layer?.backgroundColor = cg(.tertiarySystemFill)
+        indicator.layer?.backgroundColor = tint.withAlphaComponent(0.3).cgColor
         NSLayoutConstraint.deactivate(pins)
         let b = buttons[i]
         pins = [indicator.leadingAnchor.constraint(equalTo: b.leadingAnchor),

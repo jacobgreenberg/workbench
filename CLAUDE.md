@@ -176,7 +176,7 @@ enum PaneStatus: Int, Comparable, Sendable { case idle = 0, busy = 1, done = 2, 
     func updateScratch(rows: [SidebarRow], selected: Int, theme: Theme)   // scratch terminals; selected -1 = none (a project is active)
 }   // Add Project and New Scratch Terminal (apple.terminal) are toolbar items (WorkspaceController), not sidebar buttons
 
-// GlassSegments.swift — `GlassSegments(labels:)`: the tab bar's toggle look as a standalone view (glass capsule + sliding tertiary-fill selection pill, same 0.28 s curve, Reduce Motion snaps); `onSelect: ((Int) -> Void)?`, `setLabel(_:at:)`, `select(_:animated:)`. Used by the sidebar's Active/Hidden switch. Scratch rows are soft rounded bars (5% label fill, 9% hover, soft grey fill when selected; no glass).
+// GlassSegments.swift — `GlassSegments(labels:)`: the tab bar's toggle look as a standalone view (glass capsule + sliding selection pill in the theme primary at 30% (`tint`, set by the owner), same 0.28 s curve, Reduce Motion snaps); `onSelect: ((Int) -> Void)?`, `setLabel(_:at:)`, `select(_:animated:)`. Used by the sidebar's Active/Hidden switch. Scratch rows are soft rounded bars (5% label fill, 9% hover, soft grey fill when selected; no glass).
 
 // WorkspaceRail.swift — 60 pt rail, darker strip starting below the toolbar (black 16%) with a 1 px trailing divider, Slack-style: one 40 pt icon per workspace (gradient tile + rounded-bold monogram, or emoji on a soft tint, or image), status badge = busiest pane inside, selected marked by a bar at the rail's edge; glass + New Workspace below. Right-click: Rename…, Choose Emoji… (sheet with a field + character palette; first character kept), Choose Image… (NSOpenPanel), Color ▸ (6 named swatches, checkmark on the current; tints the monogram tile and emoji, not images), Use Monogram, Delete Workspace… (2+; projects move to the neighbour, nothing closed)
 struct WorkspaceItem: Equatable, Sendable { let id: UUID; let name: String; let image: String? /* absolute path */; let emoji: String?; let color: Int?; let status: PaneStatus }
@@ -186,7 +186,7 @@ func workspaceIconPNG(_ url: URL, px: Int = 128) -> Data?
 
 // TabBarView.swift
 struct TabItem: Equatable, Sendable { let title: String; let status: PaneStatus }
-@MainActor final class TabBarView: NSView {   // a toolbar item view: fixed 34 pt height, intrinsic width hugs the tabs (cap 760, tabs then shrink); system colors; selection pill slides (reduce-motion respected)
+@MainActor final class TabBarView: NSView {   // a toolbar item view: fixed 34 pt height, intrinsic width hugs the tabs (cap 760, tabs then shrink); system colors; selection pill is the theme primary at 30% (a solid fill, not glass: it must read the same in active, inactive and fullscreen-reveal toolbars) and slides (reduce-motion respected)
     var onSelect: ((Int) -> Void)?; var onClose: ((Int) -> Void)?; var onNew: (() -> Void)?
     var onRename: ((Int, String?) -> Void)?              // double-click a tab; nil = cancelled
     var onMove: ((Int, Int) -> Void)?                    // drag a tab: from, to (lifted tab follows the cursor, others slide aside, snaps on release; then the model follows)

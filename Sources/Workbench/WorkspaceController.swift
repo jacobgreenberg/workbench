@@ -597,6 +597,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         for v in views.values { (v as? FilePaneView)?.apply(theme: theme) }
         previewFile?.apply(theme: theme)
         findBar.apply(theme: theme)
+        inspectorTabs.tint = theme.color("primary")
     }
 
     // MARK: - Focus & status

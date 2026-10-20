@@ -419,6 +419,7 @@ private final class FlatRowView: NSTableRowView {
     }
 
     func update(rows: [SidebarRow], selected: Int, hiddenCount: Int, showingHidden: Bool, theme: Theme) {
+        filter.tint = theme.color("primary")
         if hiddenCount != self.hiddenCount || showingHidden != self.showingHidden {
             self.hiddenCount = hiddenCount
             self.showingHidden = showingHidden
