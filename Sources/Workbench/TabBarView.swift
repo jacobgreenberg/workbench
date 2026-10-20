@@ -163,7 +163,7 @@ extension NSView {
     private func refresh() {
         guard let theme else { return }
         label.textColor = selected || hovering ? .labelColor : .secondaryLabelColor
-        let fill: CGColor? = (selected && lifted) ? theme.color("primary").withAlphaComponent(0.3).cgColor : (hovering && !selected) ? cg(.quaternarySystemFill) : nil
+        let fill: CGColor? = (selected && lifted) ? theme.color("foreground").withAlphaComponent(0.15).cgColor : (hovering && !selected) ? cg(.quaternarySystemFill) : nil
         if let layer, layer.backgroundColor != fill {
             if !reduceMotion, window != nil {
                 let a = CABasicAnimation(keyPath: "backgroundColor")
@@ -216,7 +216,7 @@ extension NSView {
     private let stack = NSStackView()
     private let plus = HandButton.glass("plus", "New Tab", .large)
     private let glass = NSGlassEffectView()
-    private let indicator = NSView()   // the selected pill, in the theme's primary; one view, pinned to the selected tab, slides between tabs
+    private let indicator = NSView()   // the selected pill, in the theme's foreground at 15%; one view, pinned to the selected tab, slides between tabs
     private var indicatorPins: [NSLayoutConstraint] = []
     private var plusAfterTabs: NSLayoutConstraint!
     private var plusAlone: NSLayoutConstraint!   // no tabs: the glass capsule is hidden, so the + sits at the leading edge
@@ -351,7 +351,7 @@ extension NSView {
         plusAlone.isActive = buttons.isEmpty
         let moved = sameTabs && selected != selectedIndex
         selectedIndex = selected
-        indicator.layer?.backgroundColor = theme.color("primary").withAlphaComponent(0.3).cgColor
+        indicator.layer?.backgroundColor = theme.color("foreground").withAlphaComponent(0.15).cgColor
         for (i, b) in buttons.enumerated() { b.apply(item: newItems[i], selected: i == selected, theme: theme) }
         invalidateIntrinsicContentSize()
         placeIndicator(animated: moved)

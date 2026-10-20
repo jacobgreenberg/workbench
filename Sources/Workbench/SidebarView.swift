@@ -135,18 +135,37 @@ private final class ProjectRowCell: NSTableCellView {
     }
 }
 
-/// Scratch rows: a soft rounded bar (5% label fill, 9% on hover), soft grey fill when selected; no glass, no border. The
+/// A sidebar row's bar: the same horizontal extent as the Active/Hidden switch above (4 pt in from the rail, 12 pt from
+/// the edge).
+private func rowBar(_ bounds: NSRect, dy: CGFloat) -> NSBezierPath {
+    NSBezierPath(roundedRect: NSRect(x: 4, y: bounds.minY + dy, width: bounds.width - 16, height: bounds.height - 2 * dy), xRadius: 10, yRadius: 10)
+}
+
+/// The selected project row: the app's one selection look (label color at 15%, as the tab bar and switches) instead of
+/// the source list's own highlight.
+private final class SelectionRowView: NSTableRowView {
+    override var isSelected: Bool { didSet { if isSelected != oldValue { needsDisplay = true } } }
+    override func drawBackground(in dirtyRect: NSRect) {
+        guard isSelected else { return }
+        NSColor.labelColor.withAlphaComponent(0.15).setFill()
+        rowBar(bounds, dy: 1).fill()
+    }
+    override func drawSelection(in dirtyRect: NSRect) {}
+    override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }
+}
+
+/// Scratch rows: a soft rounded bar (5% label fill, 9% on hover), 15% when selected; no glass, no border. The
 /// spacing between rows is drawn inside the row.
 private final class FlatRowView: NSTableRowView {
     private var hovered = false { didSet { if hovered != oldValue { needsDisplay = true } } }
-    private var bar: NSBezierPath { NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 3), xRadius: 10, yRadius: 10) }
+    private var bar: NSBezierPath { rowBar(bounds, dy: 3) }
     override func drawBackground(in dirtyRect: NSRect) {
         guard !isSelected else { return }
         NSColor.labelColor.withAlphaComponent(hovered ? 0.09 : 0.055).setFill()
         bar.fill()
     }
     override func drawSelection(in dirtyRect: NSRect) {
-        NSColor.labelColor.withAlphaComponent(0.14).setFill()
+        NSColor.labelColor.withAlphaComponent(0.15).setFill()
         bar.fill()
     }
     override func updateTrackingAreas() {
@@ -290,7 +309,7 @@ private final class FlatRowView: NSTableRowView {
         table.floatsGroupRows = false
         table.rowHeight = 46
         table.intercellSpacing = .zero
-        table.selectionHighlightStyle = .regular
+        table.selectionHighlightStyle = .none   // SelectionRowView draws it
         table.allowsEmptySelection = true
         table.dataSource = self
         table.delegate = self
@@ -419,7 +438,7 @@ private final class FlatRowView: NSTableRowView {
     }
 
     func update(rows: [SidebarRow], selected: Int, hiddenCount: Int, showingHidden: Bool, theme: Theme) {
-        filter.tint = theme.color("primary")
+        filter.tint = theme.color("foreground")
         if hiddenCount != self.hiddenCount || showingHidden != self.showingHidden {
             self.hiddenCount = hiddenCount
             self.showingHidden = showingHidden
@@ -452,6 +471,8 @@ private final class FlatRowView: NSTableRowView {
     // MARK: Table
 
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { SelectionRowView() }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let cell = ProjectRowCell()

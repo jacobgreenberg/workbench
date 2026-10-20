@@ -246,7 +246,9 @@ private final class DividerSplitView: NSSplitView {
             if h.dot.isHidden != (status(id) == .idle) { h.needsLayout = true }
             styleStatusDot(h.dot, status(id), theme: theme)
             h.label.textColor = isFocused ? .labelColor : .secondaryLabelColor
-            h.pill.tintColor = isFocused ? theme.color("primary").withAlphaComponent(0.35) : nil
+            h.pill.contentView?.wantsLayer = true
+            h.pill.contentView?.layer?.cornerRadius = h.pill.cornerRadius
+            h.pill.contentView?.layer?.backgroundColor = isFocused ? theme.color("foreground").withAlphaComponent(0.15).cgColor : nil
             h.pill.alphaValue = isFocused ? 1 : 0.8
             // The terminal's own background, not the tab bar's: the strip reads as part of its pane.
             h.layer?.backgroundColor = theme.color("background").cgColor
