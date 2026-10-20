@@ -77,6 +77,7 @@ final class SurfaceBox: Sendable { let id: PaneID; init(id: PaneID) }   // C use
     let box: SurfaceBox
     private(set) var surface: ghostty_surface_t?
     var onFocus: ((PaneID) -> Void)?                     // called from becomeFirstResponder
+    // drops: file URLs (Finder, file tree rows) paste their Runtime.shellEscape'd paths, space-separated, plus a trailing space
     var onKey: ((PaneID) -> Void)?                       // every keyDown: a key into a pane whose agent still has its OSC 9;4 progress up (Claude waiting on a question/plan approval) puts it back to busy; Claude 2.1.30x no longer animates its title, so progress + hooks are the busy signals
     var contextMenu: ((PaneID) -> NSMenu?)?              // right-click menu: the "Move to Tab" targets (other tabs, New Tab); set by WorkspaceController
     static var isReservedShortcut: (NSEvent) -> Bool = { _ in false }   // set by AppDelegate; performs the matching Pane menu action and returns true, else false

@@ -70,6 +70,7 @@ private let clutterNames: Set<String> = ["node_modules", "build", "dist", "Deriv
         outline.usesAutomaticRowHeights = false
         outline.dataSource = self
         outline.delegate = self
+        outline.setDraggingSourceOperationMask(.copy, forLocal: false)   // rows drag out as files (into a terminal: their path); never a move
         outline.target = self
         outline.action = #selector(clicked)
         outline.doubleAction = #selector(doubleClicked)
@@ -242,6 +243,10 @@ private let clutterNames: Set<String> = ["node_modules", "build", "dist", "Deriv
 
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
         loaded(node(item)!)[index]
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, pasteboardWriterForItem item: Any) -> (any NSPasteboardWriting)? {
+        (item as? Node)?.url as NSURL?
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {

@@ -49,6 +49,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         self.paneID = id
         self.box = SurfaceBox(id: id)
         super.init(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        registerForDraggedTypes([.fileURL])
 
         var c = ghostty_surface_config_new()
         c.userdata = Unmanaged.passUnretained(box).toOpaque()
@@ -212,6 +213,21 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         perform("paste_from_clipboard")
     }
     @IBAction func pasteAsPlainText(_ sender: Any?) { paste(sender) }
+
+    // Files dropped from Finder or the file tree paste their shell-escaped paths, space-separated, as Terminal does.
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) ? .copy : []
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let s = surface, !closed,
+              let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
+              !urls.isEmpty else { return false }
+        let text = urls.map { Runtime.shellEscape($0.path) }.joined(separator: " ") + " "
+        text.withCString { ghostty_surface_text(s, $0, UInt(text.utf8.count)) }
+        window?.makeFirstResponder(self)
+        return true
+    }
     @IBAction override func selectAll(_ sender: Any?) { perform("select_all") }
 
     // MARK: - Focus / size
