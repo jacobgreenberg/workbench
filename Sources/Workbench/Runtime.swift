@@ -196,11 +196,19 @@ enum PaneEvent: Sendable {
         return strings.isEmpty ? nil : strings.joined(separator: " ")
     }
 
-    /// Bare when every character is shell-safe, else POSIX single-quoted. Quoting (not a list of characters to
-    /// backslash) means nothing in a filename, newlines included, can end the word and run as a command.
+    /// Bare when every character is shell-safe, else POSIX single-quoted, or ANSI-C $'…' quoted when it holds a control
+    /// character. Quoting (not a list of characters to backslash) means nothing in a filename can end the word and run.
     nonisolated static func shellEscape(_ path: String) -> String {
         if !path.isEmpty, path.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || "/._-+,:@%=".contains($0)) }) {
             return path
+        }
+        // A control character (newline, ESC, C1) typed raw into a terminal could act on the line editor, so a name
+        // holding one is spelled out in ANSI-C quoting, which the shell reads back as the same bytes.
+        if path.unicodeScalars.contains(where: { $0.value < 0x20 || (0x7F...0x9F).contains($0.value) }) {
+            return "$'" + path.unicodeScalars.map { c -> String in
+                if c.value < 0x20 || (0x7F...0x9F).contains(c.value) { return String(c).utf8.map { String(format: "\\x%02x", $0) }.joined() }
+                return c == "\\" || c == "'" ? "\\" + String(c) : String(c)
+            }.joined() + "'"
         }
         return "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }

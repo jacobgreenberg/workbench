@@ -238,7 +238,8 @@ func themeSelfCheck() {
     assert(WorkspaceController.displayTitle("vim notes.md") == "vim notes.md")
     assert(Runtime.shellEscape("/tmp/shot-1.png") == "/tmp/shot-1.png")
     assert(Runtime.shellEscape("/a b/c'd.png") == "'/a b/c'\\''d.png'")
-    assert(Runtime.shellEscape("/x\nrm -rf ~") == "'/x\nrm -rf ~'")
+    assert(Runtime.shellEscape("/x\nrm -rf ~") == "$'/x\\x0arm -rf ~'")
+    assert(Runtime.shellEscape("/a'\u{1b}[2J\u{85}\\b") == "$'/a\\'\\x1b[2J\\xc2\\x85\\\\b'")
     assert(Theme.parse("rgb(1e100, 0, 0)") == nil && Theme.parse("rgba(1, 2, 3, 2)") == nil)
     let t = Theme(id: "x", name: "x", type: "dark", ui: [:], terminal: [
         "background": "#1E272C", "selectionBackground": "rgba(84, 110, 122, 0.5)", "black": "#546E7A",
