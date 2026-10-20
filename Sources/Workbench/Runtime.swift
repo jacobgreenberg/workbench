@@ -94,7 +94,7 @@ enum PaneEvent: Sendable {
         }
     }
 
-    private nonisolated static func post(_ id: PaneID, _ event: PaneEvent) {
+    nonisolated static func post(_ id: PaneID, _ event: PaneEvent) {
         DispatchQueue.main.async {
             MainActor.assumeIsolated { Runtime.current?.deliver(id, event) }
         }

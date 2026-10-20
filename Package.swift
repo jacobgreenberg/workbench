@@ -32,6 +32,7 @@ let package = Package(
     ],
     targets: [
         .binaryTarget(name: "GhosttyKit", path: "vendor/GhosttyKit.xcframework"),
+        .executableTarget(name: "wbhost", path: "Sources/wbhost"),
         .executableTarget(
             name: "Workbench",
             dependencies: [

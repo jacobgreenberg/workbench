@@ -70,8 +70,9 @@ enum PaneEvent: Sendable {
     func setFocus(_ focused: Bool)       // ghostty_app_set_focus
 }
 
+// Session.swift — surviving sessions. Ghostty runs in manual IO mode (io_mode MANUAL: spawns nothing; output in via ghostty_surface_process_output, keys/replies out via io_write_cb). Each terminal pane's shell is owned by a `wbhost` process (Sources/wbhost/main.c, protocol in its header; bundled as Contents/Helpers/WorkbenchHost) listening on Store.directory/s/<PANE-UUID>, spawned with posix_spawn (setsid, no inherited fds) via Session.shell (the env/argv Ghostty's exec backend built: TERM/TERMINFO, zsh shell integration, login wrapper). SurfaceView init: Session.attach(id) else Session.spawn; the host replays recent output on attach (writes during the replay are dropped: they are Ghostty's replies to old queries). Socket EOF = shell ended → closeRequested(processAlive: false). Quit ends sessions (close → kill); a crash leaves them running and the next launch reattaches; "Restart Workbench" (app menu) sets Session.keepOnClose so closing detaches, then relaunches. At launch Session.endOrphans(keeping:) kills hosts whose pane is no longer in the layout. The fd is closed only on the write queue by kill()/detach(), after stopReading().
 // SurfaceView.swift
-final class SurfaceBox: Sendable { let id: PaneID; init(id: PaneID) }   // C userdata (passUnretained); owned by SurfaceView
+final class SurfaceBox: Sendable { let id: PaneID; let session: Mutex<Session?>; init(id: PaneID) }   // C userdata (passUnretained); owned by SurfaceView
 @MainActor final class SurfaceView: NSView, NSTextInputClient {
     let paneID: PaneID
     let box: SurfaceBox
@@ -88,7 +89,7 @@ final class SurfaceBox: Sendable { let id: PaneID; init(id: PaneID) }   // C use
     func setCursorVisibility(_ visible: Bool)
     @discardableResult func perform(_ action: String) -> Bool   // ghostty_surface_binding_action
     var needsConfirmQuit: Bool
-    func close()                         // idempotent: request_process_termination, then ghostty_surface_free on a utility queue; the view stays retained by that closure until free returns
+    func close()                         // idempotent: session.stopReading then kill() (ends the shell; detach() while Session.keepOnClose, i.e. Restart), then ghostty_surface_free on a utility queue; the view stays retained by that closure until free returns
 }
 
 // Input.swift — ports of Ghostty helpers

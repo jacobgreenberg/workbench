@@ -13,6 +13,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/ghostty"
 cp .build/release/Workbench "$APP/Contents/MacOS/Workbench"
 cp -R .build/release/TreeSitter*.bundle "$APP/Contents/Resources/"   # grammar highlight queries (Syntax.swift)
 mkdir -p "$APP/Contents/Helpers"; ln -s ../MacOS/Workbench "$APP/Contents/Helpers/pane"
+cp .build/release/wbhost "$APP/Contents/Helpers/WorkbenchHost"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp -R Resources/themes "$APP/Contents/Resources/themes"
 cp -R Resources/fileicons "$APP/Contents/Resources/fileicons"
@@ -23,6 +24,7 @@ cp -R "$SI" "$APP/Contents/Resources/ghostty/shell-integration"
 # A real identity keeps macOS privacy grants (Full Disk Access, Documents, ...) across rebuilds: an ad-hoc
 # signature's designated requirement is the cdhash, which every build changes, so each build re-prompted.
 ID="${WORKBENCH_SIGN_ID:-$(security find-identity -v -p codesigning | awk -F'"' '/Apple Development/ {print $2; exit}')}"
+codesign --force --sign "${ID:--}" --options runtime --identifier com.jgreenberg.workbench.host "$APP/Contents/Helpers/WorkbenchHost"   # its own privacy grants (Session.spawn disclaims)
 codesign --force --sign "${ID:--}" --options runtime "$APP"
 echo "built $APP"
 

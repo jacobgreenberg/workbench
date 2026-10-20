@@ -365,14 +365,15 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         ]
     }
 
-    /// Only panes with an agent to resume start at launch (unrealized, 2 per runloop turn: each forks a login
-    /// shell). Plain shells and markdown panes are created when first shown, by render().
+    /// Only panes with an agent to resume, or a session still running (it survived a crash or Restart), start at
+    /// launch (unrealized, 2 per runloop turn: each forks a login shell or reattaches). Plain shells and markdown panes
+    /// are created when first shown, by render(). Every running session thus has a view, so closing or quitting ends it.
     private func restore() {
         render()
         let active = Set(activeTab?.root.leaves.map(\.id) ?? [])
         var pending = store.layout.projects.flatMap { $0.tabs.flatMap { $0.root.leaves } }.filter {
-            if case .terminal(_, .some) = $0.kind { return !active.contains($0.id) }
-            return false
+            guard case .terminal(_, let launch) = $0.kind, !active.contains($0.id) else { return false }
+            return launch != nil || FileManager.default.fileExists(atPath: Session.path($0.id))
         }.map(\.id)
         func step() {
             // Re-resolve each batch: a pane may have been closed, or shown and created by render(), since launch.

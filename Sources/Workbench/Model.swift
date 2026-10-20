@@ -313,6 +313,9 @@ func modelSelfCheck() {
     defer { try? FileManager.default.removeItem(at: dir) }
     let md = dir.appendingPathComponent("a.md"), empty = dir.appendingPathComponent("e.md"), fifo = dir.appendingPathComponent("f.md")
     try! Data("# hi".utf8).write(to: md); try! Data().write(to: empty); mkfifo(fifo.path, 0o600)
+    let sh = Session.shell(cwd: "/tmp/x", paneEnv: ["PANE_ID": "P"], base: ["SHELL": "/bin/zsh", "ZDOTDIR": "/z", "GHOSTTY_RESOURCES_DIR": "/r/ghostty"])
+    assert(sh.env["TERM"] == "xterm-ghostty" && sh.env["ZDOTDIR"] == "/r/ghostty/shell-integration/zsh" && sh.env["GHOSTTY_ZSH_ZDOTDIR"] == "/z")
+    assert(sh.env["PWD"] == "/tmp/x" && sh.env["PANE_ID"] == "P" && sh.argv[0] == "/usr/bin/login")
     assert(FilePaneView.load(md.path) == "# hi" && FilePaneView.load(empty.path) == "")
     assert(FilePaneView.load(fifo.path).hasPrefix("Cannot preview"))   // must not block
 

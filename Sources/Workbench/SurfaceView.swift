@@ -1,9 +1,11 @@
 import AppKit
 import Carbon
 @preconcurrency import GhosttyKit
+import Synchronization
 
 final class SurfaceBox: Sendable {
     let id: PaneID
+    let session = Mutex<Session?>(nil)
     init(id: PaneID) { self.id = id }
 }
 
@@ -61,35 +63,11 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         c.context = GHOSTTY_SURFACE_CONTEXT_SPLIT
         c.font_size = 0
 
-        let cwdC = strdup(cwd)
-        let inputC = initialInput.map { strdup($0) }
-        var keyCs: [UnsafeMutablePointer<CChar>?] = []
-        var valueCs: [UnsafeMutablePointer<CChar>?] = []
-        var envVars: [ghostty_env_var_s] = []
-        for (k, v) in env {
-            let kc = strdup(k)
-            let vc = strdup(v)
-            keyCs.append(kc)
-            valueCs.append(vc)
-            envVars.append(ghostty_env_var_s(key: UnsafePointer(kc), value: UnsafePointer(vc)))
-        }
-        defer {
-            free(cwdC)
-            if let inputC { free(inputC) }
-            keyCs.forEach { free($0) }
-            valueCs.forEach { free($0) }
-        }
-        c.working_directory = UnsafePointer(cwdC)
-        c.initial_input = inputC.flatMap { UnsafePointer($0) }
+        c.io_mode = GHOSTTY_SURFACE_IO_MANUAL
+        c.io_write_userdata = c.userdata
+        c.io_write_cb = Self.ioWrite
 
-        let created: ghostty_surface_t? = envVars.withUnsafeMutableBufferPointer { buf in
-            c.env_vars = buf.baseAddress
-            c.env_var_count = buf.count
-            if let scrollbackLimit {
-                return ghostty_surface_new_with_scrollback_limit(app, &c, scrollbackLimit)
-            }
-            return ghostty_surface_new(app, &c)
-        }
+        let created: ghostty_surface_t? = scrollbackLimit.map { ghostty_surface_new_with_scrollback_limit(app, &c, $0) } ?? ghostty_surface_new(app, &c)
         guard let created else {
             NSLog("Workbench: ghostty_surface_new failed for pane \(id)")
             return
@@ -99,7 +77,37 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         // and a 200 ms termios poll, so only the first responder in the key window is told it is focused.
         ghostty_surface_set_focus(created, false)
 
+        let size = ghostty_surface_size(created)
+        let cols = size.columns > 0 ? size.columns : 80, rows = size.rows > 0 ? size.rows : 24
+        let attached = Session.attach(id)
+        let (argv, shellEnv) = Session.shell(cwd: cwd, paneEnv: env)
+        if let grid = attached?.grid, size.cell_width_px > 0, size.cell_height_px > 0 {
+            // Play the replay on the grid it was drawn for (the layout resizes after, as for any live terminal):
+            // the extra pixels beyond whole cells are padding, kept as they are.
+            let usedW = UInt32(size.columns) * size.cell_width_px, usedH = UInt32(size.rows) * size.cell_height_px
+            let padW = size.width_px > usedW ? size.width_px - usedW : 0, padH = size.height_px > usedH ? size.height_px - usedH : 0
+            ghostty_surface_set_size(created, UInt32(grid.cols) * size.cell_width_px + padW, UInt32(grid.rows) * size.cell_height_px + padH)
+        }
+        if let session = attached ?? Session.spawn(id, cwd: cwd, argv: argv, env: shellEnv, cols: cols, rows: rows) {
+            if attached == nil, let initialInput { let d = Array(initialInput.utf8); d.withUnsafeBytes { session.write($0) } }
+            box.session.withLock { $0 = session }
+            nonisolated(unsafe) let surfacePtr = created
+            let paneID = id
+            session.start(output: { ghostty_surface_process_output(surfacePtr, $0.baseAddress?.assumingMemoryBound(to: CChar.self), UInt($0.count)) },
+                          ended: { Runtime.post(paneID, .closeRequested(processAlive: false)) })
+        } else {
+            NSLog("Workbench: no session for pane \(id)")
+        }
+
         updateTrackingAreas()
+    }
+
+    /// Ghostty's bytes for the shell (keys, pastes, replies to queries): from main, or from the session's reader thread
+    /// inside process_output. nonisolated: a closure written inside init would inherit @MainActor and trap off main.
+    private nonisolated static let ioWrite: ghostty_io_write_cb = { ud, bytes, len in
+        guard let ud, let bytes else { return }
+        let box = Unmanaged<SurfaceBox>.fromOpaque(ud).takeUnretainedValue()
+        box.session.withLock { $0 }?.write(UnsafeRawBufferPointer(start: bytes, count: Int(len)))
     }
 
     required init?(coder: NSCoder) {
@@ -183,7 +191,10 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         screenObserver = nil
         trackingAreas.forEach { removeTrackingArea($0) }
         guard let s = surface else { return }
-        ghostty_surface_request_process_termination(s)
+        if let session = box.session.withLock({ let x = $0; $0 = nil; return x }) {
+            session.stopReading()
+            if Session.keepOnClose { session.detach() } else { session.kill() }
+        }
         surface = nil
         nonisolated(unsafe) let ptr = s
         let view = self
@@ -270,6 +281,8 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         guard force || w != sentSize.w || h != sentSize.h else { return }
         sentSize = (w, h)
         ghostty_surface_set_size(surface, w, h)
+        let s = ghostty_surface_size(surface)
+        box.session.withLock { $0 }?.resize(cols: s.columns, rows: s.rows, width: UInt16(clamping: s.width_px), height: UInt16(clamping: s.height_px))
     }
 
     func refresh() {

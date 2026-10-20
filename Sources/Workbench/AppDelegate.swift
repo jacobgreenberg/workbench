@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var control: ControlServer?
     private var settings: SettingsWindowController?
     private var pendingRestore: (backup: Backup, rollback: URL)?   // Settings > Backup import: installed at quit (rollback = the setup saved just before), then we relaunch into it
+    private var relaunchAfterQuit = false   // Restart Workbench: sessions stay alive, we reopen after exit
     private let themeMenu = NSMenu(title: "Theme")
     private var reserved: [String: NSMenuItem] = [:]   // "key|mods" → item; looked up on every ⌘/⌃ keyDown in a terminal
 
@@ -37,6 +38,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         NSApp.activate()
 
+        var live = Set<PaneID>()
+        for p in store.layout.projects { for t in p.tabs { for leaf in t.root.leaves { if case .terminal = leaf.kind { live.insert(leaf.id) } } } }
+        DispatchQueue.global(qos: .utility).async { [live] in Session.endOrphans(keeping: live) }
+
         if let data = readFile(Store.restoreError, cap: 1 << 16) {
             try? FileManager.default.removeItem(at: Store.restoreError)
             let alert = NSAlert()
@@ -54,7 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func applicationDidResignActive(_ notification: Notification) { runtime?.setFocus(false) }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard pendingRestore == nil, workspace.needsConfirmQuit else { return .terminateNow }   // an import already confirmed
+        guard pendingRestore == nil, !Session.keepOnClose, workspace.needsConfirmQuit else { return .terminateNow }   // an import already confirmed
         let alert = NSAlert()
         alert.messageText = "Quit Workbench?"
         alert.informativeText = "Running processes will be closed. Claude and Codex sessions resume on next launch."
@@ -68,6 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func applicationWillTerminate(_ notification: Notification) {
         control?.stop()
         workspace.terminateAll()
+        Session.waitForEnds(timeout: 5)   // hosts give a shell up to 3 s to exit; under Restart nothing is ending
         if let (backup, rollback) = pendingRestore {
             do { try backup.install(backupRemote: store.layout.backupRemote) } catch {
                 let previous = readFile(rollback, cap: Backup.maxSize).flatMap { try? Backup.decode($0) }
@@ -79,12 +85,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             relaunch()
         } else {
             BackupSync.shared.flush(store)   // a change still waiting for its debounce
+            if relaunchAfterQuit { relaunch() }
         }
     }
 
     /// Replaces the whole setup with `backup`: quit (surfaces retire, the old layout saves), install, reopen; if installing fails, the saved setup is put back and the error shown after relaunch.
     func restore(_ backup: Backup, rollback: URL) {
         pendingRestore = (backup, rollback)
+        NSApp.terminate(nil)
+    }
+
+    @objc private func restartWorkbench(_ sender: Any?) {
+        Session.keepOnClose = true
+        relaunchAfterQuit = true
         NSApp.terminate(nil)
     }
 
@@ -187,6 +200,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             item("Settings…", #selector(openSettings(_:)), ","),
             .separator(),
             item("Hide Workbench", #selector(NSApplication.hide(_:)), "h"),
+            item("Restart Workbench", #selector(restartWorkbench(_:)), "", reserved: false),
             item("Quit Workbench", #selector(NSApplication.terminate(_:)), "q"),
         ]))
         main.addItem(menu("File", [
