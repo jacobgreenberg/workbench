@@ -1485,6 +1485,20 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                 }
             }
             return "{}"
+        case "key":      // test harness: a real key press (`code` virtual key code, `chars`, `mods` of "cmd,shift,opt,ctrl") through window.sendEvent
+            guard let id = pane, let v = views[id], let w = v.window, let code = msg["code"].flatMap(UInt16.init) else { return #"{"error":"pane not shown"}"# }
+            let names: [String: NSEvent.ModifierFlags] = ["cmd": .command, "shift": .shift, "opt": .option, "ctrl": .control]
+            let mods = (msg["mods"] ?? "").split(separator: ",").reduce(into: NSEvent.ModifierFlags()) { $0.insert(names[String($1)] ?? []) }
+            let chars = msg["chars"] ?? ""
+            DispatchQueue.main.async {
+                w.makeFirstResponder(v)
+                for type in [NSEvent.EventType.keyDown, .keyUp] {
+                    w.sendEvent(NSEvent.keyEvent(with: type, location: .zero, modifierFlags: mods, timestamp: ProcessInfo.processInfo.systemUptime,
+                                                 windowNumber: w.windowNumber, context: nil, characters: chars,
+                                                 charactersIgnoringModifiers: chars, isARepeat: false, keyCode: code)!)
+                }
+            }
+            return "{}"
         case "drag":     // test harness: drag `pane` by its header to the `edge` (left/right/up/down) side of `target`
             guard let id = pane, let src = views[id]?.superview, let w = src.window,
                   let dst = msg["target"].flatMap(UUID.init(uuidString:)).flatMap({ views[$0] }) else { return #"{"error":"pane not shown"}"# }
