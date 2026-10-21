@@ -249,6 +249,10 @@ final class Session: @unchecked Sendable {
         closeFD()
     }
 
+    /// At EOF: a host removes its socket on every way it ends a session, so one left behind means it was killed (a
+    /// broad pkill; force-quitting an app launched from the pane takes the pane's coalition with it). attach() clears it.
+    static func wasKilled(_ id: PaneID) -> Bool { FileManager.default.fileExists(atPath: path(id)) }
+
     /// Ends every host in the directory whose pane is not in `ids`. Off main.
     static func endOrphans(keeping ids: Set<PaneID>) {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []

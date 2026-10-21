@@ -437,7 +437,7 @@ static void listen_on(const char *path) {
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) return;
     if (bind(fd, (struct sockaddr *)&sa, sizeof sa) < 0 || chmod(path, 0600) < 0 || listen(fd, 4) < 0 ||
-        stat(path, &st) < 0 || fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) { close(fd); return; }
+        stat(path, &st) < 0 || fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) { close(fd); unlink(path); return; }   // no stray path: the app reads one as "killed"
     listener = fd; listen_ino = st.st_ino;
 }
 

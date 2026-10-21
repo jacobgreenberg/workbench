@@ -94,7 +94,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
             nonisolated(unsafe) let surfacePtr = created
             let paneID = id
             session.start(output: { ghostty_surface_process_output(surfacePtr, $0.baseAddress?.assumingMemoryBound(to: CChar.self), UInt($0.count)) },
-                          ended: { Runtime.post(paneID, .closeRequested(processAlive: false)) })
+                          ended: { Runtime.post(paneID, Session.wasKilled(paneID) ? .sessionLost : .closeRequested(processAlive: false)) })
         } else {
             NSLog("Workbench: no session for pane \(id)")
         }
@@ -162,6 +162,12 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
     func perform(_ action: String) -> Bool {
         guard let s = surface, !closed else { return false }
         return action.withCString { ghostty_surface_binding_action(s, $0, UInt(action.utf8.count)) }
+    }
+
+    /// Writes `text` onto the screen as if the shell had printed it (nothing reaches the shell).
+    func show(_ text: String) {
+        guard let s = surface, !closed else { return }
+        text.withCString { ghostty_surface_process_output(s, $0, UInt(text.utf8.count)) }
     }
 
     /// The visible screen as text (an agent on the alternate screen keeps its history here, not in scrollback).

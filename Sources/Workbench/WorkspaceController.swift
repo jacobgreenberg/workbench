@@ -386,6 +386,22 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         if !pending.isEmpty { DispatchQueue.main.async { MainActor.assumeIsolated { step() } } }
     }
 
+    /// The pane's host was killed: a new session in the same pane reruns its saved command (an agent resumes), so the
+    /// tab survives. Killed again within 30 s: the pane stays as it was, with a note, instead of restarting in a loop.
+    private func restartLost(_ id: PaneID) {
+        guard let old = views[id] as? SurfaceView, spec(id) != nil else { return }
+        if let last = lostAt[id], Date().timeIntervalSince(last) < 30 {
+            return old.show("\r\n[Workbench: this terminal's session was killed]\r\n")
+        }
+        lostAt[id] = Date()
+        NSLog("Workbench: session for pane \(id) was killed; restarting it")
+        destroy(id)
+        createHidden(id)
+        if activeTab?.root.contains(id) == true { tree.clear() }   // re-place the new view
+        render()
+    }
+    private var lostAt: [PaneID: Date] = [:]
+
     /// A pane outside the visible tab, started without a renderer; no-op if it already exists or is gone.
     private func createHidden(_ id: PaneID) {
         guard views[id] == nil, let spec = spec(id) else { return }
@@ -739,6 +755,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             openURL(url, from: id)
         case .closeRequested:
             closePane(id, confirm: false)
+        case .sessionLost:
+            restartLost(id)
         case .startSearch, .endSearch, .searchTotal, .searchSelected:
             if transcript == nil { terminalSearchEvent(id, event) }
         }

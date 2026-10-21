@@ -6,6 +6,7 @@ enum PaneEvent: Sendable {
     case title(String), pwd(String), bell, notification(title: String, body: String)
     case commandFinished(exitCode: Int, durationNs: UInt64), progress(active: Bool)
     case openURL(String), closeRequested(processAlive: Bool)
+    case sessionLost   // the pane's host was killed, not ended: restart the pane instead of closing it
     case startSearch(String), endSearch, searchTotal(Int), searchSelected(Int)
 }
 
