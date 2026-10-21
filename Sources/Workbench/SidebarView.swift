@@ -101,6 +101,16 @@ private final class SelectionRowView: NSTableRowView {
     override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }
 }
 
+let vsCodeBundle = "com.microsoft.VSCode"
+
+/// Context menus offer an app only when this Mac has it.
+@MainActor func hasApp(_ bundle: String) -> Bool { NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) != nil }
+
+@MainActor func openWith(_ bundle: String, _ url: URL) {
+    guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) else { return }
+    NSWorkspace.shared.open([url], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
+}
+
 /// The sidebar: the workspace rail at the leading edge, and beside it the active workspace's projects, a native
 /// source list inside the split view's sidebar item (AppKit supplies the glass, the collapse and the insets).
 /// The workspace's name as a large title, then a segmented control that switches between active and hidden
@@ -210,7 +220,7 @@ private final class SelectionRowView: NSTableRowView {
                 menu.addItem(move)
             }
             menu.addItem(.separator())
-            for (title, bundle) in Self.openWith where NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) != nil {
+            for (title, bundle) in [("Open in Finder", "com.apple.finder"), ("Open in VS Code", vsCodeBundle)] where hasApp(bundle) {
                 let item = NSMenuItem(title: title, action: #selector(openWithTapped), keyEquivalent: "")
                 item.representedObject = bundle
                 menu.addItem(item)
@@ -229,14 +239,9 @@ private final class SelectionRowView: NSTableRowView {
         NSPasteboard.general.setString(rows[table.clickedRow].path, forType: .string)
     }
 
-    /// Apps the project folder can be opened in; one missing from this Mac is left out of the menu.
-    private static let openWith = [("Open in Finder", "com.apple.finder"), ("Open in VS Code", "com.microsoft.VSCode")]
-
     @objc private func openWithTapped(_ sender: NSMenuItem) {
-        guard rows.indices.contains(table.clickedRow), let bundle = sender.representedObject as? String,
-              let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) else { return }
-        NSWorkspace.shared.open([URL(fileURLWithPath: rows[table.clickedRow].path)], withApplicationAt: app,
-                                configuration: NSWorkspace.OpenConfiguration())
+        guard rows.indices.contains(table.clickedRow), let bundle = sender.representedObject as? String else { return }
+        openWith(bundle, URL(fileURLWithPath: rows[table.clickedRow].path))
     }
 
     @objc private func removeTapped() { if rows.indices.contains(table.clickedRow) { onRemove?(table.clickedRow) } }

@@ -302,12 +302,21 @@ private let clutterNames: Set<String> = ["node_modules", "build", "dist", "Deriv
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         guard outline.clickedRow >= 0, let n = outline.item(atRow: outline.clickedRow) as? Node else { return }
-        for (title, action) in [("Reveal in Finder", #selector(reveal(_:))), ("Copy Path", #selector(copyPath(_:))), ("Open with Default App", #selector(openDefault(_:)))] {
+        var items = [("Copy Path", #selector(copyPath(_:))), ("", nil), ("Reveal in Finder", #selector(reveal(_:)))]
+        if hasApp(vsCodeBundle) { items.append(("Open in VS Code", #selector(openInVSCode(_:)))) }
+        items.append(("Open with Default App", #selector(openDefault(_:))))
+        for (title, action) in items {
+            guard let action else { menu.addItem(.separator()); continue }
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
             item.target = self
             item.representedObject = n.url
             menu.addItem(item)
         }
+    }
+
+    @objc private func openInVSCode(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        openWith(vsCodeBundle, url)
     }
 
     @objc private func reveal(_ sender: NSMenuItem) {
