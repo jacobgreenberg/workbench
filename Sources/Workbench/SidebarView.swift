@@ -106,6 +106,7 @@ let vsCodeBundle = "com.microsoft.VSCode"
 /// Context menus offer an app only when this Mac has it.
 @MainActor func hasApp(_ bundle: String) -> Bool { NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) != nil }
 
+/// Opens `url` with the app, if this Mac has it.
 @MainActor func openWith(_ bundle: String, _ url: URL) {
     guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) else { return }
     NSWorkspace.shared.open([url], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
@@ -220,11 +221,8 @@ let vsCodeBundle = "com.microsoft.VSCode"
                 menu.addItem(move)
             }
             menu.addItem(.separator())
-            for (title, bundle) in [("Open in Finder", "com.apple.finder"), ("Open in VS Code", vsCodeBundle)] where hasApp(bundle) {
-                let item = NSMenuItem(title: title, action: #selector(openWithTapped), keyEquivalent: "")
-                item.representedObject = bundle
-                menu.addItem(item)
-            }
+            menu.addItem(NSMenuItem(title: "Reveal in Finder", action: #selector(revealTapped), keyEquivalent: ""))
+            if hasApp(vsCodeBundle) { menu.addItem(NSMenuItem(title: "Open in VS Code", action: #selector(openInVSCodeTapped), keyEquivalent: "")) }
             menu.addItem(.separator())
             menu.addItem(NSMenuItem(title: "Remove Project…", action: #selector(removeTapped), keyEquivalent: ""))
         }
@@ -239,9 +237,14 @@ let vsCodeBundle = "com.microsoft.VSCode"
         NSPasteboard.general.setString(rows[table.clickedRow].path, forType: .string)
     }
 
-    @objc private func openWithTapped(_ sender: NSMenuItem) {
-        guard rows.indices.contains(table.clickedRow), let bundle = sender.representedObject as? String else { return }
-        openWith(bundle, URL(fileURLWithPath: rows[table.clickedRow].path))
+    @objc private func revealTapped() {
+        guard rows.indices.contains(table.clickedRow) else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: rows[table.clickedRow].path)])
+    }
+
+    @objc private func openInVSCodeTapped() {
+        guard rows.indices.contains(table.clickedRow) else { return }
+        openWith(vsCodeBundle, URL(fileURLWithPath: rows[table.clickedRow].path))
     }
 
     @objc private func removeTapped() { if rows.indices.contains(table.clickedRow) { onRemove?(table.clickedRow) } }
