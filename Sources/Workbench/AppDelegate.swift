@@ -211,7 +211,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             .separator(),
             item("Add Project…", #selector(w.addProject(_:)), "o", [.command, .shift]),
             item("Open File…", #selector(w.openFileDialog(_:)), "o", [.command, .option]),
-            item("Save", #selector(FilePaneView.saveDocument(_:)), "s", reserved: false),
             .separator(),
             item("Close Pane", #selector(w.closePane(_:)), "w"),
             item("Close Tab", #selector(w.closeTab(_:)), "w", [.command, .shift]),

@@ -1357,9 +1357,6 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         ])
         previewFile = f
         previewTitle.stringValue = (path as NSString).abbreviatingWithTildeInPath
-        f.onDirtyChange = { [unowned self] dirty in
-            previewTitle.stringValue = (dirty ? "● " : "") + (path as NSString).abbreviatingWithTildeInPath
-        }
         previewTitle.toolTip = path
         showPreview()
     }
@@ -1606,7 +1603,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
 
     private func closePreview() {
         guard let f = previewFile else { return NSSound.beep() }
-        f.close()   // autosaves
+        f.close()
         f.removeFromSuperview()
         previewFile = nil
         let tree = column.frame.width
