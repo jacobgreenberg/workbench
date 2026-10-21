@@ -68,6 +68,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private var todoProject: UUID?   // whose TODOs the list shows
     private let previewTitle = NSTextField(labelWithString: "No file. ⌘-click a path to preview it here.")
     private var previewFile: FilePaneView?
+    private weak var scratchItem: NSToolbarItem?   // badged with the open scratch tabs
 
     init(store: Store, runtime: Runtime) {
         self.store = store
@@ -244,8 +245,6 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         sidebar.onRemove = { [unowned self] i in project(atRow: i).map(removeProject) }
         sidebar.onShowHidden = { [unowned self] on in setShowHidden(on) }
         sidebar.onToggleHidden = { [unowned self] i in toggleHidden(row: i) }
-        sidebar.onSelectScratch = { [unowned self] i in scratch(atRow: i).map(selectProject) }
-        sidebar.onCloseScratch = { [unowned self] i in scratch(atRow: i).map(closeScratch) }
         tabBar.onSelect = { [unowned self] i in selectTab(i) }
         tabBar.onClose = { [unowned self] i in closeTab(at: i) }
         tabBar.onNew = { [unowned self] in newTab(nil) }
@@ -292,7 +291,6 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     }
     private var workspaces: [Workspace] { store.layout.workspaces ?? [] }
     private func project(atRow r: Int) -> Int? { let v = visibleProjects; return v.indices.contains(r) ? v[r] : nil }
-    private func scratch(atRow r: Int) -> Int? { let v = scratchProjectIndices(store.layout.projects); return v.indices.contains(r) ? v[r] : nil }
 
     private var activeProjectIndex: Int? {
         store.layout.projects.indices.contains(store.layout.activeProject) ? store.layout.activeProject : nil
@@ -543,12 +541,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                           emoji: w.emoji, color: w.color,
                           status: projects.filter { $0.workspace == w.id }.flatMap { tabItems($0).map(\.status) }.max() ?? .idle)
         }, selected: workspaces.firstIndex { $0.id == store.layout.activeWorkspace } ?? -1, theme: theme)
-        let scratches = scratchProjectIndices(projects)
-        sidebar.updateScratch(rows: scratches.enumerated().map { n, i in
-            let p = projects[i]
-            return SidebarRow(id: p.id, name: scratches.count > 1 ? "Scratch Terminal \(n + 1)" : "Scratch Terminal", path: p.path,
-                              status: tabItems(p).map(\.status).max() ?? .idle, tabCount: p.tabs.count)
-        }, selected: scratches.firstIndex(of: store.layout.activeProject) ?? -1, theme: theme)
+        let scratchTabs = scratchProjectIndices(projects).reduce(0) { $0 + projects[$1].tabs.count }
+        scratchItem?.badge = scratchTabs > 0 ? .count(scratchTabs) : nil
         if let p = activeProjectIndex {
             let project = projects[p]
             tabBar.update(items: tabItems(project), selected: project.activeTab, theme: theme)
@@ -1178,19 +1172,6 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         }
     }
 
-    /// Closes a scratch terminal: no project sheet, only the usual running-process confirmation.
-    private func closeScratch(_ index: Int) {
-        guard store.layout.projects.indices.contains(index) else { return }
-        let id = store.layout.projects[index].id
-        let panes = store.layout.projects[index].tabs.flatMap { $0.root.leaves.map(\.id) }
-        if needsConfirm(panes), !confirm("Close this scratch terminal?") { return }
-        guard let i = store.layout.projects.firstIndex(where: { $0.id == id }) else { return }   // the modal may have changed things
-        store.layout.projects[i].tabs.flatMap { $0.root.leaves.map(\.id) }.forEach(destroy)
-        dropProject(i)
-        store.changed()
-        render()
-    }
-
     // MARK: - Workspaces
 
     @objc func selectWorkspaceByTag(_ sender: NSMenuItem) { selectWorkspace(sender.tag - 1) }
@@ -1579,6 +1560,12 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     // MARK: - Menu actions
 
     @objc func newTab(_ sender: Any?) { newTab(kind: .terminal(cwd: cwdForNewPane(), launch: nil)) }
+    /// The toolbar's terminal button: goes to the open scratch terminal, or adds a tab when it is already shown (or none is open).
+    @objc func showScratchTerminal(_ sender: Any?) {
+        let i = store.layout.projects.firstIndex { $0.scratch == true }
+        guard let i, i != store.layout.activeProject else { return newScratchTerminal(sender) }
+        selectProject(i)
+    }
     @objc func newScratchTerminal(_ sender: Any?) {
         if let i = store.layout.projects.firstIndex(where: { $0.scratch == true }) {
             activate(i)
@@ -1797,11 +1784,12 @@ extension WorkspaceController: NSToolbarDelegate {
             return item
         }
         if id == .newScratch {
-            item.label = "New Scratch Terminal"
-            item.toolTip = "New Scratch Terminal (⇧⌘N)"
-            item.image = NSImage(systemSymbolName: "apple.terminal", accessibilityDescription: "New Scratch Terminal")
+            item.label = "Scratch Terminal"
+            item.toolTip = "Scratch Terminal (⇧⌘N for a new one)"
+            item.image = NSImage(systemSymbolName: "apple.terminal", accessibilityDescription: "Scratch Terminal")
             item.target = self
-            item.action = #selector(newScratchTerminal(_:))
+            item.action = #selector(showScratchTerminal(_:))
+            scratchItem = item
             return item
         }
         if id == .projectTitle {
