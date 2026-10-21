@@ -210,6 +210,12 @@ private final class SelectionRowView: NSTableRowView {
                 menu.addItem(move)
             }
             menu.addItem(.separator())
+            for (title, bundle) in Self.openWith where NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) != nil {
+                let item = NSMenuItem(title: title, action: #selector(openWithTapped), keyEquivalent: "")
+                item.representedObject = bundle
+                menu.addItem(item)
+            }
+            menu.addItem(.separator())
             menu.addItem(NSMenuItem(title: "Remove Project…", action: #selector(removeTapped), keyEquivalent: ""))
         }
         menu.items.forEach { $0.target = self }
@@ -221,6 +227,16 @@ private final class SelectionRowView: NSTableRowView {
         guard rows.indices.contains(table.clickedRow) else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(rows[table.clickedRow].path, forType: .string)
+    }
+
+    /// Apps the project folder can be opened in; one missing from this Mac is left out of the menu.
+    private static let openWith = [("Open in Finder", "com.apple.finder"), ("Open in VS Code", "com.microsoft.VSCode")]
+
+    @objc private func openWithTapped(_ sender: NSMenuItem) {
+        guard rows.indices.contains(table.clickedRow), let bundle = sender.representedObject as? String,
+              let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) else { return }
+        NSWorkspace.shared.open([URL(fileURLWithPath: rows[table.clickedRow].path)], withApplicationAt: app,
+                                configuration: NSWorkspace.OpenConfiguration())
     }
 
     @objc private func removeTapped() { if rows.indices.contains(table.clickedRow) { onRemove?(table.clickedRow) } }
