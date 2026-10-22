@@ -288,7 +288,7 @@ private let clutterNames: Set<String> = ["node_modules", "build", "dist", "Deriv
         if outline.isItemExpanded(n) { outline.collapseItem(n) } else { outline.expandItem(n) }
     }
 
-    /// Selecting a file (click or arrow keys) previews it.
+    /// Selecting a file (click or arrow keys) previews it in the tab's file pane.
     func outlineViewSelectionDidChange(_ notification: Notification) {
         guard let n = outline.item(atRow: outline.selectedRow) as? Node, !n.isDirectory else { return }
         onSelect?(n.url.path)

@@ -50,24 +50,20 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private let findBar = FindBar(frame: .zero)
     private let emptyLabel = NSTextField(labelWithString: "")
     private lazy var tree = SplitTreeView { [unowned self] spec in self.view(for: spec) }
-    /// Native split: glass sidebar (projects) | terminals | inspector (tabs: the project's TODOs, the file ⌘-clicked last, more to come). AppKit owns the
+    /// Native split: glass sidebar (projects) | terminals | inspector (tabs: the project's TODOs, the file tree). AppKit owns the
     /// materials, divider dragging and the collapse animations.
     private let split = NSSplitViewController()
     private var sidebarItem: NSSplitViewItem!
     private var inspectorItem: NSSplitViewItem!
     private var collapseObservation: NSKeyValueObservation?
-    private let preview = NSView()
     private let inspector = NSView()
     private let inspectorTabs = GlassSegments(labels: ["TODO", "Files"])
     private let todoList = TodoListView()
     private let fileTree = FileTreeView()
     private let mainPane = NSView()   // the terminals' split item, toolbar strip included
-    private let files = NSSplitView()   // preview | column (tabs over the TODO list or the tree)
-    private let column = NSView()
+    private let column = NSView()   // the TODO list or the tree, switched by the tabs
     private var fileTreeRoot: String?   // whose folder the tree shows
     private var todoProject: UUID?   // whose TODOs the list shows
-    private let previewTitle = NSTextField(labelWithString: "No file. ⌘-click a path to preview it here.")
-    private var previewFile: FilePaneView?
     private weak var scratchItem: NSToolbarItem?   // badged with the open scratch tabs
 
     init(store: Store, runtime: Runtime) {
@@ -135,20 +131,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         findBar.isHidden = true
         content.addSubview(findBar)
 
-        previewTitle.font = .systemFont(ofSize: 12, weight: .medium)
-        previewTitle.textColor = .secondaryLabelColor
-        previewTitle.lineBreakMode = .byTruncatingMiddle
-        previewTitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)   // a long path truncates instead of widening the preview
-        previewTitle.translatesAutoresizingMaskIntoConstraints = false
-        preview.addSubview(previewTitle)
-        files.isVertical = true
-        files.dividerStyle = .thin
-        files.addArrangedSubview(preview)
-        files.addArrangedSubview(column)
-        files.setHoldingPriority(.defaultLow + 1, forSubviewAt: 1)   // resizing the inspector grows the preview, not the column
-        preview.isHidden = true   // until a file opens; the column fills the inspector
-        files.translatesAutoresizingMaskIntoConstraints = false
-        inspector.addSubview(files)
+        column.translatesAutoresizingMaskIntoConstraints = false
+        inspector.addSubview(column)
         // In the toolbar row but part of the inspector, so it slides with it on collapse (a toolbar item would stay put).
         inspectorTabs.translatesAutoresizingMaskIntoConstraints = false
         inspector.addSubview(inspectorTabs)
@@ -175,13 +159,10 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             emptyLabel.centerYAnchor.constraint(equalTo: content.centerYAnchor),
             findBar.topAnchor.constraint(equalTo: content.topAnchor, constant: 8),
             findBar.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
-            previewTitle.topAnchor.constraint(equalTo: preview.topAnchor, constant: 6),
-            files.topAnchor.constraint(equalTo: inspector.safeAreaLayoutGuide.topAnchor),
-            files.leadingAnchor.constraint(equalTo: inspector.leadingAnchor),
-            files.trailingAnchor.constraint(equalTo: inspector.trailingAnchor),
-            files.bottomAnchor.constraint(equalTo: inspector.bottomAnchor),
-            previewTitle.leadingAnchor.constraint(equalTo: preview.leadingAnchor, constant: 16),
-            previewTitle.trailingAnchor.constraint(lessThanOrEqualTo: preview.trailingAnchor, constant: -16),
+            column.topAnchor.constraint(equalTo: inspector.safeAreaLayoutGuide.topAnchor),
+            column.leadingAnchor.constraint(equalTo: inspector.leadingAnchor),
+            column.trailingAnchor.constraint(equalTo: inspector.trailingAnchor),
+            column.bottomAnchor.constraint(equalTo: inspector.bottomAnchor),
         ])
         for v in [todoList, fileTree] as [NSView] {
             NSLayoutConstraint.activate([
@@ -229,7 +210,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private func wireCallbacks() {
         fileTree.onSelect = { [unowned self] path in
             let file = URL(fileURLWithPath: path).resolvingSymlinksInPath()
-            if previewable(file) { openFile(file.path) }
+            if previewable(file) { openFile(file.path, focus: false) }
         }
         fileTree.onOpen = { [unowned self] path in open(URL(fileURLWithPath: path)) }   // double-click: the ⌘-click policy
         fileTree.onToggleClutter = { [unowned self] hide in
@@ -351,6 +332,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         case let .file(path):
             let m = FilePaneView(id: spec.id, path: path, theme: theme)
             m.onOpenLink = { [unowned self] url in open(url) }
+            m.onFocus = { [unowned self] id in paneFocused(id) }
             v = m
         }
         views[spec.id] = v
@@ -466,7 +448,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     @objc func goBack(_ sender: Any?) { step(-1) }
     @objc func goForward(_ sender: Any?) { step(1) }
 
-    private func render() {
+    /// `focus` false: the keyboard stays where it is (a pane opened beside the one you are typing in).
+    private func render(focus: Bool = true) {
         if let f = findPane, !(activeTab?.root.contains(f) ?? false) { closeFind(refocus: false) }
         var rebuilt = false
         if let tab = activeTab {
@@ -481,7 +464,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         }
         syncVisibility(refresh: rebuilt)
         updateChrome()
-        if !InlineRename.isEditing, let id = focusedPane, let v = views[id] { window?.makeFirstResponder(v) }
+        if focus, !InlineRename.isEditing, let id = focusedPane, let v = views[id] { window?.makeFirstResponder(v) }
         recordLocation()
     }
 
@@ -624,7 +607,6 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         content.layer?.backgroundColor = theme.color("background").cgColor
         mainPane.layer?.backgroundColor = theme.color("background").cgColor   // under the toolbar too, or it shows the toolbar's own grey
         for v in views.values { (v as? FilePaneView)?.apply(theme: theme) }
-        previewFile?.apply(theme: theme)
         findBar.apply(theme: theme)
         inspectorTabs.tint = theme.color("foreground")
     }
@@ -952,7 +934,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
 
     // MARK: - Structure changes
 
-    private func split(_ axis: Axis, kind: PaneKind, from source: PaneID? = nil) {
+    private func split(_ axis: Axis, kind: PaneKind, from source: PaneID? = nil, focus: Bool = true) {
         guard let base = source ?? focusedPane, let (p, t) = locate(base), let old = spec(base) else {
             newTab(kind: kind)
             return
@@ -962,10 +944,10 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         store.layout.projects[p].activeTab = t
         var tab = store.layout.projects[p].tabs[t]
         tab.root = tab.root.replacing(base, with: .split(axis: axis, ratio: 0.5, a: .leaf(old), b: .leaf(new)))
-        tab.focused = new.id
+        if focus { tab.focused = new.id }
         store.layout.projects[p].tabs[t] = tab
         store.changed()
-        render()
+        render(focus: focus)
     }
 
     private func paneMenu(_ id: PaneID) -> NSMenu? {
@@ -1340,42 +1322,20 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         store.layout.activeProject = active < 0 ? active : max(0, min(active, store.layout.projects.count - 1))
     }
 
-    /// Shows `path` in the right sidebar, replacing the file shown there.
-    func openFile(_ path: String) {
-        previewFile?.close()
-        previewFile?.removeFromSuperview()
-        let f = FilePaneView(id: UUID(), path: path, theme: theme)
-        f.onOpenLink = { [unowned self] url in open(url) }
-        f.translatesAutoresizingMaskIntoConstraints = false
-        preview.addSubview(f)
-        NSLayoutConstraint.activate([
-            f.leadingAnchor.constraint(equalTo: preview.leadingAnchor),
-            f.trailingAnchor.constraint(equalTo: preview.trailingAnchor),
-            f.topAnchor.constraint(equalTo: previewTitle.bottomAnchor, constant: 4),
-            f.bottomAnchor.constraint(equalTo: preview.bottomAnchor),
-        ])
-        previewFile = f
-        previewTitle.stringValue = (path as NSString).abbreviatingWithTildeInPath
-        previewTitle.toolTip = path
-        showPreview()
+    /// Previews `path` as a file pane: the active tab's existing one is retargeted, else it splits in right of the focused
+    /// pane. `focus` false leaves the focused pane and the keyboard alone.
+    func openFile(_ path: String, focus: Bool = true) {
+        guard let leaf = activeTab?.root.leaves.first(where: { if case .file = $0.kind { true } else { false } }) else {
+            return split(.horizontal, kind: .file(path: path), focus: focus)
+        }
+        if case .file(path) = leaf.kind { return focus ? self.focus(leaf.id) : () }
+        mutatePane(leaf.id) { $0.kind = .file(path: path) }
+        destroy(leaf.id)   // the provider rebuilds the view for the new path
+        if focus { mutateActiveTab { $0.focused = leaf.id } }
+        render(focus: focus)
     }
 
-    /// Files tab with the preview left of the tree. First time: the inspector widens so the tree keeps its width.
-    private func showPreview() {
-        showInspectorTab(1)
-        let tree: CGFloat = 280, minPreview: CGFloat = 480
-        if inspectorItem.isCollapsed { inspectorItem.isCollapsed = false }
-        guard preview.isHidden else { return }
-        preview.isHidden = false
-        split.splitView.layoutSubtreeIfNeeded()
-        if inspector.frame.width < tree + minPreview {
-            split.splitView.setPosition(split.splitView.bounds.width - tree - minPreview, ofDividerAt: 1)
-            split.splitView.layoutSubtreeIfNeeded()
-        }
-        files.adjustSubviews()
-        files.setPosition(files.bounds.width - tree, ofDividerAt: 0)
-    }
-    @objc func togglePreview(_ sender: Any?) { split.toggleInspector(sender) }
+    @objc func toggleInspectorPanel(_ sender: Any?) { split.toggleInspector(sender) }
 
     /// Something would be lost by quitting: a process other than an idle shell, or an agent mid-turn.
     var needsConfirmQuit: Bool { status.values.contains(.busy) || views.keys.contains { needsConfirm([$0]) } }
@@ -1615,24 +1575,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     @objc func splitRight(_ sender: Any?) { split(.horizontal, kind: .terminal(cwd: cwdForNewPane(), launch: nil)) }
     @objc func splitDown(_ sender: Any?) { split(.vertical, kind: .terminal(cwd: cwdForNewPane(), launch: nil)) }
     @objc func closePane(_ sender: Any?) {
-        // The keyboard is in the inspector: ⌘W closes the open file, never the terminal behind it.
-        if let r = window?.firstResponder as? NSView, r.isDescendant(of: inspector) { return closePreview() }
         if let id = focusedPane { closePane(id) }
     }
 
-    private func closePreview() {
-        guard let f = previewFile else { return NSSound.beep() }
-        f.close()
-        f.removeFromSuperview()
-        previewFile = nil
-        let tree = column.frame.width
-        preview.isHidden = true
-        // Hand the preview's width back to the terminals, so the tree keeps its own size.
-        if !inspectorItem.isCollapsed { split.splitView.setPosition(split.splitView.bounds.width - tree, ofDividerAt: 1) }
-        previewTitle.stringValue = "No file. ⌘-click a path to preview it here."
-        previewTitle.toolTip = nil
-        if let id = focusedPane, let v = views[id] { window?.makeFirstResponder(v) }
-    }
     @objc func closeTab(_ sender: Any?) {
         if let p = activeProjectIndex { closeTab(at: store.layout.projects[p].activeTab) }
     }
@@ -1686,7 +1631,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         guard let id = focusedPane, let n = tree.neighbor(of: id, d) else { return }
         focus(n)
     }
-    /// Focus a pane in the active tab. The model is updated directly because markdown panes never become first responder.
+    /// Focus a pane in the active tab. The model is updated directly too, since the pane may already be first responder.
     private func focus(_ id: PaneID) {
         guard let v = views[id] else { return }
         window?.makeFirstResponder(v)
@@ -1787,7 +1732,7 @@ extension NSToolbarItem.Identifier {
     static let projectTitle = NSToolbarItem.Identifier("projectTitle")
 }
 
-/// Unified toolbar: sidebar toggle over the sidebar, the tab capsule over the terminals, project name/path on its right (sidebar collapsed only), inspector toggle over the preview.
+/// Unified toolbar: sidebar toggle over the sidebar, the tab capsule over the terminals, project name/path on its right (sidebar collapsed only), inspector toggle over the inspector.
 extension WorkspaceController: NSToolbarDelegate {
     /// Right-aligned single-line label styled like the native window title (bold 13) / subtitle (11, secondary).
     static func titleLabel(bold: Bool) -> NSTextField {

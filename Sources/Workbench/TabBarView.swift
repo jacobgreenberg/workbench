@@ -6,7 +6,7 @@ struct TabItem: Equatable, Sendable { let title: String; let status: PaneStatus 
 final class HandButton: NSButton {
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
 
-    /// A round Liquid Glass icon button (new tab, add project, close preview).
+    /// A round Liquid Glass icon button (new tab, add project).
     static func glass(_ symbol: String, _ label: String, _ size: NSControl.ControlSize = .regular) -> HandButton {
         let b = HandButton(image: NSImage(systemSymbolName: symbol, accessibilityDescription: label)!, target: nil, action: nil)
         b.bezelStyle = .glass

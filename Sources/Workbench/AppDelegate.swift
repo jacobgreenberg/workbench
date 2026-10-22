@@ -231,7 +231,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         ]))
         main.addItem(menu("View", [
             item("Toggle Sidebar", #selector(w.toggleProjectSidebar(_:)), "b"),
-            item("Toggle File Preview", #selector(w.togglePreview(_:)), "b", [.command, .option]),
+            item("Toggle TODO & Files", #selector(w.toggleInspectorPanel(_:)), "b", [.command, .option]),
             item("Equalize Splits", #selector(w.equalizeSplits(_:)), "0", [.command, .shift]),
             .separator(),
             item("Bigger", #selector(w.increaseFontSize(_:)), "="),

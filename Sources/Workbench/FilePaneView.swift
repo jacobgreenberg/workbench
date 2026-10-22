@@ -195,12 +195,22 @@ private struct Renderer: Sendable {
     }
 }
 
+/// Reports first-responder status, so clicking into a file pane focuses it like a terminal.
+private final class FocusTextView: NSTextView {
+    var onFocus: (() -> Void)?
+    override func becomeFirstResponder() -> Bool {
+        let ok = super.becomeFirstResponder()
+        if ok { onFocus?() }
+        return ok
+    }
+}
+
 @MainActor final class FilePaneView: NSView, NSTextViewDelegate {
     let paneID: PaneID
     private let path: String
     private var palette: Palette
     private let scrollView = NSScrollView()
-    private let textView = NSTextView(usingTextLayoutManager: true)
+    private let textView = FocusTextView(usingTextLayoutManager: true)
     private var generation = 0
     /// Newest requested generation, readable off main: queued renders that are already stale skip the read and parse.
     private final class Latest: Sendable { let value = Atomic<Int>(0) }
@@ -211,6 +221,7 @@ private struct Renderer: Sendable {
     private var fileInode: ino_t = 0
     private var pending: DispatchWorkItem?
     var onOpenLink: ((URL) -> Void)?
+    var onFocus: ((PaneID) -> Void)?
     private let renderQueue = DispatchQueue(label: "pane.file", qos: .userInitiated)   // one render in flight per pane
 
     init(id: PaneID, path: String, theme: Theme) {
@@ -221,10 +232,11 @@ private struct Renderer: Sendable {
         scrollView.frame = bounds
         scrollView.autoresizingMask = [.width, .height]
         scrollView.hasVerticalScroller = true
-        scrollView.drawsBackground = false   // the pane or the preview's glass behind it shows through
+        scrollView.drawsBackground = false   // the pane behind it shows through
         textView.drawsBackground = false
         textView.isEditable = false
         textView.delegate = self
+        textView.onFocus = { [unowned self] in onFocus?(paneID) }
         textView.isSelectable = true
         textView.isRichText = true
         textView.textContainerInset = NSSize(width: 24, height: 20)
@@ -237,6 +249,9 @@ private struct Renderer: Sendable {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    override var acceptsFirstResponder: Bool { true }
+    override func becomeFirstResponder() -> Bool { window?.makeFirstResponder(textView) ?? false }
 
     func apply(theme: Theme) {
         palette = Palette(theme)
