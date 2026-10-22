@@ -111,7 +111,6 @@ private final class ThemesViewController: NSViewController {
         self.workspace = workspace
         super.init(nibName: nil, bundle: nil)
         title = "Themes"
-        NotificationCenter.default.addObserver(self, selector: #selector(refresh), name: .themeChanged, object: nil)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
@@ -152,6 +151,8 @@ private final class ThemesViewController: NSViewController {
         view = stack
         stack.widthAnchor.constraint(equalToConstant: 560).isActive = true
         refresh()
+        // Observed only once the view exists: a tab never opened has no controls for refresh to fill.
+        NotificationCenter.default.addObserver(self, selector: #selector(refresh), name: .themeChanged, object: nil)
     }
 
     @objc private func refresh() {
@@ -341,7 +342,6 @@ private final class BackupViewController: NSViewController {
         self.workspace = workspace
         super.init(nibName: nil, bundle: nil)
         title = "Backup"
-        NotificationCenter.default.addObserver(self, selector: #selector(refresh), name: .backupStatusChanged, object: nil)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
@@ -391,6 +391,8 @@ private final class BackupViewController: NSViewController {
         view = stack
         stack.widthAnchor.constraint(equalToConstant: 560).isActive = true
         refresh()
+        // Observed only once the view exists: a tab never opened has no controls for refresh to fill.
+        NotificationCenter.default.addObserver(self, selector: #selector(refresh), name: .backupStatusChanged, object: nil)
     }
 
     @objc private func refresh() {
