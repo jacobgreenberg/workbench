@@ -42,6 +42,29 @@ private final class CheckCircle: NSButton {
     }
 }
 
+/// A wrapping text field whose height follows its text at its current width, live while typing (a plain one stays one line tall and scrolls).
+private final class WrappingField: NSTextField {
+    private var measuredWidth: CGFloat = 0
+
+    override var intrinsicContentSize: NSSize {
+        guard bounds.width > 0, let measure = cell?.copy() as? NSCell else { return super.intrinsicContentSize }
+        if let editor = currentEditor() { measure.stringValue = editor.string }
+        if measure.stringValue.isEmpty { measure.stringValue = " " }   // an empty row keeps one line
+        let size = measure.cellSize(forBounds: NSRect(x: 0, y: 0, width: bounds.width, height: .greatestFiniteMagnitude))
+        return NSSize(width: NSView.noIntrinsicMetric, height: ceil(size.height))
+    }
+
+    override func layout() {
+        super.layout()
+        if bounds.width != measuredWidth { measuredWidth = bounds.width; invalidateIntrinsicContentSize() }
+    }
+
+    override func textDidChange(_ notification: Notification) {
+        super.textDidChange(notification)
+        invalidateIntrinsicContentSize()
+    }
+}
+
 /// The right sidebar's checklist for one project, edited like an Apple Notes checklist: tick the circle, type in place, Return for a new item, Backspace on an empty one to delete it; a blank new line (a faint circle) shows while the list is empty or you are adding.
 @MainActor final class TodoListView: NSView, NSTextFieldDelegate {
     var onChange: (([Todo]) -> Void)?
@@ -105,7 +128,7 @@ private final class CheckCircle: NSButton {
         for i in 0...todos.count {
             let t = todos.indices.contains(i) ? todos[i] : nil
             let circle = CheckCircle()
-            let field = NSTextField()
+            let field = WrappingField()
             field.isBordered = false
             field.drawsBackground = false
             field.isEditable = true
