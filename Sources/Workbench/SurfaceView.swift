@@ -17,6 +17,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
     var onFocus: ((PaneID) -> Void)?
     var onKey: ((PaneID) -> Void)?   // every key press sent to the terminal
     var contextMenu: ((PaneID) -> NSMenu?)?   // shown on every right-click
+    private var hoveredLink: String?   // the link Ghostty reports under the mouse
     static var isReservedShortcut: (NSEvent) -> Bool = { _ in false }
 
     private var markedText = NSMutableAttributedString()
@@ -129,6 +130,8 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         refresh()
         return true
     }
+
+    func setHoveredLink(_ url: String) { hoveredLink = url.isEmpty ? nil : url }
 
     func setCursorShape(_ shape: ghostty_action_mouse_shape_e) {
         guard surface != nil, !closed else { return }
@@ -434,7 +437,35 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
     // agent TUIs do, and Ghostty would hand them the click instead.
     override func rightMouseDown(with event: NSEvent) {
         guard !closed, let menu = contextMenu?(paneID) else { return super.rightMouseDown(with: event) }
-        menu.popUp(positioning: nil, at: convert(event.locationInWindow, from: nil), in: self)   // not popUpContextMenu: it adds AutoFill
+        let pos = convert(event.locationInWindow, from: nil)
+        if let link = link(at: pos) {
+            let copy = NSMenuItem(title: "Copy Link", action: #selector(copyLink(_:)), keyEquivalent: "")
+            copy.target = self
+            copy.representedObject = link
+            menu.insertItem(copy, at: 0)
+            menu.insertItem(.separator(), at: 1)
+        }
+        menu.popUp(positioning: nil, at: pos, in: self)   // not popUpContextMenu: it adds AutoFill
+        endLinkHover(at: pos)
+    }
+
+    /// The link at `pos`. Ghostty finds links only with ⌘ held, so this hovers there as if it were: Ghostty reports
+    /// the link synchronously and underlines it until `endLinkHover` hands back the real modifiers.
+    func link(at pos: NSPoint) -> String? {
+        guard let surface, !closed else { return nil }
+        ghostty_surface_mouse_pos(surface, pos.x, frame.height - pos.y, GHOSTTY_MODS_SUPER)
+        return hoveredLink
+    }
+
+    func endLinkHover(at pos: NSPoint) {
+        guard let surface, !closed else { return }
+        ghostty_surface_mouse_pos(surface, pos.x, frame.height - pos.y, GhosttyInput.ghosttyMods(NSEvent.modifierFlags))
+    }
+
+    @objc private func copyLink(_ sender: NSMenuItem) {
+        guard let link = sender.representedObject as? String else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(link, forType: .string)
     }
 
     override func mouseEntered(with event: NSEvent) {

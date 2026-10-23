@@ -144,6 +144,12 @@ enum PaneEvent: Sendable {
                     Runtime.current?.delegate?.surfaceView(for: id)?.setCursorShape(shape)
                 }
             }
+        case GHOSTTY_ACTION_MOUSE_OVER_LINK:
+            // Reported on main from inside mouse handling; kept synchronously so a right-click's menu sees it.
+            guard Thread.isMainThread else { return false }
+            let l = action.action.mouse_over_link
+            let url = l.url.map { String(decoding: UnsafeRawBufferPointer(start: $0, count: Int(l.len)), as: UTF8.self) } ?? ""
+            MainActor.assumeIsolated { Runtime.current?.delegate?.surfaceView(for: id)?.setHoveredLink(url) }
         case GHOSTTY_ACTION_MOUSE_VISIBILITY:
             let visible = action.action.mouse_visibility == GHOSTTY_MOUSE_VISIBLE
             DispatchQueue.main.async {

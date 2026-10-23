@@ -1477,6 +1477,15 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                 }
             }
             return "{}"
+        case "link":     // test harness: the link a right-click at cell `col`,`row` of `pane` would copy
+            guard let id = pane, let v = views[id] as? SurfaceView, let surface = v.surface,
+                  let col = msg["col"].flatMap(Double.init), let row = msg["row"].flatMap(Double.init) else { return #"{"error":"pane not shown"}"# }
+            let size = ghostty_surface_size(surface), scale = v.window?.backingScaleFactor ?? 2
+            let pos = NSPoint(x: (col + 0.5) * Double(size.cell_width_px) / scale,
+                              y: v.frame.height - (row + 0.5) * Double(size.cell_height_px) / scale)
+            let link = v.link(at: pos)
+            v.endLinkHover(at: pos)
+            return String(data: try! JSONSerialization.data(withJSONObject: ["link": link ?? ""]), encoding: .utf8)!
         case "drag":     // test harness: drag `pane` by its header to the `edge` (left/right/up/down) side of `target`
             guard let id = pane, let src = views[id]?.superview, let w = src.window,
                   let dst = msg["target"].flatMap(UUID.init(uuidString:)).flatMap({ views[$0] }) else { return #"{"error":"pane not shown"}"# }
