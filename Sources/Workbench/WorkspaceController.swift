@@ -63,7 +63,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private let mainPane = NSView()   // the terminals' split item, toolbar strip included
     private let column = NSView()   // the TODO list or the tree, switched by the tabs
     private var fileTreeRoot: String?   // whose folder the tree shows
-    private var todoProject: UUID?   // whose TODOs the list shows
+    private var inspectorProject: UUID?   // whose TODOs, folder and right-sidebar state the inspector shows
+    private var inspectorObservation: NSKeyValueObservation?
     private weak var scratchItem: NSToolbarItem?   // badged with the open scratch tabs
 
     init(store: Store, runtime: Runtime) {
@@ -195,14 +196,21 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                 self.store.changed()
             }
         }
-        inspectorTabs.onSelect = { [unowned self] i in showInspectorTab(i) }
-        showInspectorTab(0)
+        // Open/closed is per project: remember what the toggle (or a divider drag) did for the project on screen.
+        inspectorObservation = inspectorItem.observe(\.isCollapsed) { [weak self] _, _ in
+            MainActor.assumeIsolated { self?.saveInspector { $0.inspectorOpen = self?.inspectorItem.isCollapsed == false ? true : nil } }
+        }
+        inspectorTabs.onSelect = { [unowned self] i in
+            showInspectorTab(i, animated: true)
+            saveInspector { $0.inspectorTab = i == 0 ? nil : i }
+        }
+        showInspectorTab(0, animated: false)
         fileTree.hideClutter = store.layout.showClutterFiles != true
     }
 
     /// 0 TODO, 1 Files.
-    private func showInspectorTab(_ i: Int) {
-        inspectorTabs.select(i, animated: true)
+    private func showInspectorTab(_ i: Int, animated: Bool) {
+        inspectorTabs.select(i, animated: animated)
         todoList.isHidden = i != 0
         fileTree.isHidden = i != 1
     }
@@ -218,7 +226,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             store.changed()
         }
         todoList.onChange = { [unowned self] todos in
-            guard let p = activeProjectIndex, store.layout.projects[p].id == todoProject else { return }
+            guard let p = activeProjectIndex, store.layout.projects[p].id == inspectorProject else { return }
             store.layout.projects[p].todos = todos
             store.changed()
         }
@@ -569,16 +577,28 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             ProcessInfo.processInfo.endActivity(a)
             activity = nil
         }
-        let shownProject = activeProjectIndex.map { store.layout.projects[$0].id }
-        if shownProject != todoProject {
-            todoProject = shownProject
-            todoList.show(activeProjectIndex.map { store.layout.projects[$0].todos ?? [] } ?? [])
+        let shownProject = activeProjectIndex.map { store.layout.projects[$0] }
+        if shownProject?.id != inspectorProject {
+            inspectorProject = shownProject?.id   // first: the collapse below saves into this project, unchanged
+            todoList.show(shownProject?.todos ?? [])
+            showInspectorTab(shownProject?.inspectorTab ?? 0, animated: false)
+            inspectorItem.isCollapsed = shownProject?.inspectorOpen != true
         }
         let root = activeProjectIndex.map { store.layout.projects[$0].path }
         if root != fileTreeRoot {
             fileTreeRoot = root
             fileTree.show(root: root)
         }
+    }
+
+    /// Records a change to the right sidebar in the project it is showing.
+    private func saveInspector(_ change: (inout Project) -> Void) {
+        guard let p = activeProjectIndex, store.layout.projects[p].id == inspectorProject else { return }
+        var project = store.layout.projects[p]
+        change(&project)
+        guard project != store.layout.projects[p] else { return }
+        store.layout.projects[p] = project
+        store.changed()
     }
 
     /// A project's tabs as the tab bar and the sidebar show them: title, and the busiest status among their panes.

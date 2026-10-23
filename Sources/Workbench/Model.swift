@@ -124,6 +124,8 @@ struct Project: Codable, Identifiable, Equatable, Sendable {
     var hidden: Bool? = nil    // off the Active list, shown under Hidden; its terminals and agents keep running
     var workspace: UUID? = nil // the workspace it is listed in (nil only for scratch terminals; fixed up at load)
     var todos: [Todo]? = nil   // the right sidebar's checklist
+    var inspectorOpen: Bool? = nil   // the right sidebar is open while this project is shown (nil = closed)
+    var inspectorTab: Int? = nil     // and shows this tab: 0 TODO (nil), 1 Files
 }
 
 struct Todo: Codable, Identifiable, Equatable, Sendable {
