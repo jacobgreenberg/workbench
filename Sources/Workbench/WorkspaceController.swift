@@ -888,9 +888,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     }
 
     /// The file a ⌘-click opens: Ghostty's link `text` (nil: it saw none) resolved against the pane's folder. Agents
-    /// hard-wrap a long path over rows, so Ghostty may match one row's part or nothing; when what it gives isn't a
-    /// file, the word under the click is joined with the text touching it on the rows around it, and the longest
-    /// join that exists wins. With no link and no such join, nothing.
+    /// hard-wrap a long path over rows, so Ghostty may match one row's part (which can itself exist: the folder before
+    /// a break after `/`) or nothing. So the word under the click is joined with the text touching it on the rows
+    /// around it, and the longest join that exists wins over Ghostty's match. With no link and no such join, nothing.
     private func clickedPath(_ text: String?, from id: PaneID) -> String? {
         func resolve(_ t: String) -> String {
             let path = (t as NSString).expandingTildeInPath
@@ -898,9 +898,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             return URL(fileURLWithPath: cwd).appendingPathComponent(path).standardizedFileURL.path
         }
         let path = text.map(resolve)
-        if let path, FileManager.default.fileExists(atPath: path) { return path }
-        guard let (word, rows, row) = (views[id] as? SurfaceView)?.wordAtMouse() else { return path }
-        return Self.rejoined(word, rows: rows, at: row).lazy.map(resolve).first { FileManager.default.fileExists(atPath: $0) } ?? path
+        let joins = (views[id] as? SurfaceView)?.wordAtMouse().map { Self.rejoined($0.word, rows: $0.rows, at: $0.row) } ?? []
+        return joins.lazy.map(resolve).first { FileManager.default.fileExists(atPath: $0) } ?? path
     }
 
     /// `word` (on row `i` of `rows`) joined over the hard line breaks around it: with the text touching it on up to 3
