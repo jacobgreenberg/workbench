@@ -17,6 +17,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
     var onFocus: ((PaneID) -> Void)?
     var onKey: ((PaneID) -> Void)?   // every key press sent to the terminal
     var contextMenu: ((PaneID) -> NSMenu?)?   // shown on every right-click
+    var onPathClick: ((PaneID) -> Void)?   // ⌘-click where Ghostty sees no link: maybe part of a hard-wrapped path
     private var hoveredLink: String?   // the link Ghostty reports under the mouse
     static var isReservedShortcut: (NSEvent) -> Bool = { _ in false }
 
@@ -175,13 +176,32 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
 
     /// The visible screen as text (an agent on the alternate screen keeps its history here, not in scrollback).
     func viewportText() -> String? {
+        read(ghostty_point_s(tag: GHOSTTY_POINT_VIEWPORT, coord: GHOSTTY_POINT_COORD_TOP_LEFT, x: 0, y: 0),
+             ghostty_point_s(tag: GHOSTTY_POINT_VIEWPORT, coord: GHOSTTY_POINT_COORD_BOTTOM_RIGHT, x: 0, y: 0))
+    }
+
+    /// The word under the mouse (Ghostty's word selection, so a path stays whole) and up to 3 screen rows each side
+    /// of its row: enough to rebuild a path an agent hard-wrapped over rows.
+    func wordAtMouse() -> (word: String, rows: [String], row: Int)? {
         guard let surface, !closed else { return nil }
-        let sel = ghostty_selection_s(
-            top_left: ghostty_point_s(tag: GHOSTTY_POINT_VIEWPORT, coord: GHOSTTY_POINT_COORD_TOP_LEFT, x: 0, y: 0),
-            bottom_right: ghostty_point_s(tag: GHOSTTY_POINT_VIEWPORT, coord: GHOSTTY_POINT_COORD_BOTTOM_RIGHT, x: 0, y: 0),
-            rectangle: false)
         var text = ghostty_text_s()
-        guard ghostty_surface_read_text(surface, sel, &text) else { return nil }
+        guard ghostty_surface_quicklook_word(surface, &text) else { return nil }
+        defer { ghostty_surface_free_text(surface, &text) }
+        let size = ghostty_surface_size(surface)
+        guard let p = text.text, text.tl_px_y >= 0, size.columns > 0 else { return nil }
+        let word = String(decoding: UnsafeRawBufferPointer(start: p, count: Int(text.text_len)), as: UTF8.self)
+        let row = Int(text.offset_start) / Int(size.columns)   // offsets count cells row by row from the viewport's top
+        let rows = (max(row - 3, 0)...min(row + 3, Int(size.rows) - 1)).map { y in
+            read(ghostty_point_s(tag: GHOSTTY_POINT_VIEWPORT, coord: GHOSTTY_POINT_COORD_EXACT, x: 0, y: UInt32(y)),
+                 ghostty_point_s(tag: GHOSTTY_POINT_VIEWPORT, coord: GHOSTTY_POINT_COORD_EXACT, x: UInt32(size.columns) - 1, y: UInt32(y))) ?? ""
+        }
+        return (word, rows, min(row, 3))
+    }
+
+    private func read(_ from: ghostty_point_s, _ to: ghostty_point_s) -> String? {
+        guard let surface, !closed else { return nil }
+        var text = ghostty_text_s()
+        guard ghostty_surface_read_text(surface, ghostty_selection_s(top_left: from, bottom_right: to, rectangle: false), &text) else { return nil }
         defer { ghostty_surface_free_text(surface, &text) }
         guard let p = text.text else { return "" }
         return String(decoding: UnsafeRawBufferPointer(start: p, count: Int(text.text_len)), as: UTF8.self)
@@ -419,6 +439,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         let mods = GhosttyInput.ghosttyMods(event.modifierFlags)
         ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, mods)
         ghostty_surface_mouse_pressure(surface, 0, 0)
+        if event.modifierFlags.contains(.command), hoveredLink == nil { onPathClick?(paneID) }   // a link opens via OPEN_URL
     }
 
     override func otherMouseDown(with event: NSEvent) {
