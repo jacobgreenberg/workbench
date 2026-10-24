@@ -1484,6 +1484,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         case "newproject":   // test harness: open the New Project sheet, optionally prefilled with `url`
             showNewProject(url: msg["url"] ?? "")
             return "{}"
+        case "sheet":   // test harness: the New Project sheet's state, after setting `url`/`name` and clicking `press` (primary/openExisting/cancel)
+            guard let sheet = newProjectSheet else { return #"{"error":"no sheet"}"# }
+            var state = sheet.testState(url: msg["url"], name: msg["name"])
+            if let press = msg["press"] { state["pressed"] = sheet.testPress(press) ? "yes" : "no" }
+            return (try? JSONSerialization.data(withJSONObject: state, options: [.sortedKeys])).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
         case "cloneaction":   // test harness: a failed clone's sidebar button (`name`: retry/edit/remove) on the project called `project`
             guard let p = store.layout.projects.first(where: { $0.name == msg["project"] }), clones[p.id] != nil else { return #"{"error":"no clone"}"# }
             cloneAction(p.id, msg["name"] == "remove" ? .remove : msg["name"] == "edit" ? .editURL : .retry)

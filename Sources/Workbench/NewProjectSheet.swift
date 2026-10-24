@@ -399,4 +399,33 @@ import AppKit
         window.orderOut(nil)
         onDone(result)
     }
+
+    #if DEBUG
+    /// Test harness: what the sheet shows (empty = hidden), after setting `url`/`name` if given.
+    func testState(url: String?, name: String?) -> [String: String] {
+        if let url { if !cloning { setMode(true) }; urlField.stringValue = url; renamedFor = nil }
+        if let name { nameField.stringValue = name }
+        if url != nil || name != nil { update() }
+        return ["mode": cloning ? "clone" : "open", "url": urlField.stringValue,
+                "urlNote": urlNote.isHidden ? "" : urlNote.stringValue,
+                "location": parent, "destination": destination.isHidden ? "" : destination.stringValue,
+                "conflict": conflict.isHidden ? "" : conflictTitle.stringValue,
+                "conflictDetail": conflict.isHidden ? "" : conflictDetail.stringValue,
+                "openExisting": conflict.isHidden || openExisting.isHidden ? "hidden" : "shown",
+                "name": renameGroup.isHidden ? "" : nameField.stringValue,
+                "nameNote": renameGroup.isHidden ? "" : nameNote.stringValue,
+                "primary": primary.title, "primaryEnabled": primary.isEnabled ? "yes" : "no"]
+    }
+
+    /// Test harness: click `primary`, `openExisting` or `cancel`, as a user could (a hidden or disabled button does nothing).
+    func testPress(_ button: String) -> Bool {
+        switch button {
+        case "primary" where primary.isEnabled: primaryTapped()
+        case "openExisting" where !conflict.isHidden && !openExisting.isHidden: openExistingTapped()
+        case "cancel": cancelTapped()
+        default: return false
+        }
+        return true
+    }
+    #endif
 }
