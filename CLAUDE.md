@@ -57,6 +57,7 @@ enum PaneEvent: Sendable {
     case commandFinished(exitCode: Int, durationNs: UInt64)
     case openURL(String), closeRequested(processAlive: Bool)
     case startSearch(String), endSearch, searchTotal(Int), searchSelected(Int)
+    case clone(CloneWatch.Event)   // a cloning pane's git output
 }
 @MainActor protocol RuntimeDelegate: AnyObject {
     func surfaceView(for id: PaneID) -> SurfaceView?
@@ -160,7 +161,7 @@ enum Syntax {
 // Back/Forward (mouse buttons 4/5, ⌃⌘←/→): history of {workspace, project, tab} recorded at the end of render(), max 100, entries for closed projects/tabs resolve to what still exists or are skipped.
 
 // SidebarView.swift
-struct SidebarRow: Equatable, Sendable { let id: UUID; let name: String; let path: String; let status: PaneStatus; var tabCount = 0 }   // status = busiest pane of the project; tabCount = its tabs (shown right of the row, omitted when 0; a project with none is dimmed unless selected)
+struct SidebarRow: Equatable, Sendable { let id: UUID; let name: String; let path: String; let status: PaneStatus; var tabCount = 0; var clone: CloneStatus? = nil }   // status = busiest pane of the project; tabCount = its tabs (shown right of the row, omitted when 0; a project with none is dimmed unless selected); clone: progress ring + "Cloning… N%", git's prompt in the attention color, or "Clone failed: …" with Retry / Edit… / Remove (80 pt row, onCloneAction)
 enum PaneStatus: Int, Comparable, Sendable { case idle = 0, busy = 1, done = 2, attention = 3 }   // Comparable by rawValue
 @MainActor final class SidebarView: NSView {   // the WorkspaceRail at the leading edge; right of it the workspace's name as a large bold title, the Active/Hidden GlassSegments under it, then a native .sourceList table. Two lines per project (ProjectRowCell, 46 pt): status dot (grey idle, hollow ring with nothing open), name, then "Needs you / Working… / Done / N tabs / Nothing open". Selection = the active project, drawn by SelectionRowView (label color at 15%, the app-wide selection fill shared with the tab bar, switches and pane headers; its bar spans the same width as the Active/Hidden switch; native highlight off). update() restyles cells in place and reloads only when the row ids change. Projects reorder by press-and-drag on a row (SidebarTable.onPress → Reorder(vertical: true); a press released before the 4 pt threshold selects the row): the row lifts and follows the pointer, the others slide aside.
     var onSelect: ((Int) -> Void)?; var onRemove: ((Int) -> Void)?         // project indices are rows of the list shown; WorkspaceController maps rows to projects (visibleProjectIndices / reorderedProjects in Model.swift)
@@ -218,6 +219,11 @@ enum TranscriptSearch {   // background queue; per-file index cache; a newer cal
     static func search(_ url: URL, _ query: String, done: @escaping @Sendable @MainActor (TranscriptResult) -> Void)
     static func cancel()
 }
+// GitClone.swift + NewProjectSheet.swift: New Project (⇧⌘O, toolbar +): a sheet, Open Folder | Clone Repository (GlassSegments; opens on the kind used last).
+struct GitRemote { init?(_ text: String) /* https/http/ssh/git/scp-like; nil for paths */; let url, host, path: String; var folder: String; func sameRepository(as:) -> Bool; func command(into folder: String) -> String /* git clone --progress -- <url> <folder> && cd <folder> */; static func checkout(at dir: String) -> (origin: String?, branch: String?)? /* reads .git/config + HEAD */ }
+enum CloneStatus { case cloning(Int), waiting(String), failed(String) }; enum CloneAction { case retry, editURL, remove }
+final class CloneWatch: Sendable { enum Event { case progress(Int), prompt(String), error(String) }; func scan(_ bytes: UnsafeRawBufferPointer) -> [Event]; func answered(); func reset() }   // SurfaceBox.watch (set while a pane clones) scans its output on the reader queue → PaneEvent.clone
+// Clone: the project (path = <location>/<folder>, name = folder) is added at once; its terminal starts in <location> and the command is typed as initial input (never a Launch, so it is not rerun at restore). WorkspaceController.clones (in memory, by project id) feeds SidebarRow.clone; the pane's first commandFinished ends it: 0 → ordinary project (Files tab reloads, done notification), else failed (git's fatal: line, mapped). A key into a waiting pane answers the prompt. Retry types the command again into the same pane; Edit… reopens the sheet prefilled and replaces the project. Sheet: URL validated live, clipboard offered (read only when pasteboard access is Always Allow, else detected and read on click), Location popup = Layout.cloneLocations (recent, max 6, the default first) + parents of existing projects, Choose…; a destination that exists shows its origin/branch, Open Existing as Project when the origin matches, and "Or clone as" <folder>-N.
 // Control.swift — unix socket at Store.directory/pane.sock, one JSON object per line ([String: String]), one reply line
 final class ControlServer: @unchecked Sendable { init(path: String, handler: @escaping @MainActor ([String: String]) -> String); func start(); func stop() }
 enum ControlClient { static func run(_ args: [String]) -> Int32 }   // argv after the program name

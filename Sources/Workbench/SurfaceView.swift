@@ -6,6 +6,7 @@ import Synchronization
 final class SurfaceBox: Sendable {
     let id: PaneID
     let session = Mutex<Session?>(nil)
+    let watch = Mutex<CloneWatch?>(nil)   // set while the pane clones its project: output is scanned for git's progress
     init(id: PaneID) { self.id = id }
 }
 
@@ -92,8 +93,11 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
             if attached == nil, let initialInput { let d = Array(initialInput.utf8); d.withUnsafeBytes { session.write($0) } }
             box.session.withLock { $0 = session }
             nonisolated(unsafe) let surfacePtr = created
-            let paneID = id
-            session.start(output: { ghostty_surface_process_output(surfacePtr, $0.baseAddress?.assumingMemoryBound(to: CChar.self), UInt($0.count)) },
+            let paneID = id, box = box
+            session.start(output: {
+                ghostty_surface_process_output(surfacePtr, $0.baseAddress?.assumingMemoryBound(to: CChar.self), UInt($0.count))
+                if let w = box.watch.withLock({ $0 }) { for e in w.scan($0) { Runtime.post(paneID, .clone(e)) } }
+            },
                           ended: { Runtime.post(paneID, Session.wasKilled(paneID) ? .sessionLost : .closeRequested(processAlive: false)) })
         } else {
             NSLog("Workbench: no session for pane \(id)")
@@ -962,3 +966,4 @@ extension SurfaceView: @preconcurrency NSTextInputTraits {
     var mathExpressionCompletionType: NSTextInputTraitType { get { .no } set {} }
     var writingToolsBehavior: NSWritingToolsBehavior { get { .none } set {} }
 }
+

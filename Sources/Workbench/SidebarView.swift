@@ -1,8 +1,10 @@
 import AppKit
 
-/// `tabCount`: shown at the right of the row (omitted when 0; a project with none is dimmed).
+/// `tabCount`: shown at the right of the row (omitted when 0; a project with none is dimmed). `clone`: the project's
+/// first terminal is cloning it (a progress ring, git's prompt, or the failure with its actions).
 struct SidebarRow: Equatable, Sendable {
-    let id: UUID; let name: String; let path: String; let status: PaneStatus; var tabCount = 0
+    let id: UUID; let name: String; let path: String; let status: PaneStatus; var tabCount = 0; var clone: CloneStatus? = nil
+    var tall: Bool { clone?.isFailed ?? false }   // the failure's buttons sit under the text
 }
 
 enum PaneStatus: Int, Comparable, Sendable {
@@ -22,33 +24,77 @@ private final class SidebarTable: NSTableView {
     }
 }
 
+/// A clone's progress in a project row, in place of the status dot: a faint track and the done part, clockwise from the top.
+private final class ProgressRing: NSView {
+    var fraction: CGFloat = 0 { didSet { if fraction != oldValue { needsDisplay = true } } }
+    var color: NSColor = .controlAccentColor { didSet { needsDisplay = true } }
+    override func draw(_ dirtyRect: NSRect) {
+        let r = bounds.insetBy(dx: 1.5, dy: 1.5), c = NSPoint(x: r.midX, y: r.midY)
+        let track = NSBezierPath(ovalIn: r)
+        track.lineWidth = 2.2
+        color.withAlphaComponent(0.25).setStroke()
+        track.stroke()
+        let arc = NSBezierPath()
+        arc.appendArc(withCenter: c, radius: r.width / 2, startAngle: 90, endAngle: 90 - 360 * fraction, clockwise: true)
+        arc.lineWidth = 2.2
+        arc.lineCapStyle = .round
+        color.setStroke()
+        if fraction > 0 { arc.stroke() }
+    }
+}
+
 /// A project row: status dot (a hollow ring when nothing is open), name, and what it is doing underneath.
 private final class ProjectRowCell: NSTableCellView {
     let dot = NSView()
+    let ring = ProgressRing()   // a clone's progress, in the dot's place
     let label = NSTextField(labelWithString: "")
     let detail = NSTextField(labelWithString: "")
+    let actions = NSStackView()   // a failed clone: Retry, Edit URL…, Remove
+    var onAction: ((CloneAction) -> Void)?
+    private var dotCenter: [NSLayoutConstraint] = []
 
     init() {
         super.init(frame: .zero)
         dot.wantsLayer = true
         dot.layer?.cornerRadius = 4
+        ring.isHidden = true
         label.lineBreakMode = .byTruncatingTail
         label.font = .systemFont(ofSize: 13.5, weight: .semibold)
         detail.lineBreakMode = .byTruncatingTail
         detail.font = .systemFont(ofSize: 11.5)
-        let text = NSStackView(views: [label, detail])
+        for (title, action) in [("Retry", CloneAction.retry), ("Edit…", .editURL), ("Remove", .remove)] {
+            let b = NSButton(title: title, target: self, action: #selector(actionTapped))
+            b.controlSize = .mini
+            b.bezelStyle = .accessoryBarAction
+            b.font = .systemFont(ofSize: 11)
+            b.tag = [CloneAction.retry, .editURL, .remove].firstIndex(of: action)!
+            b.setContentHuggingPriority(.required, for: .horizontal)
+            b.setContentCompressionResistancePriority(.required, for: .horizontal)
+            if action == .editURL { b.toolTip = "Edit the URL or location and clone again"; b.setAccessibilityLabel("Edit URL") }
+            actions.addArrangedSubview(b)
+        }
+        actions.spacing = 4
+        actions.distribution = .fill
+        actions.isHidden = true
+        let text = NSStackView(views: [label, detail, actions])
         text.orientation = .vertical
         text.alignment = .leading
         text.spacing = 1
-        for v in [dot, text] as [NSView] {
+        text.setCustomSpacing(6, after: detail)
+        for v in [dot, ring, text] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
+        dotCenter = [dot.centerYAnchor.constraint(equalTo: centerYAnchor), dot.centerYAnchor.constraint(equalTo: label.centerYAnchor)]
         NSLayoutConstraint.activate([
             dot.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 20),
-            dot.centerYAnchor.constraint(equalTo: centerYAnchor),
+            dotCenter[0],
             dot.widthAnchor.constraint(equalToConstant: 8),
             dot.heightAnchor.constraint(equalToConstant: 8),
+            ring.centerXAnchor.constraint(equalTo: dot.centerXAnchor),
+            ring.centerYAnchor.constraint(equalTo: dot.centerYAnchor),
+            ring.widthAnchor.constraint(equalToConstant: 14),
+            ring.heightAnchor.constraint(equalToConstant: 14),
             text.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 10),
             text.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -16),
             text.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -56,6 +102,8 @@ private final class ProjectRowCell: NSTableCellView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    @objc private func actionTapped(_ sender: NSButton) { onAction?([CloneAction.retry, .editURL, .remove][sender.tag]) }
 
     @MainActor func style(_ r: SidebarRow, selected: Bool, theme: Theme) {
         if !label.isEditable { label.stringValue = r.name }
@@ -79,6 +127,36 @@ private final class ProjectRowCell: NSTableCellView {
         } else {
             dot.layer?.borderWidth = 0
         }
+        styleClone(r.clone, theme: theme)
+    }
+
+    @MainActor private func styleClone(_ clone: CloneStatus?, theme: Theme) {
+        var progress: Int?
+        switch clone {
+        case nil:
+            break
+        case let .cloning(p):
+            progress = p
+            detail.stringValue = "Cloning… \(p)%"
+            detail.textColor = theme.color("primary")
+        case let .waiting(text):
+            dot.layer?.backgroundColor = theme.color("chart3").cgColor
+            detail.stringValue = text
+            detail.textColor = theme.color("chart3")
+        case let .failed(text):
+            dot.layer?.backgroundColor = NSColor.systemRed.cgColor
+            detail.stringValue = "Clone failed: \(text)"
+            detail.textColor = .systemRed
+        }
+        if progress != nil { dot.isHidden = true }   // the ring replaces the dot
+        ring.isHidden = progress == nil
+        ring.color = theme.color("primary")
+        ring.fraction = CGFloat(progress ?? 0) / 100
+        let failed = clone?.isFailed ?? false
+        actions.isHidden = !failed
+        detail.toolTip = failed ? detail.stringValue : nil
+        NSLayoutConstraint.deactivate(dotCenter)
+        dotCenter[failed ? 1 : 0].isActive = true
     }
 }
 
@@ -125,6 +203,7 @@ let vsCodeBundle = "com.microsoft.VSCode"
     var onRename: ((Int, String?) -> Void)?
     var onMove: ((Int, Int) -> Void)?   // from, to (final index after removal)
     var onMoveToWorkspace: ((Int, Int) -> Void)?   // project row, workspace index
+    var onCloneAction: ((Int, CloneAction) -> Void)?   // a failed clone's buttons: project row, action
     let rail = WorkspaceRail()
 
     private var rows: [SidebarRow] = []
@@ -294,10 +373,12 @@ let vsCodeBundle = "com.microsoft.VSCode"
         guard rows != self.rows || selected != self.selected || theme.id != self.theme?.id else { return }
         guard !InlineRename.isEditing else { return }   // a name field is live; the rename's end re-renders
         let reload = rows.map(\.id) != self.rows.map(\.id)
+        let resized = IndexSet(rows.indices.filter { !reload && rows[$0].tall != self.rows[$0].tall })
         self.rows = rows
         self.selected = selected
         self.theme = theme
         if reload { syncing = true; table.reloadData(); syncing = false }
+        if !resized.isEmpty { table.noteHeightOfRows(withIndexesChanged: resized) }
         select()
         restyleVisible()
     }
@@ -319,8 +400,14 @@ let vsCodeBundle = "com.microsoft.VSCode"
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { SelectionRowView() }
 
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat { rows.indices.contains(row) && rows[row].tall ? 80 : 46 }
+
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let cell = ProjectRowCell()
+        cell.onAction = { [unowned self, unowned cell] action in
+            let r = table.row(for: cell)
+            if r >= 0 { onCloneAction?(r, action) }
+        }
         style(cell, row: row)
         return cell
     }
