@@ -7,6 +7,7 @@ enum PaneEvent: Sendable {
     case commandFinished(exitCode: Int, durationNs: UInt64), progress(active: Bool)
     case openURL(String), closeRequested(processAlive: Bool)
     case sessionLost   // the pane's host was killed, not ended: restart the pane instead of closing it
+    case clone(CloneWatch.Event)   // a cloning pane's git output (SurfaceBox.watch)
     case startSearch(String), endSearch, searchTotal(Int), searchSelected(Int)
 }
 
