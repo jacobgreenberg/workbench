@@ -70,7 +70,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private let mainPane = NSView()   // the terminals' split item, toolbar strip included
     private let column = NSView()   // the TODO list or the tree, switched by the tabs
     private var fileTreeRoot: String?   // whose folder the tree shows
-    private var todoProject: UUID?   // whose TODOs the list shows
+    private var inspectorProject: UUID?   // whose TODOs, folder and right-sidebar state the inspector shows
+    private var inspectorObservation: NSKeyValueObservation?
     private weak var scratchItem: NSToolbarItem?   // badged with the open scratch tabs
 
     init(store: Store, runtime: Runtime) {
@@ -202,14 +203,21 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                 self.store.changed()
             }
         }
-        inspectorTabs.onSelect = { [unowned self] i in showInspectorTab(i) }
-        showInspectorTab(0)
+        // Open/closed is per project: remember what the toggle (or a divider drag) did for the project on screen.
+        inspectorObservation = inspectorItem.observe(\.isCollapsed) { [weak self] _, _ in
+            MainActor.assumeIsolated { self?.saveInspector { $0.inspectorOpen = self?.inspectorItem.isCollapsed == false ? true : nil } }
+        }
+        inspectorTabs.onSelect = { [unowned self] i in
+            showInspectorTab(i, animated: true)
+            saveInspector { $0.inspectorTab = i == 0 ? nil : i }
+        }
+        showInspectorTab(0, animated: false)
         fileTree.hideClutter = store.layout.showClutterFiles != true
     }
 
     /// 0 TODO, 1 Files.
-    private func showInspectorTab(_ i: Int) {
-        inspectorTabs.select(i, animated: true)
+    private func showInspectorTab(_ i: Int, animated: Bool) {
+        inspectorTabs.select(i, animated: animated)
         todoList.isHidden = i != 0
         fileTree.isHidden = i != 1
     }
@@ -225,7 +233,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             store.changed()
         }
         todoList.onChange = { [unowned self] todos in
-            guard let p = activeProjectIndex, store.layout.projects[p].id == todoProject else { return }
+            guard let p = activeProjectIndex, store.layout.projects[p].id == inspectorProject else { return }
             store.layout.projects[p].todos = todos
             store.changed()
         }
@@ -337,6 +345,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             s.onFocus = { [unowned self] id in paneFocused(id) }
             s.onKey = { [unowned self] id in paneKeyDown(id) }
             s.contextMenu = { [unowned self] id in paneMenu(id) }
+            s.onPathClick = { [unowned self] id in clickedPath(nil, from: id).map { open(URL(fileURLWithPath: $0)) } }
             v = s
         case let .file(path):
             let m = FilePaneView(id: spec.id, path: path, theme: theme)
@@ -577,16 +586,28 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             ProcessInfo.processInfo.endActivity(a)
             activity = nil
         }
-        let shownProject = activeProjectIndex.map { store.layout.projects[$0].id }
-        if shownProject != todoProject {
-            todoProject = shownProject
-            todoList.show(activeProjectIndex.map { store.layout.projects[$0].todos ?? [] } ?? [])
+        let shownProject = activeProjectIndex.map { store.layout.projects[$0] }
+        if shownProject?.id != inspectorProject {
+            inspectorProject = shownProject?.id   // first: the collapse below saves into this project, unchanged
+            todoList.show(shownProject?.todos ?? [])
+            showInspectorTab(shownProject?.inspectorTab ?? 0, animated: false)
+            inspectorItem.isCollapsed = shownProject?.inspectorOpen != true
         }
         let root = activeProjectIndex.map { store.layout.projects[$0].path }
         if root != fileTreeRoot {
             fileTreeRoot = root
             fileTree.show(root: root)
         }
+    }
+
+    /// Records a change to the right sidebar in the project it is showing.
+    private func saveInspector(_ change: (inout Project) -> Void) {
+        guard let p = activeProjectIndex, store.layout.projects[p].id == inspectorProject else { return }
+        var project = store.layout.projects[p]
+        change(&project)
+        guard project != store.layout.projects[p] else { return }
+        store.layout.projects[p] = project
+        store.changed()
     }
 
     /// A project's tabs as the tab bar and the sidebar show them: title, and the busiest status among their panes.
@@ -901,11 +922,57 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private func openURL(_ url: String, from id: PaneID) {
         if let u = store.layout.jira?.url(url) { open(u); return }
         if let u = URL(string: url), u.scheme != nil { open(u); return }
-        var path = (url as NSString).expandingTildeInPath
-        if !path.hasPrefix("/"), let spec = spec(id), case let .terminal(cwd, _) = spec.kind {
-            path = URL(fileURLWithPath: cwd).appendingPathComponent(path).standardizedFileURL.path
+        open(URL(fileURLWithPath: clickedPath(url, from: id)!))
+    }
+
+    /// The file a ⌘-click opens: Ghostty's link `text` (nil: it saw none) resolved against the pane's folder. Agents
+    /// hard-wrap a long path over rows, so Ghostty may match one row's part (which can itself exist: the folder before
+    /// a break after `/`) or nothing. So the word under the click is joined with the text touching it on the rows
+    /// around it, and the longest join that exists wins over Ghostty's match. With no link and no such join, nothing.
+    private func clickedPath(_ text: String?, from id: PaneID) -> String? {
+        func resolve(_ t: String) -> String {
+            let path = (t as NSString).expandingTildeInPath
+            guard !path.hasPrefix("/"), let spec = spec(id), case let .terminal(cwd, _) = spec.kind else { return path }
+            return URL(fileURLWithPath: cwd).appendingPathComponent(path).standardizedFileURL.path
         }
-        open(URL(fileURLWithPath: path))
+        let path = text.map(resolve)
+        let joins = (views[id] as? SurfaceView)?.wordAtMouse().map { Self.rejoined($0.word, rows: $0.rows, at: $0.row) } ?? []
+        return joins.lazy.map(resolve).first { FileManager.default.fileExists(atPath: $0) } ?? path
+    }
+
+    /// `word` (on row `i` of `rows`) joined over the hard line breaks around it: with the text touching it on up to 3
+    /// rows above when it starts its row, and below when it ends its row; longest first, never `word` alone.
+    nonisolated static func rejoined(_ word: String, rows: [String], at i: Int) -> [String] {
+        guard rows.indices.contains(i), let r = rows[i].range(of: word) else { return [] }
+        let edge = CharacterSet(charactersIn: "`'\"()[]{}<>,;")
+        /// Each row's token at the break, nearest row first, going on only while a whole row is one token.
+        func touching(_ indices: [Int], last: Bool) -> [String] {
+            var out: [String] = []
+            for j in indices.prefix(3) {
+                let words = rows[j].split(whereSeparator: \.isWhitespace)
+                guard let token = last ? words.last : words.first else { break }
+                out.append(String(token))
+                if words.count > 1 { break }
+            }
+            return out
+        }
+        var heads = [""], tails = [""]
+        if rows[i][..<r.lowerBound].allSatisfy(\.isWhitespace) {
+            for t in touching((0..<i).reversed(), last: true) { heads.append(t + heads.last!) }
+        }
+        if rows[i][r.upperBound...].allSatisfy(\.isWhitespace) {
+            for t in touching(Array(rows.indices.dropFirst(i + 1)), last: false) { tails.append(tails.last! + t) }
+        }
+        var out: [String] = []
+        for h in heads {
+            for t in tails where !(h.isEmpty && t.isEmpty) {
+                let joined = (h + word + t).trimmingCharacters(in: edge)
+                out.append(joined)
+                let bare = String(joined.reversed().drop { ".:".contains($0) }.reversed())   // a sentence's full stop
+                if bare != joined { out.append(bare) }
+            }
+        }
+        return out.sorted { $0.count > $1.count }
     }
 
     /// The one link policy for terminal ⌘-clicks and markdown links. Terminal output and documents are untrusted, so
@@ -1530,6 +1597,16 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                 }
             }
             return "{}"
+        case "link":     // test harness: the link a right-click at cell `col`,`row` of `pane` copies, and the path a ⌘-click opens
+            guard let id = pane, let v = views[id] as? SurfaceView, let surface = v.surface,
+                  let col = msg["col"].flatMap(Double.init), let row = msg["row"].flatMap(Double.init) else { return #"{"error":"pane not shown"}"# }
+            let size = ghostty_surface_size(surface), scale = v.window?.backingScaleFactor ?? 2
+            let pos = NSPoint(x: (col + 0.5) * Double(size.cell_width_px) / scale,
+                              y: v.frame.height - (row + 0.5) * Double(size.cell_height_px) / scale)
+            let link = v.link(at: pos)
+            v.endLinkHover(at: pos)
+            let path = clickedPath(link, from: id) ?? ""
+            return String(data: try! JSONSerialization.data(withJSONObject: ["link": link ?? "", "path": path]), encoding: .utf8)!
         case "drag":     // test harness: drag `pane` by its header to the `edge` (left/right/up/down) side of `target`
             guard let id = pane, let src = views[id]?.superview, let w = src.window,
                   let dst = msg["target"].flatMap(UUID.init(uuidString:)).flatMap({ views[$0] }) else { return #"{"error":"pane not shown"}"# }

@@ -18,6 +18,8 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
     var onFocus: ((PaneID) -> Void)?
     var onKey: ((PaneID) -> Void)?   // every key press sent to the terminal
     var contextMenu: ((PaneID) -> NSMenu?)?   // shown on every right-click
+    var onPathClick: ((PaneID) -> Void)?   // ⌘-click where Ghostty sees no link: maybe part of a hard-wrapped path
+    private var hoveredLink: String?   // the link Ghostty reports under the mouse
     static var isReservedShortcut: (NSEvent) -> Bool = { _ in false }
 
     private var markedText = NSMutableAttributedString()
@@ -134,6 +136,8 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         return true
     }
 
+    func setHoveredLink(_ url: String) { hoveredLink = url.isEmpty ? nil : url }
+
     func setCursorShape(_ shape: ghostty_action_mouse_shape_e) {
         guard surface != nil, !closed else { return }
         switch shape {
@@ -176,13 +180,32 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
 
     /// The visible screen as text (an agent on the alternate screen keeps its history here, not in scrollback).
     func viewportText() -> String? {
+        read(ghostty_point_s(tag: GHOSTTY_POINT_VIEWPORT, coord: GHOSTTY_POINT_COORD_TOP_LEFT, x: 0, y: 0),
+             ghostty_point_s(tag: GHOSTTY_POINT_VIEWPORT, coord: GHOSTTY_POINT_COORD_BOTTOM_RIGHT, x: 0, y: 0))
+    }
+
+    /// The word under the mouse (Ghostty's word selection, so a path stays whole) and up to 3 screen rows each side
+    /// of its row: enough to rebuild a path an agent hard-wrapped over rows.
+    func wordAtMouse() -> (word: String, rows: [String], row: Int)? {
         guard let surface, !closed else { return nil }
-        let sel = ghostty_selection_s(
-            top_left: ghostty_point_s(tag: GHOSTTY_POINT_VIEWPORT, coord: GHOSTTY_POINT_COORD_TOP_LEFT, x: 0, y: 0),
-            bottom_right: ghostty_point_s(tag: GHOSTTY_POINT_VIEWPORT, coord: GHOSTTY_POINT_COORD_BOTTOM_RIGHT, x: 0, y: 0),
-            rectangle: false)
         var text = ghostty_text_s()
-        guard ghostty_surface_read_text(surface, sel, &text) else { return nil }
+        guard ghostty_surface_quicklook_word(surface, &text) else { return nil }
+        defer { ghostty_surface_free_text(surface, &text) }
+        let size = ghostty_surface_size(surface)
+        guard let p = text.text, text.tl_px_y >= 0, size.columns > 0 else { return nil }
+        let word = String(decoding: UnsafeRawBufferPointer(start: p, count: Int(text.text_len)), as: UTF8.self)
+        let row = Int(text.offset_start) / Int(size.columns)   // offsets count cells row by row from the viewport's top
+        let rows = (max(row - 3, 0)...min(row + 3, Int(size.rows) - 1)).map { y in
+            read(ghostty_point_s(tag: GHOSTTY_POINT_VIEWPORT, coord: GHOSTTY_POINT_COORD_EXACT, x: 0, y: UInt32(y)),
+                 ghostty_point_s(tag: GHOSTTY_POINT_VIEWPORT, coord: GHOSTTY_POINT_COORD_EXACT, x: UInt32(size.columns) - 1, y: UInt32(y))) ?? ""
+        }
+        return (word, rows, min(row, 3))
+    }
+
+    private func read(_ from: ghostty_point_s, _ to: ghostty_point_s) -> String? {
+        guard let surface, !closed else { return nil }
+        var text = ghostty_text_s()
+        guard ghostty_surface_read_text(surface, ghostty_selection_s(top_left: from, bottom_right: to, rectangle: false), &text) else { return nil }
         defer { ghostty_surface_free_text(surface, &text) }
         guard let p = text.text else { return "" }
         return String(decoding: UnsafeRawBufferPointer(start: p, count: Int(text.text_len)), as: UTF8.self)
@@ -420,6 +443,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         let mods = GhosttyInput.ghosttyMods(event.modifierFlags)
         ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, mods)
         ghostty_surface_mouse_pressure(surface, 0, 0)
+        if event.modifierFlags.contains(.command), hoveredLink == nil { onPathClick?(paneID) }   // a link opens via OPEN_URL
     }
 
     override func otherMouseDown(with event: NSEvent) {
@@ -438,7 +462,35 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
     // agent TUIs do, and Ghostty would hand them the click instead.
     override func rightMouseDown(with event: NSEvent) {
         guard !closed, let menu = contextMenu?(paneID) else { return super.rightMouseDown(with: event) }
-        menu.popUp(positioning: nil, at: convert(event.locationInWindow, from: nil), in: self)   // not popUpContextMenu: it adds AutoFill
+        let pos = convert(event.locationInWindow, from: nil)
+        if let link = link(at: pos) {
+            let copy = NSMenuItem(title: "Copy Link", action: #selector(copyLink(_:)), keyEquivalent: "")
+            copy.target = self
+            copy.representedObject = link
+            menu.insertItem(copy, at: 0)
+            menu.insertItem(.separator(), at: 1)
+        }
+        menu.popUp(positioning: nil, at: pos, in: self)   // not popUpContextMenu: it adds AutoFill
+        endLinkHover(at: pos)
+    }
+
+    /// The link at `pos`. Ghostty finds links only with ⌘ held, so this hovers there as if it were: Ghostty reports
+    /// the link synchronously and underlines it until `endLinkHover` hands back the real modifiers.
+    func link(at pos: NSPoint) -> String? {
+        guard let surface, !closed else { return nil }
+        ghostty_surface_mouse_pos(surface, pos.x, frame.height - pos.y, GHOSTTY_MODS_SUPER)
+        return hoveredLink
+    }
+
+    func endLinkHover(at pos: NSPoint) {
+        guard let surface, !closed else { return }
+        ghostty_surface_mouse_pos(surface, pos.x, frame.height - pos.y, GhosttyInput.ghosttyMods(NSEvent.modifierFlags))
+    }
+
+    @objc private func copyLink(_ sender: NSMenuItem) {
+        guard let link = sender.representedObject as? String else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(link, forType: .string)
     }
 
     override func mouseEntered(with event: NSEvent) {
