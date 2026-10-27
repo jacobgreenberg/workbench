@@ -6,6 +6,15 @@ struct TabItem: Equatable, Sendable { let title: String; let status: PaneStatus 
 final class HandButton: NSButton {
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
 
+    // Cursor rects lose to a text view's I-beam tracking underneath (the file preview's zoom bar); a cursorUpdate area wins.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if !trackingAreas.contains(where: { $0.owner === self && $0.options.contains(.cursorUpdate) }) {
+            addTrackingArea(NSTrackingArea(rect: .zero, options: [.cursorUpdate, .activeAlways, .inVisibleRect], owner: self))
+        }
+    }
+    override func cursorUpdate(with event: NSEvent) { NSCursor.pointingHand.set() }
+
     /// A round Liquid Glass icon button (new tab, add project).
     static func glass(_ symbol: String, _ label: String, _ size: NSControl.ControlSize = .regular) -> HandButton {
         let b = HandButton(image: NSImage(systemSymbolName: symbol, accessibilityDescription: label)!, target: nil, action: nil)
