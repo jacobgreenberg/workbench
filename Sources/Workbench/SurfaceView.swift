@@ -352,6 +352,13 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
 
     // MARK: - Window / screen
 
+    /// AppKit never calls resignFirstResponder on a first responder removed from its window (a split rebuild removes
+    /// every pane), so the flag would stay set and this pane would take the next pane's ⌥←/⌘⌫ key equivalents.
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        if newWindow !== window { focusDidChange(false) }
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
