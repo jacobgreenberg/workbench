@@ -9,6 +9,7 @@ if CommandLine.arguments.contains("--selfcheck") {
     controlSelfCheck()
     agentsSelfCheck()
     transcriptSelfCheck()
+    gitCloneSelfCheck()
     print("selfcheck ok")
     exit(0)
 }
@@ -19,6 +20,15 @@ if CommandLine.arguments.contains("--agents") {   // what quit would record for 
     let working = Agents.backgroundWork(for: Set(runningAgents.keys))
     for (pane, cmd) in runningAgents { print(pane, cmd ?? "(id not known yet; keeps saved command)", Agents.transcript(for: pane)?.path ?? "(no transcript)", working.contains(pane) ? "(background work)" : "") }
     FileHandle.standardError.write(Data("scan: \(Int(Date().timeIntervalSince(t0) * 1000)) ms\n".utf8))
+    exit(0)
+}
+if let i = CommandLine.arguments.firstIndex(of: "--clonewatch"), i + 1 < CommandLine.arguments.count {   // --clonewatch <file>: what a clone pane's output (e.g. `script` of git clone) reports
+    let w = CloneWatch()
+    let data = FileManager.default.contents(atPath: CommandLine.arguments[i + 1]) ?? Data()
+    let chunk = i + 2 < CommandLine.arguments.count ? Int(CommandLine.arguments[i + 2]) ?? data.count : data.count   // as the pty delivers it
+    for start in stride(from: 0, to: data.count, by: max(1, chunk)) {
+        for e in data[start..<min(data.count, start + chunk)].withUnsafeBytes({ w.scan($0) }) { print(e) }
+    }
     exit(0)
 }
 if let i = CommandLine.arguments.firstIndex(of: "--transcript"), i + 2 < CommandLine.arguments.count {   // --transcript <file> <query>: parse + search timing

@@ -156,6 +156,13 @@ enum ControlClient {
             let p = rest.first ?? "."
             let abs = p.hasPrefix("/") ? p : FileManager.default.currentDirectoryPath + "/" + p
             msg = ["cmd": "add", "path": (abs as NSString).standardizingPath]
+        case "clone":
+            guard let url = rest.first else { return usage() }
+            msg = ["cmd": "clone", "url": url]
+            if let p = rest.dropFirst().first {
+                let abs = p.hasPrefix("/") ? p : FileManager.default.currentDirectoryPath + "/" + p
+                msg["path"] = (abs as NSString).standardizingPath
+            }
         default:
             return usage()
         }
@@ -184,6 +191,7 @@ enum ControlClient {
           send <pane-id> <text...>
           open <path>
           add [dir]
+          clone <url> [dir]
 
         """.utf8))
         return 2

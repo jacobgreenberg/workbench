@@ -42,6 +42,13 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private var seekWork: DispatchWorkItem?
     private var findResolving = false
     private var activity: NSObjectProtocol?
+    /// Projects whose first terminal is cloning them, by project id: the sidebar row shows progress, a prompt or the
+    /// failure. In memory only: a clone interrupted by quitting leaves an ordinary project.
+    private var clones: [UUID: Clone] = [:]
+    private struct Clone { let pane: PaneID; var remote: GitRemote; var path: String; var percent = 0; var error: String?; var status: CloneStatus = .cloning(0) }
+    private var cloneInput: [PaneID: String] = [:]   // the clone command, typed into the pane's new shell
+    private var newProjectSheet: NewProjectSheet?
+    private var newProjectClones = true   // the sheet opens on the kind used last
 
     private let sidebar = SidebarView(frame: .zero)
     private let tabBar = TabBarView(frame: .zero)
@@ -234,6 +241,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         sidebar.onRemove = { [unowned self] i in project(atRow: i).map(removeProject) }
         sidebar.onShowHidden = { [unowned self] on in setShowHidden(on) }
         sidebar.onToggleHidden = { [unowned self] i in toggleHidden(row: i) }
+        sidebar.onCloneAction = { [unowned self] i, action in project(atRow: i).map { cloneAction(store.layout.projects[$0].id, action) } }
         tabBar.onSelect = { [unowned self] i in selectTab(i) }
         tabBar.onClose = { [unowned self] i in closeTab(at: i) }
         tabBar.onNew = { [unowned self] in newTab(nil) }
@@ -331,8 +339,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         switch spec.kind {
         case let .terminal(cwd, launch):
             let s = SurfaceView(app: runtime.app, id: spec.id, cwd: cwd,
-                                initialInput: launch.map { $0.command + "\n" },
+                                initialInput: cloneInput.removeValue(forKey: spec.id) ?? launch.map { $0.command + "\n" },
                                 env: env(for: spec.id), scrollbackLimit: launch?.scrollbackLimit)
+            if clones.values.contains(where: { $0.pane == spec.id }) { s.box.watch.withLock { $0 = CloneWatch() } }
             s.onFocus = { [unowned self] id in paneFocused(id) }
             s.onKey = { [unowned self] id in paneKeyDown(id) }
             s.contextMenu = { [unowned self] id in paneMenu(id) }
@@ -556,7 +565,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         sidebar.update(rows: visible.map { projects[$0] }.map { p in
             let items = tabItems(p)
             return SidebarRow(id: p.id, name: p.name, path: p.path, status: items.map(\.status).max() ?? .idle,
-                              tabCount: items.count)
+                              tabCount: items.count, clone: clones[p.id]?.status)
         }, selected: visible.firstIndex(of: store.layout.activeProject) ?? -1,
            hiddenCount: projects.count { $0.workspace == store.layout.activeWorkspace && $0.hidden == true },
            showingHidden: showingHidden, theme: theme)
@@ -676,6 +685,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     /// attention); a key typed into it then is the answer, and the turn carries on.
     private func paneKeyDown(_ id: PaneID) {
         if progressing.contains(id), status[id] != .busy { setStatus(id, .busy) }
+        if let (pid, c) = clone(of: id), case .waiting = c.status {   // typing answers git's prompt
+            surfaceView(for: id)?.box.watch.withLock { $0 }?.answered()
+            clones[pid]?.status = .cloning(c.percent)
+            updateChrome()
+        }
     }
 
     private func isWatched(_ id: PaneID) -> Bool {
@@ -762,6 +776,10 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             if active { progressing.insert(id) } else { progressing.remove(id) }
             if active, status[id] != .busy || background.contains(id) { setStatus(id, .busy) }   // a turn started: it, not the hold, decides when it ends
             else if !active, status[id] == .busy { setStatus(id, .done) }
+        case let .clone(e):
+            cloneEvent(id, e)
+        case let .commandFinished(code, _) where clone(of: id).map({ !$0.1.status.isFailed }) == true:
+            cloneFinished(id, exitCode: code)
         case let .commandFinished(_, ns):
             progressing.remove(id)
             if ns > 5_000_000_000 {
@@ -1124,6 +1142,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         progressing.remove(id)
         background.remove(id)
         if findPane == id { hideFind(refocus: false) }
+        if let (pid, c) = clone(of: id), !c.status.isFailed { clones[pid]?.status = .failed("pane closed") }
     }
 
     // Close paths resolve their target by id only after any confirm dialog: the modal run loop keeps
@@ -1401,6 +1420,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private func dropProject(_ i: Int) {
         // A closed scratch (never in the list) hands over to the first project shown.
         let pos = i == store.layout.activeProject ? visibleProjects.firstIndex(of: i) ?? (store.layout.projects[i].scratch == true ? 0 : nil) : nil
+        clones[store.layout.projects[i].id] = nil
         store.layout.projects.remove(at: i)
         if let pos { selectVisible(near: pos); return }
         var active = store.layout.activeProject
@@ -1527,12 +1547,45 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             guard let path = msg["path"] else { return #"{"error":"no path"}"# }
             openFile(path)
             return "{}"
+        case "clone":
+            guard let remote = msg["url"].flatMap(GitRemote.init) else { return #"{"error":"not a git url"}"# }
+            let path = msg["path"] ?? ((cloneLocations().first ?? NSHomeDirectory()) as NSString).appendingPathComponent(remote.folder)
+            guard !FileManager.default.fileExists(atPath: path) else { return #"{"error":"destination exists"}"# }
+            clone(remote, into: path)
+            return "{}"
         #if DEBUG
         case "restore":  // test harness: restore the backup file at `path`, skipping the Settings dialogs
             guard let path = msg["path"], let data = readFile(URL(fileURLWithPath: path), cap: Backup.maxSize),
                   let b = try? Backup.decode(data), let rollback = try? Backup.saveCurrent(store.layout) else { return #"{"error":"bad backup"}"# }
             DispatchQueue.main.async { (NSApp.delegate as? AppDelegate)?.restore(b, rollback: rollback) }
             return "{}"
+        case "snapshot":   // test harness: the window (and its sheet, if any) drawn into <path>.png / <path>-sheet.png
+            guard let path = msg["path"], let window else { return #"{"error":"no path"}"# }
+            for (w, suffix) in [(window, ""), (window.attachedSheet, "-sheet")] {
+                guard let view = w?.contentView?.superview, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { continue }
+                view.cacheDisplay(in: view.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path + suffix + ".png"))
+            }
+            return "{}"
+        case "newproject":   // test harness: open the New Project sheet, optionally prefilled with `url`
+            showNewProject(url: msg["url"] ?? "")
+            return "{}"
+        case "sheet":   // test harness: the New Project sheet's state, after setting `url`/`name` and clicking `press` (primary/openExisting/cancel)
+            guard let sheet = newProjectSheet else { return #"{"error":"no sheet"}"# }
+            var state = sheet.testState(url: msg["url"], name: msg["name"])
+            if let press = msg["press"] { state["pressed"] = sheet.testPress(press) ? "yes" : "no" }
+            return (try? JSONSerialization.data(withJSONObject: state, options: [.sortedKeys])).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+        case "cloneaction":   // test harness: a failed clone's sidebar button (`name`: retry/edit/remove) on the project called `project`
+            guard let p = store.layout.projects.first(where: { $0.name == msg["project"] }), clones[p.id] != nil else { return #"{"error":"no clone"}"# }
+            cloneAction(p.id, msg["name"] == "remove" ? .remove : msg["name"] == "edit" ? .editURL : .retry)
+            return "{}"
+        case "viewport":   // test harness: the text on a pane's screen
+            guard let text = surfaceView(for: pane ?? UUID())?.viewportText(),
+                  let d = try? JSONSerialization.data(withJSONObject: ["text": text]) else { return #"{"error":"pane not shown"}"# }
+            return String(decoding: d, as: UTF8.self)
+        case "clones":   // test harness: each cloning project's row state, by project name
+            let rows = Dictionary(clones.map { c in (store.layout.projects.first { $0.id == c.key }?.name ?? "?", "\(c.value.status)") }) { a, _ in a }
+            return (try? JSONSerialization.data(withJSONObject: rows, options: [.sortedKeys])).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
         case "action":   // test harness: run a menu action, e.g. "newTab:", without needing keyboard focus
             let sel = NSSelectorFromString(msg["name"] ?? "")
             guard responds(to: sel) else { return #"{"error":"unknown action"}"# }
@@ -1698,14 +1751,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         let cur = v.firstIndex(of: store.layout.activeProject) ?? (d > 0 ? -1 : 0)   // none selected: start at an end
         selectProject(v[(cur + d + v.count) % v.count])
     }
-    @objc func addProject(_ sender: Any?) {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.prompt = "Add Project"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        addProject(at: url)
-    }
+    @objc func addProject(_ sender: Any?) { showNewProject() }
     private func addProject(at url: URL) {
         if let i = store.layout.projects.firstIndex(where: { $0.path == url.path && $0.scratch != true }) { selectProject(i); return }
         let spec = PaneSpec(id: UUID(), kind: .terminal(cwd: url.path, launch: nil))
@@ -1716,6 +1762,131 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         store.changed()
         render()
     }
+
+    // MARK: - New Project, Clone Repository
+
+    /// The New Project sheet. `url` prefills Clone Repository; `replacing` is a failed clone it supersedes (Edit URL…).
+    private func showNewProject(url: String = "", in parent: String? = nil, replacing: UUID? = nil) {
+        guard let window, newProjectSheet == nil else { return }
+        let workspace = workspaces.first { $0.id == store.layout.activeWorkspace }?.name ?? ""
+        var locations = cloneLocations()
+        if let parent { locations.removeAll { $0 == parent }; locations.insert(parent, at: 0) }
+        let sheet = NewProjectSheet(workspace: workspace, locations: locations, url: url, cloning: !url.isEmpty || newProjectClones)
+        sheet.onDone = { [unowned self] result in
+            newProjectSheet = nil
+            switch result {
+            case let .open(url)?:
+                newProjectClones = false
+                addProject(at: url)
+            case let .clone(remote, path)?:
+                newProjectClones = true
+                if let replacing, let i = store.layout.projects.firstIndex(where: { $0.id == replacing }) { discardProject(i) }
+                clone(remote, into: path)
+            case nil:
+                break
+            }
+        }
+        newProjectSheet = sheet
+        sheet.begin(on: window)
+    }
+
+    /// Where clones go, the default first: folders cloned into before, then the folders most projects sit in.
+    private func cloneLocations() -> [String] {
+        let fm = FileManager.default
+        var counts: [String: Int] = [:]
+        for p in store.layout.projects where p.scratch != true { counts[(p.path as NSString).deletingLastPathComponent, default: 0] += 1 }
+        let parents = counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }.map(\.key)
+        var seen = Set<String>(), out: [String] = []
+        var isDir: ObjCBool = false
+        for path in (store.layout.cloneLocations ?? []) + parents + [NSHomeDirectory() + "/Workspace", NSHomeDirectory()]
+        where out.count < 6 && fm.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue && seen.insert(path).inserted {
+            out.append(path)
+        }
+        return out
+    }
+
+    /// Adds the project at once: its terminal starts in the parent folder and runs the clone, then `cd`s into it.
+    private func clone(_ remote: GitRemote, into path: String) {
+        let parent = (path as NSString).deletingLastPathComponent, folder = (path as NSString).lastPathComponent
+        var recent = store.layout.cloneLocations ?? []
+        recent.removeAll { $0 == parent }
+        store.layout.cloneLocations = Array(([parent] + recent).prefix(6))
+        let spec = PaneSpec(id: UUID(), kind: .terminal(cwd: parent, launch: nil))
+        let project = Project(id: UUID(), path: path, name: folder,
+                              tabs: [Tab(id: UUID(), title: folder, root: .leaf(spec), focused: spec.id)],
+                              activeTab: 0, workspace: store.layout.activeWorkspace)
+        store.layout.projects.append(project)
+        clones[project.id] = Clone(pane: spec.id, remote: remote, path: path)
+        cloneInput[spec.id] = remote.command(into: folder) + "\n"
+        activate(store.layout.projects.count - 1)
+        store.changed()
+        render()
+        createHidden(spec.id)   // runs even if another project is shown before this one draws
+    }
+
+    private func clone(of pane: PaneID) -> (UUID, Clone)? {
+        clones.first { $0.value.pane == pane }.map { ($0.key, $0.value) }
+    }
+
+    private func cloneEvent(_ pane: PaneID, _ e: CloneWatch.Event) {
+        guard let (id, c) = clone(of: pane), !c.status.isFailed else { return }
+        switch e {
+        case let .progress(p):
+            clones[id]?.percent = p
+            clones[id]?.status = .cloning(p)
+        case let .prompt(text):
+            clones[id]?.status = .waiting(text)
+            setStatus(pane, .attention, body: text)
+        case let .error(text):
+            clones[id]?.error = text
+        }
+        updateChrome()
+    }
+
+    private func cloneFinished(_ pane: PaneID, exitCode: Int) {
+        guard let (id, c) = clone(of: pane) else { return }
+        surfaceView(for: pane)?.box.watch.withLock { $0 = nil }
+        if exitCode == 0 {
+            clones[id] = nil
+            fileTreeRoot = nil   // its folder exists now: the Files tab reads it again
+            fileTree.show(root: nil)
+            setStatus(pane, .done, body: "Cloned into \((c.path as NSString).abbreviatingWithTildeInPath)")
+        } else {
+            clones[id]?.status = .failed(exitCode == 130 ? "cancelled" : c.error ?? "git exited with \(exitCode)")
+            if status[pane] == .attention { status[pane] = .idle }
+            updateChrome()
+        }
+        render(focus: false)
+    }
+
+    private func cloneAction(_ id: UUID, _ action: CloneAction) {
+        guard let c = clones[id], c.status.isFailed, let i = store.layout.projects.firstIndex(where: { $0.id == id }) else { return }
+        switch action {
+        case .retry:
+            guard let view = surfaceView(for: c.pane), let session = view.box.session.withLock({ $0 }) else {   // its pane is gone: start over
+                discardProject(i)
+                return clone(c.remote, into: c.path)
+            }
+            view.box.watch.withLock { $0 = CloneWatch() }
+            clones[id] = Clone(pane: c.pane, remote: c.remote, path: c.path)
+            Array((c.remote.command(into: (c.path as NSString).lastPathComponent) + "\r").utf8).withUnsafeBytes { session.write($0) }   // typed, not pasted: it runs
+            activate(i)
+            render()
+        case .editURL:
+            showNewProject(url: c.remote.url, in: (c.path as NSString).deletingLastPathComponent, replacing: id)
+        case .remove:
+            discardProject(i)
+            store.changed()
+            render()
+        }
+    }
+
+    /// Closes a project's panes and drops it, without asking (a failed clone has nothing to lose).
+    private func discardProject(_ i: Int) {
+        store.layout.projects[i].tabs.flatMap { $0.root.leaves.map(\.id) }.forEach(destroy)
+        dropProject(i)
+    }
+
     // Not `toggleSidebar(_:)` in the menu: NSWindow implements that action itself and, earlier in the responder chain,
     // swallows it. The split view animates it; collapseObservation persists it.
     @objc func toggleProjectSidebar(_ sender: Any?) { split.toggleSidebar(sender) }

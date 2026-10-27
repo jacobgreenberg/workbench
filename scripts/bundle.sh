@@ -5,15 +5,20 @@ cd "$(dirname "$0")/.."
 SI=vendor/ghostty-src/src/shell-integration
 [ -d "$SI" ] || { echo "missing $SI: run scripts/ghosttykit.sh" >&2; exit 1; }
 
-swift build -c release
-
+CONFIG=release
 APP=build.noindex/Workbench.app   # .noindex: Spotlight/launchers list only the /Applications copy
+if [ "${1:-}" = "--debug" ]; then   # the test harness (control socket test commands, PANE_STATE_DIR) is debug only
+  CONFIG=debug
+  APP=build.noindex/Workbench-debug.app
+fi
+swift build -c "$CONFIG"
+
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/ghostty"
-cp .build/release/Workbench "$APP/Contents/MacOS/Workbench"
-cp -R .build/release/TreeSitter*.bundle "$APP/Contents/Resources/"   # grammar highlight queries (Syntax.swift)
+cp .build/$CONFIG/Workbench "$APP/Contents/MacOS/Workbench"
+cp -R .build/$CONFIG/TreeSitter*.bundle "$APP/Contents/Resources/"   # grammar highlight queries (Syntax.swift)
 mkdir -p "$APP/Contents/Helpers"; ln -s ../MacOS/Workbench "$APP/Contents/Helpers/pane"
-cp .build/release/wbhost "$APP/Contents/Helpers/WorkbenchHost"
+cp .build/$CONFIG/wbhost "$APP/Contents/Helpers/WorkbenchHost"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp -R Resources/themes "$APP/Contents/Resources/themes"
 cp -R Resources/fileicons "$APP/Contents/Resources/fileicons"

@@ -215,6 +215,7 @@ struct Layout: Codable, Equatable, Sendable {
     var backupRemote: String? = nil   // git remote Backup syncs to (Settings > Backup; clone in Store.directory/sync); never exported
     var showClutterFiles: Bool? = nil   // Files tab lists dotfiles and build folders (nil = hidden)
     var jira: JiraLinks? = nil   // ticket keys ⌘-click to the browse URL (Settings > Links); nil = off
+    var cloneLocations: [String]? = nil   // folders New Project has cloned into, most recent first (the next clone's default)
 
     static let `default` = Layout(
         projects: [],
