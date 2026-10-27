@@ -146,7 +146,8 @@ enum FocusDirection: Sendable { case left, right, up, down }
 }
 
 // FilePaneView.swift — .md previewed, other files as monospace code highlighted via Syntax; reloads on file change. Read-only (selectable, links clickable). A regular `.file` pane in the split tree, focusable like a terminal (acceptsFirstResponder forwards to its text view; onFocus → paneFocused), so ⌘W closes it. WorkspaceController.openFile (⌘-click a path, `pane open`, Open File…, Files tree selection with focus false) retargets the tab's existing file pane (kind swapped, view destroyed and rebuilt by the provider) or splits one in right of the focused pane: one preview pane per tab
-@MainActor final class FilePaneView: NSView { let paneID: PaneID; init(id: PaneID, path: String, theme: Theme); func apply(theme: Theme); func close() }
+// Zoom: each preview has its own ZoomBar (glass capsule top-right: −, percentage = reset, +); ⌘=/⌘-/⌘0 (Bigger/Smaller/Actual Size) zoom a focused preview instead of the terminal font. 50–300 % in 10 % steps, applied by scaling the rendered fonts and indents (text rewraps); WorkspaceController.fileZoom keeps it per pane across retargets (in memory, not saved)
+@MainActor final class FilePaneView: NSView { let paneID: PaneID; init(id: PaneID, path: String, theme: Theme, zoom: CGFloat = 1); private(set) var zoom: CGFloat; var onZoom: ((CGFloat) -> Void)?; func setZoom(_ z: CGFloat); func apply(theme: Theme); func close() }
 
 // Syntax.swift — tree-sitter grammars (SwiftPM packages; queries read from their resource bundles in Contents/Resources)
 enum Syntax {

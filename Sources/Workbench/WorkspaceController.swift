@@ -339,7 +339,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             s.onPathClick = { [unowned self] id in clickedPath(nil, from: id).map { open(URL(fileURLWithPath: $0)) } }
             v = s
         case let .file(path):
-            let m = FilePaneView(id: spec.id, path: path, theme: theme)
+            let m = FilePaneView(id: spec.id, path: path, theme: theme, zoom: fileZoom[spec.id] ?? 1)
+            m.onZoom = { [unowned self, id = spec.id] z in fileZoom[id] = z }
             m.onOpenLink = { [unowned self] url in open(url) }
             m.onFocus = { [unowned self] id in paneFocused(id) }
             v = m
@@ -1111,6 +1112,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         ids.contains { surfaceView(for: $0)?.needsConfirmQuit ?? false }
     }
 
+    private var fileZoom: [PaneID: CGFloat] = [:]   // a file pane's zoom, kept while it is retargeted to other files
+
     private func destroy(_ id: PaneID) {
         if let s = views[id] as? SurfaceView { s.close() }
         if let m = views[id] as? FilePaneView { m.close() }
@@ -1127,6 +1130,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     // processing shell exits and socket commands, so indices captured before it may be stale.
     func closePane(_ id: PaneID, confirm ask: Bool = true) {
         if ask, needsConfirm([id]), !confirm("Close this pane?") { return }
+        fileZoom[id] = nil
         guard let (p, t) = locate(id) else { destroy(id); return }
         destroy(id)
         if let root = store.layout.projects[p].tabs[t].root.removing(id) {
@@ -1756,9 +1760,20 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     }
     @objc func findNext(_ sender: Any?) { if transcript != nil { stepTranscript(1) } else { findSurface?.perform("navigate_search:next") } }
     @objc func findPrevious(_ sender: Any?) { if transcript != nil { stepTranscript(-1) } else { findSurface?.perform("navigate_search:previous") } }
-    @objc func increaseFontSize(_ sender: Any?) { focusedPane.flatMap { surfaceView(for: $0) }?.perform("increase_font_size:1") }
-    @objc func decreaseFontSize(_ sender: Any?) { focusedPane.flatMap { surfaceView(for: $0) }?.perform("decrease_font_size:1") }
-    @objc func resetFontSize(_ sender: Any?) { focusedPane.flatMap { surfaceView(for: $0) }?.perform("reset_font_size") }
+    // A focused file preview zooms itself instead.
+    private var focusedFile: FilePaneView? { focusedPane.flatMap { views[$0] as? FilePaneView } }
+    @objc func increaseFontSize(_ sender: Any?) {
+        if let f = focusedFile { return f.setZoom(f.zoom + 0.1) }
+        focusedPane.flatMap { surfaceView(for: $0) }?.perform("increase_font_size:1")
+    }
+    @objc func decreaseFontSize(_ sender: Any?) {
+        if let f = focusedFile { return f.setZoom(f.zoom - 0.1) }
+        focusedPane.flatMap { surfaceView(for: $0) }?.perform("decrease_font_size:1")
+    }
+    @objc func resetFontSize(_ sender: Any?) {
+        if let f = focusedFile { return f.setZoom(1) }
+        focusedPane.flatMap { surfaceView(for: $0) }?.perform("reset_font_size")
+    }
     @objc func openFileDialog(_ sender: Any?) {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.text]

@@ -51,19 +51,20 @@ private struct Renderer: Sendable {
     let text: String
     let path: String
     let palette: Palette
+    let zoom: CGFloat
 
     /// Markdown is previewed; anything else is shown as code, highlighted when its language is known.
     func render() -> NSAttributedString {
         let url = URL(fileURLWithPath: path)
         guard !["md", "markdown"].contains(url.pathExtension.lowercased()) else {
-            var w = Walker(palette: palette, baseDir: url.deletingLastPathComponent())
+            var w = Walker(palette: palette, baseDir: url.deletingLastPathComponent(), z: zoom)
             w.visit(Document(parsing: text))
             return w.out
         }
         let style = NSMutableParagraphStyle()
         style.lineSpacing = 2
         let out = NSMutableAttributedString(string: text, attributes: [
-            .font: NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular),
+            .font: NSFont.monospacedSystemFont(ofSize: 12.5 * zoom, weight: .regular),
             .foregroundColor: palette.body.ns,
             .paragraphStyle: style,
         ])
@@ -75,15 +76,16 @@ private struct Renderer: Sendable {
         let out = NSMutableAttributedString()
         let p: Palette
         let baseDir: URL
+        let z: CGFloat   // zoom: every font size and indent scales by it
         var heading = 0, bold = false, italic = false, strike = false
         var quote = 0, listDepth = 0
         var link: URL?
 
-        init(palette: Palette, baseDir: URL) { p = palette; self.baseDir = baseDir }
+        init(palette: Palette, baseDir: URL, z: CGFloat) { p = palette; self.baseDir = baseDir; self.z = z }
 
         func font(size: CGFloat? = nil) -> NSFont {
             let sizes: [CGFloat] = [14, 26, 22, 18, 16, 14, 14]
-            var f = NSFont.systemFont(ofSize: size ?? sizes[heading], weight: heading > 0 || bold ? .bold : .regular)
+            var f = NSFont.systemFont(ofSize: (size ?? sizes[heading]) * z, weight: heading > 0 || bold ? .bold : .regular)
             if italic { f = NSFont(descriptor: f.fontDescriptor.withSymbolicTraits(.italic), size: 0) ?? f }   // NSFontManager is main-thread only
             return f
         }
@@ -92,9 +94,9 @@ private struct Renderer: Sendable {
             let s = NSMutableParagraphStyle()
             s.lineSpacing = 4; s.paragraphSpacing = 10
             if heading > 0 { s.paragraphSpacingBefore = 14 }
-            let level = CGFloat(listDepth) * 20 + CGFloat(quote) * 16 + indent
+            let level = (CGFloat(listDepth) * 20 + CGFloat(quote) * 16 + indent) * z
             s.headIndent = level
-            s.firstLineHeadIndent = listDepth > 0 ? level - 20 : level
+            s.firstLineHeadIndent = listDepth > 0 ? level - 20 * z : level
             if listDepth > 0 { s.tabStops = [NSTextTab(textAlignment: .left, location: level)] }
             if centered { s.alignment = .center }
             return s
@@ -127,7 +129,7 @@ private struct Renderer: Sendable {
 
         mutating func visitInlineCode(_ c: InlineCode) {
             var a = attrs()
-            a[.font] = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+            a[.font] = NSFont.monospacedSystemFont(ofSize: 13 * z, weight: .regular)
             a[.foregroundColor] = p.inlineCode.ns
             a[.backgroundColor] = p.codeBackground.ns
             add(c.code, a)
@@ -136,17 +138,17 @@ private struct Renderer: Sendable {
         mutating func visitCodeBlock(_ c: CodeBlock) {
             let s = NSMutableParagraphStyle()
             s.lineSpacing = 2; s.paragraphSpacing = 0
-            s.headIndent = 12; s.firstLineHeadIndent = 12; s.tailIndent = -12
+            s.headIndent = 12 * z; s.firstLineHeadIndent = 12 * z; s.tailIndent = -12 * z
             let code = c.code.trimmingCharacters(in: .newlines)
             let start = out.length
             add(code + "\n", [
-                .font: NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular),
+                .font: NSFont.monospacedSystemFont(ofSize: 12.5 * z, weight: .regular),
                 .foregroundColor: p.body.ns,
                 .backgroundColor: p.codeBackground.ns,
                 .paragraphStyle: s,
             ])
             if let key = c.language.flatMap(Syntax.key(fence:)) { highlight(out, at: start, code, key: key, p) }
-            add("\n", [.font: NSFont.systemFont(ofSize: 6)])
+            add("\n", [.font: NSFont.systemFont(ofSize: 6 * z)])
         }
 
         mutating func visitLink(_ l: Markdown.Link) {
@@ -182,8 +184,8 @@ private struct Renderer: Sendable {
         }
 
         mutating func visitTable(_ t: Markdown.Table) {
-            let mono = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
-            let bold = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .bold)
+            let mono = NSFont.monospacedSystemFont(ofSize: 12.5 * z, weight: .regular)
+            let bold = NSFont.monospacedSystemFont(ofSize: 12.5 * z, weight: .bold)
             func row(_ cells: [String], _ f: NSFont) {
                 var a = attrs()
                 a[.font] = f
@@ -223,12 +225,18 @@ private final class FocusTextView: NSTextView {
     private var pending: DispatchWorkItem?
     var onOpenLink: ((URL) -> Void)?
     var onFocus: ((PaneID) -> Void)?
+    var onZoom: ((CGFloat) -> Void)?   // the user changed this pane's zoom
+    private(set) var zoom: CGFloat
+    static let zoomRange: ClosedRange<CGFloat> = 0.5...3
+    private let zoomBar = ZoomBar()
+    private var scrollScale: CGFloat = 1   // the next render restores the scroll offset scaled by this (zoom changed)
     private let renderQueue = DispatchQueue(label: "pane.file", qos: .userInitiated)   // one render in flight per pane
 
-    init(id: PaneID, path: String, theme: Theme) {
+    init(id: PaneID, path: String, theme: Theme, zoom: CGFloat = 1) {
         paneID = id
         self.path = path
         palette = Palette(theme)
+        self.zoom = min(max(zoom, Self.zoomRange.lowerBound), Self.zoomRange.upperBound)
         super.init(frame: .zero)
         scrollView.frame = bounds
         scrollView.autoresizingMask = [.width, .height]
@@ -246,7 +254,26 @@ private final class FocusTextView: NSTextView {
         textView.isVerticallyResizable = true
         scrollView.documentView = textView
         addSubview(scrollView)
+        zoomBar.onStep = { [unowned self] in setZoom($0 == 0 ? 1 : self.zoom + 0.1 * CGFloat($0)) }
+        zoomBar.set(self.zoom)
+        zoomBar.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(zoomBar)
+        NSLayoutConstraint.activate([
+            zoomBar.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            zoomBar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),   // clear of the scroller
+        ])
         apply(theme: theme)
+    }
+
+    /// Clamped to zoomRange and rounded to 10% steps; re-renders only on a change.
+    func setZoom(_ z: CGFloat) {
+        let z = (min(max(z, Self.zoomRange.lowerBound), Self.zoomRange.upperBound) * 10).rounded() / 10
+        guard z != zoom else { return }
+        scrollScale *= z / zoom
+        zoom = z
+        zoomBar.set(z)
+        onZoom?(z)
+        reload()
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -282,18 +309,19 @@ private final class FocusTextView: NSTextView {
         guard window != nil else { stale = true; return }   // hidden panes leave the window: don't read or parse until shown
         generation += 1
         latest.value.store(generation, ordering: .relaxed)
-        let gen = generation, path = path, palette = palette, latest = latest
+        let gen = generation, path = path, palette = palette, latest = latest, zoom = zoom, scale = scrollScale
+        scrollScale = 1
         renderQueue.async { [weak self] in
             guard latest.value.load(ordering: .relaxed) == gen else { return }
             let text = Self.load(path)
             guard latest.value.load(ordering: .relaxed) == gen else { return }
-            let result = Renderer(text: text, path: path, palette: palette).render()
+            let result = Renderer(text: text, path: path, palette: palette, zoom: zoom).render()
             guard latest.value.load(ordering: .relaxed) == gen else { return }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self, gen == self.generation, !self.closed else { return }
                     let clip = self.scrollView.contentView
-                    let origin = clip.bounds.origin
+                    let origin = NSPoint(x: clip.bounds.origin.x, y: clip.bounds.origin.y * scale)   // text height scales with zoom
                     let ranges = self.textView.selectedRanges
                     self.textView.textStorage?.setAttributedString(result)
                     let len = (self.textView.string as NSString).length
@@ -364,6 +392,53 @@ private final class FocusTextView: NSTextView {
     }
 }
 
+/// The preview's own zoom controls: a glass capsule with −, the percentage (click resets) and +.
+@MainActor private final class ZoomBar: NSView {
+    var onStep: ((Int) -> Void)?   // -1 out, +1 in, 0 reset
+    private let percent = HandButton(title: "100%", target: nil, action: nil)
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        let glass = NSGlassEffectView()
+        glass.cornerRadius = 14
+        glass.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(glass)
+        let out = HandButton(image: NSImage(systemSymbolName: "minus", accessibilityDescription: "Zoom Out")!, target: self, action: #selector(zoomOut))
+        let into = HandButton(image: NSImage(systemSymbolName: "plus", accessibilityDescription: "Zoom In")!, target: self, action: #selector(zoomIn))
+        percent.target = self
+        percent.action = #selector(reset)
+        percent.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        percent.toolTip = "Actual Size"
+        for b in [out, percent, into] {
+            b.isBordered = false
+            b.refusesFirstResponder = true
+            b.contentTintColor = .secondaryLabelColor
+        }
+        out.toolTip = "Zoom Out"; into.toolTip = "Zoom In"
+        let stack = NSStackView(views: [out, percent, into])
+        stack.spacing = 6
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 10, bottom: 0, right: 10)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            glass.leadingAnchor.constraint(equalTo: leadingAnchor), glass.trailingAnchor.constraint(equalTo: trailingAnchor),
+            glass.topAnchor.constraint(equalTo: topAnchor), glass.bottomAnchor.constraint(equalTo: bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor), stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor), stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+            heightAnchor.constraint(equalToConstant: 28),
+            percent.widthAnchor.constraint(equalToConstant: 38),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func set(_ zoom: CGFloat) { percent.title = "\(Int((zoom * 100).rounded()))%" }
+
+    @objc private func zoomOut() { onStep?(-1) }
+    @objc private func zoomIn() { onStep?(1) }
+    @objc private func reset() { onStep?(0) }
+}
+
 @MainActor func filePaneSelfCheck() {
     let sniff = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try! FileManager.default.createDirectory(at: sniff, withIntermediateDirectories: true)
@@ -385,6 +460,14 @@ private final class FocusTextView: NSTextView {
     let win = NSWindow(contentRect: NSRect(x: -10000, y: -10000, width: 200, height: 200), styleMask: [.titled], backing: .buffered, defer: true)
     win.contentView?.addSubview(pane)
     assert(pane.generation == 1)   // shown: exactly one render
+    pane.setZoom(1.04)
+    assert(pane.zoom == 1 && pane.generation == 1)   // rounds to the same 10% step: no re-render
+    pane.setZoom(9)
+    assert(pane.zoom == 3 && pane.generation == 2)   // clamped, rendered once
+    let small = Renderer(text: "# T\n\nbody `c`", path: "a.md", palette: Palette(Theme.all().first!), zoom: 1).render()
+    let big = Renderer(text: "# T\n\nbody `c`", path: "a.md", palette: Palette(Theme.all().first!), zoom: 2).render()
+    let size = { (s: NSAttributedString, i: Int) in (s.attribute(.font, at: i, effectiveRange: nil) as! NSFont).pointSize }
+    assert(size(big, 0) == 2 * size(small, 0) && size(big, big.length - 2) == 2 * size(small, small.length - 2))   // heading and inline code scale
     pane.removeFromSuperview()
     pane.close()
 }
