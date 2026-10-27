@@ -416,8 +416,8 @@ private final class FocusTextView: NSTextView {
         }
         out.toolTip = "Zoom Out"; into.toolTip = "Zoom In"
         let stack = NSStackView(views: [out, percent, into])
-        stack.spacing = 6
-        stack.edgeInsets = NSEdgeInsets(top: 0, left: 10, bottom: 0, right: 10)
+        stack.spacing = 0   // the buttons tile the capsule: the whole bar is clickable, not just the glyphs
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 4, bottom: 0, right: 4)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
@@ -426,8 +426,9 @@ private final class FocusTextView: NSTextView {
             stack.leadingAnchor.constraint(equalTo: leadingAnchor), stack.trailingAnchor.constraint(equalTo: trailingAnchor),
             stack.topAnchor.constraint(equalTo: topAnchor), stack.bottomAnchor.constraint(equalTo: bottomAnchor),
             heightAnchor.constraint(equalToConstant: 28),
-            percent.widthAnchor.constraint(equalToConstant: 38),
-        ])
+            out.widthAnchor.constraint(equalToConstant: 28), into.widthAnchor.constraint(equalToConstant: 28),
+            percent.widthAnchor.constraint(equalToConstant: 44),
+        ] + [out, percent, into].map { $0.heightAnchor.constraint(equalTo: heightAnchor) })
     }
 
     required init?(coder: NSCoder) { fatalError() }
