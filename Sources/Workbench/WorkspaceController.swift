@@ -533,7 +533,22 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         tabBar.maxWidth = max(0, end - start - title - toggle - 24)
     }
 
+    private var chromePending = false
+
+    /// Coalesce event-driven chrome rebuilds: one per main run-loop turn. A synchronous updateChrome() absorbs a queued one.
+    private func setNeedsChrome() {
+        guard !chromePending else { return }
+        chromePending = true
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.chromePending else { return }
+                self.updateChrome()
+            }
+        }
+    }
+
     private func updateChrome() {
+        chromePending = false
         updateWindowTitle()
         let projects = store.layout.projects
         let visible = visibleProjects
@@ -682,7 +697,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         if !watched, new != old, new == .done || new == .attention {
             notify(id, title: title, body: body ?? (new == .done ? "Finished" : "Needs your input"))
         }
-        updateChrome()
+        setNeedsChrome()
     }
 
     /// Check the held panes off main (now, then every 5 s while any are held); release each whose background work finished.
@@ -690,7 +705,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         guard !backgroundPoll else { return }
         backgroundPoll = true
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + (now ? 0 : 5)) { [ids = background] in
-            let running = Set(ids.filter { Agents.backgroundWork(for: $0) })
+            let running = Agents.backgroundWork(for: ids)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.backgroundPoll = false
@@ -733,7 +748,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             // One chrome update per event: setStatus does it when the state flips.
             if spinning, status[id] != .busy || background.contains(id) { setStatus(id, .busy) }
             else if !spinning, status[id] == .busy, !progressing.contains(id) { setStatus(id, .done) }
-            else if titleChanged { updateChrome() }
+            else if titleChanged { setNeedsChrome() }
         case let .pwd(path):
             mutatePane(id) { spec in
                 if case let .terminal(_, launch) = spec.kind { spec.kind = .terminal(cwd: path, launch: launch) }

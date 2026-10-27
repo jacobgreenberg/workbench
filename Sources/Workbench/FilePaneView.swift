@@ -211,7 +211,8 @@ private final class FocusTextView: NSTextView {
     private var palette: Palette
     private let scrollView = NSScrollView()
     private let textView = FocusTextView(usingTextLayoutManager: true)
-    private var generation = 0
+    private(set) var generation = 0
+    private var stale = false   // a render was skipped while hidden; the next window attach renders
     /// Newest requested generation, readable off main: queued renders that are already stale skip the read and parse.
     private final class Latest: Sendable { let value = Atomic<Int>(0) }
     private let latest = Latest()
@@ -272,7 +273,13 @@ private final class FocusTextView: NSTextView {
         fileSource?.cancel(); fileSource = nil
     }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil && stale && !closed { stale = false; reload() }
+    }
+
     private func reload() {
+        guard window != nil else { stale = true; return }   // hidden panes leave the window: don't read or parse until shown
         generation += 1
         latest.value.store(generation, ordering: .relaxed)
         let gen = generation, path = path, palette = palette, latest = latest
@@ -371,5 +378,13 @@ private final class FocusTextView: NSTextView {
     let good = dir.appendingPathComponent("\(UUID().uuidString).swift")
     try? "let a = 1\n".write(to: good, atomically: true, encoding: .utf8)
     defer { try? FileManager.default.removeItem(at: good) }
-    FilePaneView(id: UUID(), path: good.path, theme: Theme.all().first!).close()
+    let pane = FilePaneView(id: UUID(), path: good.path, theme: Theme.all().first!)
+    assert(pane.generation == 0)   // windowless: nothing rendered
+    pane.apply(theme: Theme.all().first!)
+    assert(pane.generation == 0)
+    let win = NSWindow(contentRect: NSRect(x: -10000, y: -10000, width: 200, height: 200), styleMask: [.titled], backing: .buffered, defer: true)
+    win.contentView?.addSubview(pane)
+    assert(pane.generation == 1)   // shown: exactly one render
+    pane.removeFromSuperview()
+    pane.close()
 }

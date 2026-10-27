@@ -1,10 +1,13 @@
 import AppKit
 import CoreServices
 
-private final class Node {
+/// Only touched on main; @unchecked so a scan's completion can carry it back.
+private final class Node: @unchecked Sendable {
     let url: URL
     let isDirectory: Bool
     var children: [Node]?
+    var loading = false      // a scan for the first listing is in flight
+    var refreshSeq = 0       // newest refresh requested for this node
 
     init(url: URL, isDirectory: Bool) {
         self.url = url
@@ -32,6 +35,10 @@ private let clutterNames: Set<String> = ["node_modules", "build", "dist", "Deriv
     private let outline = NSOutlineView()
     private var root: Node?
     private var stream: FSEventStreamRef?
+    private let queue = DispatchQueue(label: "pane.filetree", qos: .userInitiated)
+    private var generation = 0                  // bumped when the whole tree is replaced; older scan results are dropped
+    private var refreshCounter = 0
+    private var pendingExpand = Set<String>()   // expanded before a reload, expanded again as their parent's children land
 
     init() {
         super.init(frame: .zero)
@@ -116,6 +123,8 @@ private let clutterNames: Set<String> = ["node_modules", "build", "dist", "Deriv
     func show(root path: String?) {
         guard let path else {
             stopStream()
+            generation += 1
+            pendingExpand = []
             root = nil
             titleLabel.stringValue = "No project"
             outline.reloadData()
@@ -124,6 +133,8 @@ private let clutterNames: Set<String> = ["node_modules", "build", "dist", "Deriv
         let url = URL(fileURLWithPath: path).standardizedFileURL
         if let root, root.url.path == url.path { return }
         stopStream()
+        generation += 1
+        pendingExpand = []
         root = Node(url: url, isDirectory: true)
         titleLabel.stringValue = url.lastPathComponent
         outline.reloadData()
@@ -132,27 +143,54 @@ private let clutterNames: Set<String> = ["node_modules", "build", "dist", "Deriv
 
     func close() { stopStream() }
 
-    private func list(_ dir: URL, reusing old: [Node]?) -> [Node] {
+    nonisolated static func scan(_ dir: URL, hideClutter: Bool) -> [(url: URL, isDirectory: Bool)] {
         let urls = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey], options: [])) ?? []
-        let existing = Dictionary((old ?? []).map { ($0.url.path, $0) }, uniquingKeysWith: { a, _ in a })
-        let nodes: [Node] = urls.compactMap { url in
+        let entries: [(url: URL, isDirectory: Bool)] = urls.compactMap { url in
             let name = url.lastPathComponent
             if hideClutter && (name.hasPrefix(".") || clutterNames.contains(name)) { return nil }
-            if let node = existing[url.path] { return node }
-            let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-            return Node(url: url, isDirectory: isDir)
+            return (url, (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false)
         }
-        return nodes.sorted {
+        return entries.sorted {
             if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
             return $0.url.lastPathComponent.localizedStandardCompare($1.url.lastPathComponent) == .orderedAscending
         }
     }
 
+    /// Lists `node` off main. A refresh replaces loaded children; otherwise this is the first listing (once per node).
+    private func load(_ node: Node, refresh: Bool = false) {
+        let seq = refresh ? refreshCounter + 1 : 0
+        if refresh {
+            refreshCounter = seq
+            node.refreshSeq = seq
+        } else {
+            guard !node.loading else { return }
+            node.loading = true
+        }
+        let gen = generation, hide = hideClutter, dir = node.url
+        queue.async { [weak self] in
+            let entries = FileTreeView.scan(dir, hideClutter: hide)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.landed(node, entries, gen, refresh ? seq : nil) }
+            }
+        }
+    }
+
+    private func landed(_ node: Node, _ entries: [(url: URL, isDirectory: Bool)], _ gen: Int, _ seq: Int?) {
+        guard gen == generation, let root, node === root || find(node.url.path) === node else { return }
+        if let seq { guard node.refreshSeq == seq, node.children != nil else { return } } else { node.loading = false }
+        let paths = seq != nil ? expandedPaths() : []
+        let existing = Dictionary((node.children ?? []).map { ($0.url.path, $0) }, uniquingKeysWith: { a, _ in a })
+        let nodes = entries.map { existing[$0.url.path] ?? Node(url: $0.url, isDirectory: $0.isDirectory) }
+        node.children = nodes
+        if node === root { outline.reloadData() } else { outline.reloadItem(node, reloadChildren: true) }
+        pendingExpand.formUnion(paths)
+        expandPending(nodes)
+    }
+
     private func loaded(_ node: Node) -> [Node] {
         if let c = node.children { return c }
-        let c = list(node.url, reusing: nil)
-        node.children = c
-        return c
+        load(node)
+        return []
     }
 
     private func expandedPaths() -> Set<String> {
@@ -168,28 +206,29 @@ private let clutterNames: Set<String> = ["node_modules", "build", "dist", "Deriv
         return out
     }
 
-    private func reexpand(_ nodes: [Node], _ paths: Set<String>) {
-        for n in nodes where n.isDirectory && paths.contains(n.url.path) {
+    /// Expands the directories among `nodes` that are in pendingExpand; an unloaded one loads, and its children are handled when they land.
+    private func expandPending(_ nodes: [Node]) {
+        guard !pendingExpand.isEmpty else { return }
+        for n in nodes where n.isDirectory && pendingExpand.contains(n.url.path) {
+            pendingExpand.remove(n.url.path)
             guard FileManager.default.fileExists(atPath: n.url.path) else { continue }
             outline.expandItem(n)
-            reexpand(loaded(n), paths)
+            if let c = n.children { expandPending(c) }
         }
     }
 
     private func reloadAll() {
         guard let root else { return }
-        let paths = expandedPaths()
+        pendingExpand = expandedPaths()
+        generation += 1
         root.children = nil
+        root.loading = false
         outline.reloadData()
-        reexpand(loaded(root), paths)
     }
 
     private func refresh(_ node: Node) {
-        guard let root, node.children != nil else { return }
-        let paths = expandedPaths()
-        node.children = list(node.url, reusing: node.children)
-        if node === root { outline.reloadData() } else { outline.reloadItem(node, reloadChildren: true) }
-        reexpand(node.children ?? [], paths)
+        guard root != nil, node.children != nil else { return }
+        load(node, refresh: true)
     }
 
     private func find(_ path: String) -> Node? {
@@ -255,10 +294,17 @@ private let clutterNames: Set<String> = ["node_modules", "build", "dist", "Deriv
 
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         guard let n = item as? Node else { return nil }
-        let cell = NSTableCellView()
-        let icon = NSImageView()
+        let id = NSUserInterfaceItemIdentifier("fileCell")
         let image = FileIcons.icon(for: n.url, isDirectory: n.isDirectory, expanded: false)
         image.size = NSSize(width: 16, height: 16)
+        if let cell = outline.makeView(withIdentifier: id, owner: self) as? NSTableCellView {
+            cell.imageView?.image = image
+            cell.textField?.stringValue = n.url.lastPathComponent
+            return cell
+        }
+        let cell = NSTableCellView()
+        cell.identifier = id
+        let icon = NSImageView()
         icon.image = image
         icon.translatesAutoresizingMaskIntoConstraints = false
         let label = NSTextField(labelWithString: n.url.lastPathComponent)
@@ -334,4 +380,18 @@ private let clutterNames: Set<String> = ["node_modules", "build", "dist", "Deriv
         guard let url = sender.representedObject as? URL else { return }
         NSWorkspace.shared.open(url)
     }
+}
+
+func fileTreeSelfCheck() {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("filetree-check-\(UUID().uuidString)")
+    let fm = FileManager.default
+    try! fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: dir) }
+    for d in ["Zdir", "node_modules"] { try! fm.createDirectory(at: dir.appendingPathComponent(d), withIntermediateDirectories: false) }
+    for f in ["b.txt", "a.txt", ".hidden"] { try! Data().write(to: dir.appendingPathComponent(f)) }
+    let hidden = FileTreeView.scan(dir, hideClutter: true)
+    assert(hidden.map { $0.url.lastPathComponent } == ["Zdir", "a.txt", "b.txt"])
+    assert(hidden[0].isDirectory && !hidden[1].isDirectory)
+    let all = Set(FileTreeView.scan(dir, hideClutter: false).map { $0.url.lastPathComponent })
+    assert(all == [".hidden", "node_modules", "Zdir", "a.txt", "b.txt"])
 }

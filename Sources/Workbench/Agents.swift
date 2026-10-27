@@ -116,12 +116,55 @@ enum Agents {
 
     /// Whether the pane's Claude agent still has work going after its turn ended: background subagents not marked
     /// finished, or background shells / Monitors it started still running, unless they only serve something (see
-    /// shellsWorking). Scans processes and the disk, may wait 1 s: call off the main thread.
-    static func backgroundWork(for pane: PaneID) -> Bool {
-        guard let s = sessions()[pane], s.claude else { return false }
-        if let t = transcript(s), t.pathExtension == "jsonl",
-           subagentsRunning(in: t.deletingPathExtension().appendingPathComponent("subagents")) { return true }
-        return shellsWorking(under: s.pid)
+    /// the rule below). One process scan and at most one 1 s CPU sample for the whole batch; call off the main thread.
+    static func backgroundWork(for panes: Set<PaneID>) -> Set<PaneID> {
+        let all = sessions()
+        var result: Set<PaneID> = []
+        var agents: [PaneID: pid_t] = [:]
+        for pane in panes {
+            guard let s = all[pane], s.claude else { continue }
+            if let t = transcript(s), t.pathExtension == "jsonl",
+               subagentsRunning(in: t.deletingPathExtension().appendingPathComponent("subagents")) { result.insert(pane) }
+            else { agents[pane] = s.pid }
+        }
+        guard !agents.isEmpty else { return result }
+        var children: [pid_t: [pid_t]] = [:]
+        for p in allPIDs() { if let pp = parentPID(p) { children[pp, default: []].append(p) } }
+        var trees: [PaneID: [[pid_t]]] = [:]
+        for (pane, agent) in agents {
+            for sh in children[agent] ?? [] where processArgs(sh)?.argv.contains(where: { $0.contains("/shell-snapshots/snapshot-") }) == true {
+                var tree = [sh], i = 0
+                while i < tree.count { tree += children[tree[i]] ?? []; i += 1 }
+                trees[pane, default: []].append(tree)
+            }
+        }
+        let listening = Set(trees.values.joined().joined().filter(listens))
+        let sampled = trees.values.joined().filter { $0.contains(where: listening.contains) }.joined()
+        var before: [pid_t: UInt64] = [:], after: [pid_t: UInt64] = [:]
+        if !sampled.isEmpty {
+            before = cpuNanos(Array(sampled))
+            Thread.sleep(forTimeInterval: 1)
+            after = cpuNanos(Array(sampled))
+        }
+        return result.union(working(trees: trees, listening: listening, before: before, after: after))
+    }
+
+    /// The decision, apart from the process scan: a pane works if any of its shell trees has no listener, or a listening
+    /// one used over 20 ms of CPU between the samples. Per process, and only those alive at both samples: one exiting
+    /// in between must not count as negative time.
+    static func working(trees: [PaneID: [[pid_t]]], listening: Set<pid_t>, before: [pid_t: UInt64], after: [pid_t: UInt64]) -> Set<PaneID> {
+        var result: Set<PaneID> = []
+        for (pane, list) in trees {
+            for tree in list {
+                guard tree.contains(where: listening.contains) else { result.insert(pane); break }
+                let used = tree.reduce(UInt64(0)) { sum, p in
+                    guard let a = after[p] else { return sum }
+                    return sum + (a - min(a, before[p] ?? a))
+                }
+                if used > 20_000_000 { result.insert(pane); break }
+            }
+        }
+        return result
     }
 
     /// Each subagent leaves `<session>/subagents/agent-*.meta.json`, marked "finished" when it ends; an unfinished one
@@ -215,22 +258,6 @@ enum Agents {
     /// of the agent; after a turn ends only background ones remain. A shell counts as work unless its process tree
     /// listens on TCP and used under 2% of a core over 1 s: a dev server waiting for requests, not a job.
     /// ponytail: a quiet watcher with no port (tsc --watch) still counts as work; match commands if that bites.
-    private static func shellsWorking(under agent: pid_t) -> Bool {
-        var children: [pid_t: [pid_t]] = [:]
-        for p in allPIDs() { if let pp = parentPID(p) { children[pp, default: []].append(p) } }
-        for sh in children[agent] ?? [] where processArgs(sh)?.argv.contains(where: { $0.contains("/shell-snapshots/snapshot-") }) == true {
-            var tree = [sh], i = 0
-            while i < tree.count { tree += children[tree[i]] ?? []; i += 1 }
-            guard tree.contains(where: listens) else { return true }
-            let before = cpuNanos(tree)
-            Thread.sleep(forTimeInterval: 1)
-            // Per process, and only those alive at both samples: one exiting in between must not count as negative time.
-            let used = cpuNanos(tree).reduce(UInt64(0)) { sum, p in sum + (p.value - min(p.value, before[p.key] ?? p.value)) }
-            if used > 20_000_000 { return true }
-        }
-        return false
-    }
-
     private static func listens(_ pid: pid_t) -> Bool {
         let bytes = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
         guard bytes > 0 else { return false }
@@ -377,5 +404,15 @@ func agentsSelfCheck() {
         """, nil, nil, nil)
     sqlite3_close(db)
     assert(Agents.recentThreads(codexHome: dir, cwd: "/p") == ["b", "a"])
+    let p1 = UUID(), p2 = UUID()
+    func w(_ trees: [PaneID: [[pid_t]]], _ l: Set<pid_t>, _ b: [pid_t: UInt64], _ a: [pid_t: UInt64]) -> Set<PaneID> {
+        Agents.working(trees: trees, listening: l, before: b, after: a)
+    }
+    assert(w([p1: [[1, 2]]], [], [:], [:]) == [p1])   // no listener
+    assert(w([p1: [[1, 2]]], [2], [1: 0, 2: 0], [1: 10_000_000, 2: 20_000_000]) == [p1])   // 30 ms
+    assert(w([p1: [[1, 2]]], [2], [1: 0, 2: 0], [1: 2_000_000, 2: 3_000_000]).isEmpty)   // 5 ms
+    assert(w([p1: [[1, 2]]], [2], [1: 0, 2: 100], [1: 1_000_000]).isEmpty)   // pid 2 vanished: not negative, not counted
+    assert(w([p1: [[1, 2]], p2: [[3]]], [2, 3], [1: 0, 2: 0, 3: 0], [1: 30_000_000, 2: 0, 3: 1_000_000]) == [p1])   // independent
+    assert(w([p1: [[1], [2]]], [1], [1: 0], [1: 0]) == [p1])   // any tree without a listener
 }
 #endif

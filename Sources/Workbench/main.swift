@@ -5,6 +5,7 @@ import AppKit
 if CommandLine.arguments.contains("--selfcheck") {
     MainActor.assumeIsolated { modelSelfCheck(); backupSelfCheck(); FileIcons.selfCheck(); filePaneSelfCheck() }
     themeSelfCheck()
+    fileTreeSelfCheck()
     controlSelfCheck()
     agentsSelfCheck()
     transcriptSelfCheck()
@@ -14,7 +15,9 @@ if CommandLine.arguments.contains("--selfcheck") {
 if CommandLine.arguments.contains("--agents") {   // what quit would record for each pane's running agent
     Agents.loadLaunchers()
     let t0 = Date()
-    for (pane, cmd) in Agents.running() { print(pane, cmd ?? "(id not known yet; keeps saved command)", Agents.transcript(for: pane)?.path ?? "(no transcript)", Agents.backgroundWork(for: pane) ? "(background work)" : "") }
+    let runningAgents = Agents.running()
+    let working = Agents.backgroundWork(for: Set(runningAgents.keys))
+    for (pane, cmd) in runningAgents { print(pane, cmd ?? "(id not known yet; keeps saved command)", Agents.transcript(for: pane)?.path ?? "(no transcript)", working.contains(pane) ? "(background work)" : "") }
     FileHandle.standardError.write(Data("scan: \(Int(Date().timeIntervalSince(t0) * 1000)) ms\n".utf8))
     exit(0)
 }
