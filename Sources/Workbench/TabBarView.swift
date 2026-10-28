@@ -439,3 +439,5 @@ private final class TabScrollView: NSScrollView {
         layer.add(a, forKey: "pulse")
     }
 }
+
+@MainActor func tabBarSelfCheck() {}

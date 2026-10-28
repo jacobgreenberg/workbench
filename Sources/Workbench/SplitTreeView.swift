@@ -93,6 +93,24 @@ private final class DividerSplitView: NSSplitView {
     }
 }
 
+extension SplitNode {
+    /// Divider ratios, depth-first with a split before its children: the order `SplitTreeView.build` creates its splits in.
+    fileprivate var ratios: [Double] {
+        guard case .split(_, let r, let a, let b) = self else { return [] }
+        return [r] + a.ratios + b.ratios
+    }
+
+    /// Same splits (axes) and the same panes in the same places; ratios, cwds, launches and file paths may differ.
+    fileprivate func sameArrangement(as other: SplitNode) -> Bool {
+        switch (self, other) {
+        case (.leaf(let x), .leaf(let y)): x.id == y.id
+        case (.split(let ax, _, let a1, let b1), .split(let ay, _, let a2, let b2)):
+            ax == ay && a1.sameArrangement(as: a2) && b1.sameArrangement(as: b2)
+        default: false
+        }
+    }
+}
+
 @MainActor final class SplitTreeView: NSView, NSSplitViewDelegate {
     var onRatiosChanged: ((SplitNode) -> Void)?
     var onMove: ((PaneID, PaneID, FocusDirection) -> Void)?   // pane dragged by its header onto a side of another
@@ -104,6 +122,7 @@ private final class DividerSplitView: NSSplitView {
     private var paths: [ObjectIdentifier: [Bool]] = [:]
     private var splits: [(NSSplitView, Double)] = []
     private var rootView: NSView?
+    private var leafViews: [PaneID: NSView] = [:]   // the pane view each leaf had at the last build
     private var isApplyingRatios = false
     private var dividerColor: NSColor?
 
@@ -114,9 +133,20 @@ private final class DividerSplitView: NSSplitView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
 
-    /// Rebuilds the split hierarchy; returns false (and does nothing) when the tree and colour are unchanged.
+    /// Rebuilds the split hierarchy; returns false (without re-parenting anything) when the arrangement is unchanged: same
+    /// splits, same panes in the same places and the same view for each. A pane's cwd or file path is not part of it, and
+    /// divider ratios are moved in place.
     @discardableResult func render(_ root: SplitNode, dividerColor: NSColor) -> Bool {
-        if root == self.root, dividerColor == self.dividerColor, rootView != nil { return false }
+        if let old = self.root, rootView != nil, dividerColor == self.dividerColor, old.sameArrangement(as: root),
+           root.leaves.allSatisfy({ leafViews[$0.id] === provider($0) }) {
+            self.root = root
+            let ratios = root.ratios
+            if ratios != splits.map(\.1) {
+                for i in splits.indices { splits[i].1 = ratios[i] }
+                applyRatios()
+            }
+            return false
+        }
         self.dividerColor = dividerColor
         isApplyingRatios = true
         defer { isApplyingRatios = false }
@@ -124,6 +154,7 @@ private final class DividerSplitView: NSSplitView {
         paths = [:]
         splits = []
         headers = [:]
+        leafViews = [:]
         self.root = root
         let view = build(root, path: [], color: dividerColor)
         view.translatesAutoresizingMaskIntoConstraints = true
@@ -140,6 +171,7 @@ private final class DividerSplitView: NSSplitView {
         subviews.forEach { $0.removeFromSuperview() }
         paths = [:]
         headers = [:]
+        leafViews = [:]
         splits = []
         root = nil
         rootView = nil
@@ -153,6 +185,7 @@ private final class DividerSplitView: NSSplitView {
             v.removeFromSuperview()
             v.translatesAutoresizingMaskIntoConstraints = true
             v.autoresizingMask = [.width, .height]
+            leafViews[spec.id] = v
             guard case .split = root else { return v }   // a lone pane has nothing to be dragged beside: no header
             let header = PaneHeader(id: spec.id)
             header.onClick = { [unowned self] in onHeaderClick?(spec.id) }
@@ -318,4 +351,38 @@ private final class DividerSplitView: NSSplitView {
         }
         return best?.0
     }
+}
+
+/// Chrome self-checks (split tree, tab bar, sidebar); wired from main.swift's --selfcheck.
+@MainActor func chromeSelfCheck() {
+    splitTreeSelfCheck()
+    tabBarSelfCheck()
+    sidebarSelfCheck()
+}
+
+@MainActor func splitTreeSelfCheck() {
+    let a = UUID(), b = UUID(), c = UUID()
+    var views: [PaneID: NSView] = [a: NSView(), b: NSView(), c: NSView()]
+    let tree = SplitTreeView { views[$0.id]! }
+    tree.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+    let win = NSWindow(contentRect: tree.frame, styleMask: [.titled], backing: .buffered, defer: true)
+    win.contentView?.addSubview(tree)
+    func leaf(_ id: PaneID, _ cwd: String) -> SplitNode { .leaf(PaneSpec(id: id, kind: .terminal(cwd: cwd, launch: nil))) }
+    func pair(_ ratio: Double, cwd: String, second: PaneID = b) -> SplitNode { .split(axis: .horizontal, ratio: ratio, a: leaf(a, cwd), b: leaf(second, "/")) }
+    let color = NSColor.red
+    assert(tree.render(pair(0.5, cwd: "/x"), dividerColor: color))
+    let frameA = views[a]!.superview, frameB = views[b]!.superview
+    assert(frameA is NSView && frameA !== tree && frameB !== frameA)
+    assert(!tree.render(pair(0.5, cwd: "/x"), dividerColor: color))
+    assert(!tree.render(pair(0.5, cwd: "/elsewhere"), dividerColor: color))   // a cd changes nothing on screen
+    assert(views[a]!.superview === frameA && views[b]!.superview === frameB)   // nobody was re-parented
+    assert(!tree.render(pair(0.25, cwd: "/elsewhere"), dividerColor: color))   // ratios move in place
+    assert(views[a]!.superview === frameA)
+    assert(abs(frameA!.frame.width - 200) < 2, "ratio applied in place: \(frameA!.frame.width)")
+    assert(tree.render(pair(0.25, cwd: "/elsewhere"), dividerColor: .blue))   // divider colour change rebuilds
+    assert(tree.render(pair(0.25, cwd: "/elsewhere", second: c), dividerColor: .blue))   // another pane
+    views[a] = NSView()
+    assert(tree.render(pair(0.25, cwd: "/elsewhere", second: c), dividerColor: .blue))   // a different view for a leaf
+    assert(views[a]!.superview != nil)
+    tree.clear()
 }

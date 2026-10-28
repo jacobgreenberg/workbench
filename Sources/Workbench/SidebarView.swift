@@ -362,3 +362,5 @@ let vsCodeBundle = "com.microsoft.VSCode"
         return true
     }
 }
+
+@MainActor func sidebarSelfCheck() {}
