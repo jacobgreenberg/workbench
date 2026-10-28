@@ -35,6 +35,7 @@ private let clutterNames: Set<String> = ["node_modules", "build", "dist", "Deriv
     private let outline = NSOutlineView()
     private var root: Node?
     private var stream: FSEventStreamRef?
+    private var selectPending: DispatchWorkItem?
     private let queue = DispatchQueue(label: "pane.filetree", qos: .userInitiated)
     private var generation = 0                  // bumped when the whole tree is replaced; older scan results are dropped
     private var refreshCounter = 0
@@ -178,7 +179,7 @@ private let clutterNames: Set<String> = ["node_modules", "build", "dist", "Deriv
     private func landed(_ node: Node, _ entries: [(url: URL, isDirectory: Bool)], _ gen: Int, _ seq: Int?) {
         guard gen == generation, let root, node === root || find(node.url.path) === node else { return }
         if let seq { guard node.refreshSeq == seq, node.children != nil else { return } } else { node.loading = false }
-        let paths = seq != nil ? expandedPaths() : []
+        let paths = seq != nil ? Self.within(node.url.path, expandedPaths()) : []
         let existing = Dictionary((node.children ?? []).map { ($0.url.path, $0) }, uniquingKeysWith: { a, _ in a })
         let nodes = entries.map { existing[$0.url.path] ?? Node(url: $0.url, isDirectory: $0.isDirectory) }
         node.children = nodes
@@ -191,6 +192,12 @@ private let clutterNames: Set<String> = ["node_modules", "build", "dist", "Deriv
         if let c = node.children { return c }
         load(node)
         return []
+    }
+
+    /// The paths strictly under the folder `dir`: a refresh re-expands only its own subtree, so a folder collapsed
+    /// elsewhere in the meantime is not left queued to spring open on a later refresh.
+    nonisolated static func within(_ dir: String, _ paths: Set<String>) -> Set<String> {
+        paths.filter { $0.hasPrefix(dir + "/") }
     }
 
     private func expandedPaths() -> Set<String> {
@@ -335,9 +342,16 @@ private let clutterNames: Set<String> = ["node_modules", "build", "dist", "Deriv
     }
 
     /// Selecting a file (click or arrow keys) previews it in the tab's file pane.
+    /// Coalesced: holding an arrow key walks the rows, and only the row it settles on is previewed.
     func outlineViewSelectionDidChange(_ notification: Notification) {
+        selectPending?.cancel(); selectPending = nil
         guard let n = outline.item(atRow: outline.selectedRow) as? Node, !n.isDirectory else { return }
-        onSelect?(n.url.path)
+        let path = n.url.path
+        let w = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated { self?.selectPending = nil; self?.onSelect?(path) }
+        }
+        selectPending = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(100), execute: w)
     }
 
     @objc private func doubleClicked() {
@@ -394,4 +408,9 @@ func fileTreeSelfCheck() {
     assert(hidden[0].isDirectory && !hidden[1].isDirectory)
     let all = Set(FileTreeView.scan(dir, hideClutter: false).map { $0.url.lastPathComponent })
     assert(all == [".hidden", "node_modules", "Zdir", "a.txt", "b.txt"])
+    // a refresh re-expands only folders under the refreshed one
+    let open: Set<String> = ["/p/A", "/p/B", "/p/B/c", "/p/Bx"]
+    assert(FileTreeView.within("/p/B", open) == ["/p/B/c"])
+    assert(FileTreeView.within("/p", open) == open)
+    assert(FileTreeView.within("/p/A", open).isEmpty)
 }
