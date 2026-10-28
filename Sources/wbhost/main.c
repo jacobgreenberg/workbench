@@ -8,8 +8,9 @@
 // host -> app: 12-byte header (replay length UInt64 LE, pty cols and rows UInt16 LE), the replay, then raw output.
 //   EOF = the session is over.
 // app -> host frames: type byte, payload length UInt32 LE, payload:
-//   'i' input for the shell (<= 1 MiB), 'w' 8 bytes cols/rows/xpixel/ypixel UInt16 LE, 'k' (empty) end the session.
-//   Anything else drops that client; the session keeps running.
+//   'i' input for the shell (<= 1 MiB; the app sends <= 64 KiB), 'w' 8 bytes cols/rows/xpixel/ypixel UInt16 LE, 'k'
+//   (empty) end the session. Anything else drops that client; the session keeps running.
+//   Input the shell has not read yet is queued; past 1 MiB the host stops reading the client until it falls below 256 KiB.
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -31,7 +32,10 @@
 
 #define RING_CAP (1u << 20)   // ponytail: bounds how much a reattach can restore; raise if scrollback loss matters
 #define MAX_FRAME (1u << 20)
-#define MAX_PENDING (4u << 20)
+#define MAX_PENDING (4u << 20)   // sanity bound: backpressure keeps the queue near PEND_HIGH
+#define PEND_HIGH (1u << 20)
+#define PEND_LOW (256u << 10)
+#define SOCK_BUF (256 << 10)     // the sender's buffer bounds what a lagging reader drains per read (default 8 KB)
 #define OSC_MAX 512
 #define OBUF_MAX 4096
 #define PRE_MAX 2048
@@ -259,7 +263,7 @@ static unsigned char *build_replay(const struct ring *r, size_t *outlen) {
 // ---- Host ----
 
 static struct ring ring;
-static int kq = -1, master = -1, listener = -1, client = -1, master_live = 1, wr_armed, need_winch;
+static int kq = -1, master = -1, listener = -1, client = -1, master_live = 1, wr_armed, need_winch, rd_paused;
 static pid_t child;
 static const char *sock_path;
 static ino_t listen_ino;
@@ -292,9 +296,21 @@ static int grow(unsigned char **b, size_t *cap, size_t need) {
     return 0;
 }
 
+// Idle buffers go back to the system: one big paste must not leave megabytes behind for the life of the shell.
+static void shrink(unsigned char **b, size_t *cap, size_t keep) {
+    if (*cap <= keep) return;
+    free(*b); *b = NULL; *cap = 0;
+}
+
+static void sock_buf(int fd) {
+    int sz = SOCK_BUF;
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sz, sizeof sz);
+}
+
 static void drop_client(void) {
     if (client >= 0) close(client);   // closing removes its kqueue filter
-    client = -1; flen = 0;
+    client = -1; flen = 0; rd_paused = 0;
+    shrink(&fbuf, &fcap, 128u << 10);
 }
 
 static void cleanup(void) {
@@ -329,7 +345,8 @@ static void flush_pending(void) {
         if (w < 0 && errno == EAGAIN) break;
         poff = plen;   // pty gone: discard
     }
-    if (poff >= plen) poff = plen = 0;
+    if (poff >= plen) { poff = plen = 0; shrink(&pend, &pcap, 64u << 10); }
+    if (rd_paused && client >= 0 && plen - poff < PEND_LOW) { ev((uintptr_t)client, EVFILT_READ, EV_ENABLE, 0); rd_paused = 0; }
     int want = poff < plen;
     if (want != wr_armed && master_live) {
         ev((uintptr_t)master, EVFILT_WRITE, want ? EV_ADD : EV_DELETE, 0);
@@ -337,13 +354,21 @@ static void flush_pending(void) {
     }
 }
 
-static int reaped(int ms_total) {
-    struct timespec ts = {0, 50 * 1000000};
-    for (int i = 0; i < ms_total / 50; i++) {
-        if (waitpid(child, NULL, WNOHANG) != 0) return 1;
-        nanosleep(&ts, NULL);
-    }
-    return waitpid(child, NULL, WNOHANG) != 0;
+// Waits up to `ms` for the child to exit, and reaps it. A private kqueue: the main one also holds the client's reads,
+// which are level-triggered and would end the wait at once.
+static int reaped(int ms) {
+    if (waitpid(child, NULL, WNOHANG) != 0) return 1;
+    int q = kqueue();
+    if (q < 0) { struct timespec ts = {0, 50 * 1000000}; nanosleep(&ts, NULL); return waitpid(child, NULL, WNOHANG) != 0; }
+    struct kevent k, out;
+    EV_SET(&k, child, EVFILT_PROC, EV_ADD | EV_ONESHOT, NOTE_EXIT, 0, NULL);
+    struct timespec ts = {ms / 1000, (ms % 1000) * 1000000L};
+    int n = kevent(q, &k, 1, &out, 1, &ts);   // an error event (already gone) also ends the wait
+    close(q);
+    if (n <= 0) return 0;
+    if ((out.flags & EV_ERROR) && out.data != ESRCH) return waitpid(child, NULL, WNOHANG) != 0;   // not "already gone": don't block on a live child
+    waitpid(child, NULL, 0);
+    return 1;
 }
 
 static void end_session(void) {
@@ -364,6 +389,7 @@ static void on_frame(unsigned char type, const unsigned char *p, uint32_t n) {
         if (grow(&pend, &pcap, plen + n) < 0) { drop_client(); return; }
         memcpy(pend + plen, p, n); plen += n;
         flush_pending();
+        if (client >= 0 && !rd_paused && plen - poff > PEND_HIGH) { ev((uintptr_t)client, EVFILT_READ, EV_DISABLE, 0); rd_paused = 1; }
     } else if (type == 'w') {
         struct winsize ws = {.ws_col = (unsigned short)(p[0] | p[1] << 8), .ws_row = (unsigned short)(p[2] | p[3] << 8),
                              .ws_xpixel = (unsigned short)(p[4] | p[5] << 8), .ws_ypixel = (unsigned short)(p[6] | p[7] << 8)};
@@ -392,7 +418,10 @@ static void client_read(void) {
         off += 5 + (size_t)len;
         on_frame(f[0], f + 5, len);
     }
-    if (client >= 0) { memmove(fbuf, fbuf + off, flen - off); flen -= off; }
+    if (client >= 0) {
+        memmove(fbuf, fbuf + off, flen - off); flen -= off;
+        if (!flen) shrink(&fbuf, &fcap, 128u << 10);
+    }
 }
 
 // Header: replay length (UInt64 LE), then the pty's cols and rows (UInt16 LE): the app sizes its view to the grid
@@ -406,6 +435,7 @@ static void accept_client(void) {
     int fd = accept(listener, NULL, NULL);
     if (fd < 0) return;
     fcntl(fd, F_SETFD, FD_CLOEXEC);
+    sock_buf(fd);
     drop_client();   // newest app instance wins
     client = fd;
     if (ev((uintptr_t)fd, EVFILT_READ, EV_ADD, 0) < 0) { drop_client(); return; }
@@ -491,6 +521,32 @@ static void selftest(void) {
     n = vt_preamble(&r.base, pre);
     CHECK(find(pre, n, "\x1b]0;T\x1b\\") && find(pre, n, "\x1b]9;4;1;50\x1b\\"), "title/progress in preamble");
     free(r.buf);
+    // reaped: returns as soon as the child exits (no fixed polling floor), and gives up at the deadline
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    child = fork();
+    if (child == 0) { usleep(5000); _exit(0); }
+    CHECK(reaped(2000), "reaped sees the exit");
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    CHECK((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000 < 40, "reaped has no 50 ms floor");
+    child = fork();
+    if (child == 0) { usleep(400000); _exit(0); }
+    CHECK(!reaped(30), "reaped times out on a live child");
+    kill(child, SIGKILL); waitpid(child, NULL, 0);
+
+    // an idle input queue is released, a small one kept
+    int sp[2];
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sp) == 0, "socketpair");
+    sock_buf(sp[0]); fcntl(sp[0], F_SETFL, O_NONBLOCK);
+    master = sp[0]; master_live = 1;
+    CHECK(grow(&pend, &pcap, 100000) == 0, "grow");
+    memset(pend, 'x', 100000); plen = 100000; poff = 0;
+    flush_pending();
+    CHECK(plen == 0 && poff == 0 && !pend && !pcap, "drained input queue is freed");
+    CHECK(grow(&pend, &pcap, 100) == 0, "grow small");
+    plen = 100; flush_pending();
+    CHECK(pend && pcap == 4096, "small input queue is kept");
+    close(sp[0]); close(sp[1]); master = -1;
     puts("selftest ok");
 }
 
@@ -508,6 +564,7 @@ int main(int argc, char **argv) {
     kq = kqueue();
     if (kq < 0 || fcntl(kq, F_SETFD, FD_CLOEXEC) < 0) { perror("kqueue"); cleanup(); return 1; }
     client = fcntl(3, F_SETFD, FD_CLOEXEC) < 0 ? -1 : 3;
+    if (client >= 0) sock_buf(client);
 
     struct winsize ws = {.ws_row = (unsigned short)rows, .ws_col = (unsigned short)cols};
     pid_t pid = forkpty(&master, NULL, NULL, &ws);

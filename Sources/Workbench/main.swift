@@ -9,6 +9,7 @@ if CommandLine.arguments.contains("--selfcheck") {
     controlSelfCheck()
     agentsSelfCheck()
     transcriptSelfCheck()
+    sessionSelfCheck()
     print("selfcheck ok")
     exit(0)
 }
