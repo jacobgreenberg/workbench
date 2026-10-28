@@ -2,6 +2,27 @@ import AppKit
 @preconcurrency import GhosttyKit
 import UserNotifications
 
+/// Folds an agent scan into the layout's saved launches. A pane the scan found an agent in takes its resume command (an
+/// unknown id keeps the saved one). A pane without one drops its launch and restores as a plain shell only if an agent was
+/// seen there before (`seen`): a scan is a snapshot, so a pane absent from it may not have started its agent yet.
+/// So a saved command is kept until the pane runs an agent or its own command ends: a non-agent command (`pane split
+/// --command 'npm run dev'`) still running at quit is saved and retyped at the next launch.
+func recordAgents(_ running: [PaneID: String?], in layout: inout Layout, seen: inout Set<PaneID>) {
+    for p in layout.projects.indices {
+        for t in layout.projects[p].tabs.indices {
+            layout.projects[p].tabs[t].root = layout.projects[p].tabs[t].root.mapLeaves { spec in
+                guard case let .terminal(cwd, launch) = spec.kind else { return }
+                guard let entry = running[spec.id] else {
+                    if seen.remove(spec.id) != nil { spec.kind = .terminal(cwd: cwd, launch: nil) }
+                    return
+                }
+                seen.insert(spec.id)
+                if let command = entry { spec.kind = .terminal(cwd: cwd, launch: Launch(command: command, scrollbackLimit: launch?.scrollbackLimit)) }
+            }
+        }
+    }
+}
+
 @MainActor
 final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDelegate {
     /// Idle cost: blink's 600 ms timer, and vsync's CVDisplayLink, which ticks at the display rate per visible
@@ -389,6 +410,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     /// tab survives. Killed again within 30 s: the pane stays as it was, with a note, instead of restarting in a loop.
     private func restartLost(_ id: PaneID) {
         guard let old = views[id] as? SurfaceView, spec(id) != nil else { return }
+        let focus = keyboardInPanes || findPane == id   // the find bar of this pane counts as in it: destroy() closes it
         if let last = lostAt[id], Date().timeIntervalSince(last) < 30 {
             return old.show("\r\n[Workbench: this terminal's session was killed]\r\n")
         }
@@ -397,7 +419,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         destroy(id)
         createHidden(id)
         if activeTab?.root.contains(id) == true { tree.clear() }   // re-place the new view
-        render()
+        render(focus: focus)
     }
     private var lostAt: [PaneID: Date] = [:]
 
@@ -465,6 +487,13 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     @objc func goBack(_ sender: Any?) { step(-1) }
     @objc func goForward(_ sender: Any?) { step(1) }
 
+    /// Keyboard focus is in a pane, or nowhere. Renders that no keypress asked for (a shell exiting elsewhere, a killed host,
+    /// an agent's `pane open`) refocus a terminal only then, not out of a TODO row, the find bar or the file tree.
+    private var keyboardInPanes: Bool {
+        guard let v = window?.firstResponder as? NSView else { return true }
+        return v.isDescendant(of: tree)
+    }
+
     /// `focus` false: the keyboard stays where it is (a pane opened beside the one you are typing in).
     private func render(focus: Bool = true) {
         if let f = findPane, !(activeTab?.root.contains(f) ?? false) { closeFind(refocus: false) }
@@ -480,8 +509,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             emptyLabel.stringValue = activeProjectIndex == nil ? "⇧⌘O  Add Project" : "⌘T  New Terminal"
         }
         syncVisibility(refresh: rebuilt)
-        updateChrome()
+        // First: the focus change queues a chrome pass (paneFocused), which this synchronous one then absorbs.
         if focus, !InlineRename.isEditing, let id = focusedPane, let v = views[id] { window?.makeFirstResponder(v) }
+        updateChrome()
         recordLocation()
     }
 
@@ -664,7 +694,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             store.changed()
         }
         if let s = status[id], s == .done || s == .attention { status[id] = .idle }
-        updateChrome()
+        setNeedsChrome()
     }
 
     func focusPane(_ id: PaneID) {
@@ -776,11 +806,12 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             } else if status[id] == .busy {
                 setStatus(id, .idle)   // agent exited without a Stop hook
             }
+            agentSeen.insert(id)   // its command ended, so an agent started in it is gone
             scheduleCapture()   // a command ended: maybe an agent exited (its count leaves the sidebar)
         case let .openURL(url):
             openURL(url, from: id)
         case .closeRequested:
-            closePane(id, confirm: false)
+            closePane(id, confirm: false, focus: keyboardInPanes || findPane == id)   // find bar of this pane: destroy() closes it
         case .sessionLost:
             restartLost(id)
         case .startSearch, .endSearch, .searchTotal, .searchSelected:
@@ -1131,12 +1162,13 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         titles[id] = nil
         progressing.remove(id)
         background.remove(id)
+        agentSeen.remove(id)
         if findPane == id { hideFind(refocus: false) }
     }
 
     // Close paths resolve their target by id only after any confirm dialog: the modal run loop keeps
     // processing shell exits and socket commands, so indices captured before it may be stale.
-    func closePane(_ id: PaneID, confirm ask: Bool = true) {
+    func closePane(_ id: PaneID, confirm ask: Bool = true, focus: Bool = true) {
         if ask, needsConfirm([id]), !confirm("Close this pane?") { return }
         fileZoom[id] = nil
         guard let (p, t) = locate(id) else { destroy(id); return }
@@ -1150,7 +1182,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             removeTab(project: p, at: t)
         }
         store.changed()
-        render()
+        render(focus: focus)
     }
 
     private func closeTab(at index: Int) {
@@ -1444,11 +1476,15 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     }
 
     private var captureScheduled = false
+    private var captureAgain = false   // asked for while a scan was in flight: that scan may predate the change, so scan once more
+    /// Panes whose agent a scan has found, or whose own command has ended: only these can have lost one. A pane not in it
+    /// may just not have started yet (a resume typed into a login shell, a fresh `pane split --command`).
+    private var agentSeen: Set<PaneID> = []
 
     /// Coalesced background scan (~5 ms for ~1300 processes), applied on main. Keeps resume commands current
     /// if the app crashes instead of quitting.
     private func scheduleCapture() {
-        guard !captureScheduled else { return }
+        guard !captureScheduled else { captureAgain = true; return }
         captureScheduled = true
         DispatchQueue.global(qos: .utility).async {
             let running = Agents.running()
@@ -1456,27 +1492,19 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                 MainActor.assumeIsolated {
                     self.captureScheduled = false
                     self.apply(running)
+                    if self.captureAgain { self.captureAgain = false; self.scheduleCapture() }
                 }
             }
         }
     }
 
     /// Record, per terminal pane, the command that resumes the agent running in it (through the launcher it was
-    /// started with); a pane with no agent running forgets any earlier one. Also run right before a backup snapshot.
+    /// started with); a pane whose agent has ended forgets it. Also run right before a backup snapshot.
     func captureAgents() { apply(Agents.running()) }
 
     private func apply(_ running: [PaneID: String?]) {
         var layout = store.layout
-        for p in layout.projects.indices {
-            for t in layout.projects[p].tabs.indices {
-                layout.projects[p].tabs[t].root = layout.projects[p].tabs[t].root.mapLeaves { spec in
-                    guard case let .terminal(cwd, launch) = spec.kind else { return }
-                    // Not in `running`: no agent, so it restores as a plain shell. Running with an unknown id: keep.
-                    guard let entry = running[spec.id] else { spec.kind = .terminal(cwd: cwd, launch: nil); return }
-                    if let command = entry { spec.kind = .terminal(cwd: cwd, launch: Launch(command: command, scrollbackLimit: launch?.scrollbackLimit)) }
-                }
-            }
-        }
+        recordAgents(running, in: &layout, seen: &agentSeen)
         guard layout != store.layout else { return }
         store.layout = layout
         store.changed()
@@ -1533,7 +1561,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             return "{}"
         case "open":
             guard let path = msg["path"] else { return #"{"error":"no path"}"# }
-            openFile(path)
+            openFile(path, focus: keyboardInPanes)
             return "{}"
         #if DEBUG
         case "restore":  // test harness: restore the backup file at `path`, skipping the Settings dialogs
@@ -1546,6 +1574,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             guard responds(to: sel) else { return #"{"error":"unknown action"}"# }
             perform(sel, with: nil)
             return "{}"
+        case "responder":   // test harness: the window's first responder class, and whether it is in the split tree
+            return #"{"responder":"\#(window?.firstResponder.map { String(describing: type(of: $0)) } ?? "")","inPanes":"\#(keyboardInPanes)"}"#
         case "rclick":   // test harness: a real right-click event at the centre of a pane, through window.sendEvent
             guard let id = pane, let v = views[id], let w = v.window else { return #"{"error":"pane not shown"}"# }
             let at = v.convert(NSPoint(x: v.bounds.midX, y: v.bounds.midY), to: nil)
@@ -1900,4 +1930,33 @@ extension WorkspaceController: NSToolbarDelegate {
         item.visibilityPriority = .high
         return item
     }
+}
+
+func controllerSelfCheck() {
+    // recordAgents: a pane absent from a scan loses its launch only after an agent was seen there.
+    let (a, b, c) = (PaneID(), PaneID(), PaneID())
+    func leaf(_ id: PaneID, _ command: String?) -> SplitNode {
+        .leaf(PaneSpec(id: id, kind: .terminal(cwd: "/", launch: command.map { Launch(command: $0, scrollbackLimit: 7) })))
+    }
+    let tab = Tab(id: UUID(), title: "t", root: .split(axis: .horizontal, ratio: 0.5, a: leaf(a, "cc2 --resume A"),
+                                                       b: .split(axis: .vertical, ratio: 0.5, a: leaf(b, "cc2 --resume B"), b: leaf(c, "npm run dev"))), focused: a)
+    var layout = Layout.default
+    layout.projects = [Project(id: UUID(), path: "/", name: "p", tabs: [tab], activeTab: 0)]
+    func launch(_ id: PaneID) -> String? {
+        guard case let .terminal(_, l)? = layout.projects[0].tabs[0].root.leaves.first(where: { $0.id == id })?.kind else { return nil }
+        return l?.command
+    }
+    var seen: Set<PaneID> = []
+    recordAgents([a: "cc2 --resume A2"], in: &layout, seen: &seen)   // b's agent has not started yet
+    assert(launch(a) == "cc2 --resume A2" && launch(b) == "cc2 --resume B" && seen == [a])
+    if case let .terminal(_, l)? = layout.projects[0].tabs[0].root.leaves.first?.kind { assert(l?.scrollbackLimit == 7) }
+    recordAgents([a: nil], in: &layout, seen: &seen)   // running, id unknown: keep
+    assert(launch(a) == "cc2 --resume A2")
+    recordAgents([b: "cc2 --resume B2"], in: &layout, seen: &seen)   // a's agent is gone, b's is found
+    assert(launch(a) == nil && launch(b) == "cc2 --resume B2" && seen == [b])
+    recordAgents([:], in: &layout, seen: &seen)   // c never ran an agent and its command has not ended: kept
+    assert(launch(c) == "npm run dev" && seen.isEmpty)
+    seen.insert(c)   // c's own command ended without an agent: it loses its launch
+    recordAgents([:], in: &layout, seen: &seen)
+    assert(launch(b) == nil && launch(c) == nil && seen.isEmpty)
 }

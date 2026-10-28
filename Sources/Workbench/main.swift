@@ -8,6 +8,7 @@ if CommandLine.arguments.contains("--selfcheck") {
     fileTreeSelfCheck()
     controlSelfCheck()
     agentsSelfCheck()
+    controllerSelfCheck()
     transcriptSelfCheck()
     sessionSelfCheck()
     print("selfcheck ok")
