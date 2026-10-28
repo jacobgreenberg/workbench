@@ -1,6 +1,6 @@
 import AppKit
 
-struct TabItem: Equatable, Sendable { let title: String; let status: PaneStatus; var id: UUID? = nil /* the Tab's id: an inline rename ends when its tab is no longer at its position */ }
+struct TabItem: Equatable, Sendable { let title: String; let status: PaneStatus; let id: UUID /* the Tab's id: an inline rename ends when its tab is no longer at its position */ }
 
 /// Borderless chrome button that shows the pointing-hand cursor on hover.
 final class HandButton: NSButton {
@@ -42,7 +42,7 @@ final class HandButton: NSButton {
         original = field.stringValue
         self.done = done
         super.init()
-        InlineRename.active?.finish(field.stringValue)
+        if let previous = InlineRename.active { previous.finish(previous.field.stringValue) }   // its own text, not the new field's
         InlineRename.active = self
         field.isEditable = true
         field.isSelectable = true
@@ -331,9 +331,9 @@ private final class TabScrollView: NSScrollView {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     @objc private func newTapped() { onNew?() }
 
+    #if DEBUG
     func beginRename(_ i: Int) { buttons[i].beginRename() }
 
-    #if DEBUG
     func tabCenter(_ i: Int) -> NSPoint? {
         buttons.indices.contains(i) ? buttons[i].convert(NSPoint(x: buttons[i].bounds.midX, y: buttons[i].bounds.midY), to: nil) : nil
     }
@@ -471,6 +471,7 @@ private final class TabScrollView: NSScrollView {
     }
 }
 
+#if DEBUG
 extension InlineRename {
     /// Ends the edit in progress as Return would.
     static func commitActive() { active?.finish(active?.field.stringValue) }
@@ -508,6 +509,15 @@ extension InlineRename {
     InlineRename.commitActive()
     assert(renamed.count == 1)
 
+    // Starting a second edit commits the first with its own text, not the new field's.
+    let first = NSTextField(labelWithString: "one"), second = NSTextField(labelWithString: "two")
+    var committed: [String?] = []
+    InlineRename(first) { committed.append($0) }
+    first.stringValue = "edited"
+    InlineRename(second) { _ in }
+    assert(committed == ["edited"])
+    InlineRename.cancelActive()
+
     // A busy dot pulses at a capped frame rate, and not at all under Reduce Motion.
     let dot = NSView()
     dot.wantsLayer = true
@@ -520,3 +530,4 @@ extension InlineRename {
     styleStatusDot(dot, .done, theme: theme)
     assert(dot.layer?.animation(forKey: "pulse") == nil)
 }
+#endif

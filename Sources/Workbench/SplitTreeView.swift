@@ -353,6 +353,7 @@ extension SplitNode {
     }
 }
 
+#if DEBUG
 /// Chrome self-checks (split tree, tab bar, sidebar); wired from main.swift's --selfcheck.
 @MainActor func chromeSelfCheck() {
     splitTreeSelfCheck()
@@ -386,3 +387,4 @@ extension SplitNode {
     assert(views[a]!.superview != nil)
     tree.clear()
 }
+#endif

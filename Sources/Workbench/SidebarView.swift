@@ -388,6 +388,7 @@ let vsCodeBundle = "com.microsoft.VSCode"
     }
 }
 
+#if DEBUG
 @MainActor func sidebarSelfCheck() {
     let theme = Theme.all().first!
     let sidebar = SidebarView(frame: NSRect(x: 0, y: 0, width: 320, height: 420))
@@ -427,3 +428,4 @@ let vsCodeBundle = "com.microsoft.VSCode"
     InlineRename.commitActive()
     assert(renamed.count == 1)
 }
+#endif
