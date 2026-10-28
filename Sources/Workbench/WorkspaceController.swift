@@ -332,7 +332,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         case let .terminal(cwd, launch):
             let s = SurfaceView(app: runtime.app, id: spec.id, cwd: cwd,
                                 initialInput: launch.map { $0.command + "\n" },
-                                env: env(for: spec.id), scrollbackLimit: launch?.scrollbackLimit)
+                                env: env(for: spec.id), scrollbackLimit: launch?.scrollbackLimit,
+                                initialSize: paneSize(spec.id))
             s.onFocus = { [unowned self] id in paneFocused(id) }
             s.onKey = { [unowned self] id in paneKeyDown(id) }
             s.contextMenu = { [unowned self] id in paneMenu(id) }
@@ -347,6 +348,12 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         }
         views[spec.id] = v
         return v
+    }
+
+    /// The size the pane will have once its tab is shown, for a new surface to start at; nil before the window has a layout.
+    private func paneSize(_ id: PaneID) -> CGSize? {
+        guard let (p, t) = locate(id), content.bounds.width > 0, content.bounds.height > 0 else { return nil }
+        return store.layout.projects[p].tabs[t].root.paneSizes(in: content.bounds.size)[id]
     }
 
     private func env(for id: PaneID) -> [String: String] {

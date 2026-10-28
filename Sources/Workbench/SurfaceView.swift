@@ -29,6 +29,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
     private var lastPerformKeyEvent: TimeInterval?
     private var eventMonitor: Any?
     private var sentSize: (w: UInt32, h: UInt32) = (0, 0)
+    private var ptyPending = false   // a pty resize is scheduled (see syncPty)
     private var displayID: UInt32?
     private var screenObserver: NSObjectProtocol?
     private var visible = true
@@ -49,7 +50,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
 
     override var acceptsFirstResponder: Bool { true }
 
-    init(app: ghostty_app_t, id: PaneID, cwd: String, initialInput: String?, env: [String: String], scrollbackLimit: Int?) {
+    init(app: ghostty_app_t, id: PaneID, cwd: String, initialInput: String?, env: [String: String], scrollbackLimit: Int?, initialSize: CGSize? = nil, startShell: Bool = true) {
         self.paneID = id
         self.box = SurfaceBox(id: id)
         super.init(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
@@ -79,9 +80,15 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         // and a 200 ms termios poll, so only the first responder in the key window is told it is focused.
         ghostty_surface_set_focus(created, false)
 
+        let attached = startShell ? Session.attach(id) : nil
+        // A new shell starts at the size the pane will have (libghostty's default is 800x600 px, ~48x17: a pane created
+        // for a hidden tab would run at that until shown); an attached one plays its replay on the host's grid below.
+        if attached == nil, let initialSize {
+            let px = PaneGeometry.pixels(initialSize, scale: c.scale_factor)
+            ghostty_surface_set_size(created, px.w, px.h)
+        }
         let size = ghostty_surface_size(created)
         let cols = size.columns > 0 ? size.columns : 80, rows = size.rows > 0 ? size.rows : 24
-        let attached = Session.attach(id)
         let (argv, shellEnv) = Session.shell(cwd: cwd, paneEnv: env)
         if let grid = attached?.grid, size.cell_width_px > 0, size.cell_height_px > 0 {
             // Play the replay on the grid it was drawn for (the layout resizes after, as for any live terminal):
@@ -90,7 +97,14 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
             let padW = size.width_px > usedW ? size.width_px - usedW : 0, padH = size.height_px > usedH ? size.height_px - usedH : 0
             ghostty_surface_set_size(created, UInt32(grid.cols) * size.cell_width_px + padW, UInt32(grid.rows) * size.cell_height_px + padH)
         }
-        if let session = attached ?? Session.spawn(id, cwd: cwd, argv: argv, env: shellEnv, cols: cols, rows: rows) {
+        if !startShell {
+            // no shell: a surface for the self check only
+        } else if let session = attached ?? Session.spawn(id, cwd: cwd, argv: argv, env: shellEnv, cols: cols, rows: rows) {
+            if attached == nil, initialSize != nil, size.cell_width_px > 0 {
+                // Record the pixel size too, so the first layout after spawn is not a winsize change (a SIGWINCH) at the same grid.
+                let pty = PaneGeometry.ptySize(columns: size.columns, rows: size.rows, cellWidth: size.cell_width_px, cellHeight: size.cell_height_px)
+                session.resize(cols: pty.cols, rows: pty.rows, width: pty.width, height: pty.height)
+            }
             if attached == nil, let initialInput { let d = Array(initialInput.utf8); d.withUnsafeBytes { session.write($0) } }
             box.session.withLock { $0 = session }
             nonisolated(unsafe) let surfacePtr = created
@@ -224,6 +238,9 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
             session.stopReading()
             if Session.keepOnClose { session.detach() } else { session.kill() }
         }
+        // Out of app routing on main, before the free runs on another thread: otherwise a tick can deliver a title/pwd
+        // message to a surface being torn down. After this no surface API may be called (stopReading already returned).
+        ghostty_surface_request_process_termination(s)
         surface = nil
         nonisolated(unsafe) let ptr = s
         let view = self
@@ -310,8 +327,25 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         guard force || w != sentSize.w || h != sentSize.h else { return }
         sentSize = (w, h)
         ghostty_surface_set_size(surface, w, h)
-        let s = ghostty_surface_size(surface)
-        box.session.withLock { $0 }?.resize(cols: s.columns, rows: s.rows, width: UInt16(clamping: s.width_px), height: UInt16(clamping: s.height_px))
+        syncPty()
+    }
+
+    /// libghostty applies a size to its terminal up to 25 ms after set_size (coalesced), and in manual IO mode the pty is
+    /// ours: resized at once, an agent redrawing for the SIGWINCH is parsed at the old size and then reflowed. So the pty
+    /// follows after 30 ms, once, with the latest grid (a drag sends at most one per 30 ms; whole cells only: see ptySize).
+    private func syncPty() {
+        guard !ptyPending else { return }
+        ptyPending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(30)) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.ptyPending = false
+                guard let surface = self.surface, !self.closed else { return }
+                let s = ghostty_surface_size(surface)
+                let pty = PaneGeometry.ptySize(columns: s.columns, rows: s.rows, cellWidth: s.cell_width_px, cellHeight: s.cell_height_px)
+                self.box.session.withLock { $0 }?.resize(cols: pty.cols, rows: pty.rows, width: pty.width, height: pty.height)
+            }
+        }
     }
 
     func refresh() {
@@ -1021,3 +1055,83 @@ extension SurfaceView: @preconcurrency NSTextInputTraits {
     var mathExpressionCompletionType: NSTextInputTraitType { get { .no } set {} }
     var writingToolsBehavior: NSWritingToolsBehavior { get { .none } set {} }
 }
+
+/// Pure geometry for panes: what size a pane will have, and what the pty is told.
+enum PaneGeometry {
+    /// Keep equal to PaneHeader.height (SplitTreeView.swift): the strip above each pane of a split tab.
+    static let headerHeight: CGFloat = 36
+
+    /// Backing pixels of a size in points.
+    static func pixels(_ size: CGSize, scale: Double) -> (w: UInt32, h: UInt32) {
+        (UInt32(max(size.width * scale, 1)), UInt32(max(size.height * scale, 1)))
+    }
+
+    /// The pty's winsize for a grid: whole cells, not the surface's pixels (which change on every step of a drag, and
+    /// the kernel signals the pane for any change of the winsize bytes). Session.resize drops repeats.
+    static func ptySize(columns: UInt16, rows: UInt16, cellWidth: UInt32, cellHeight: UInt32) -> (cols: UInt16, rows: UInt16, width: UInt16, height: UInt16) {
+        (columns, rows, UInt16(clamping: UInt32(columns) * cellWidth), UInt16(clamping: UInt32(rows) * cellHeight))
+    }
+}
+
+extension SplitNode {
+    /// Each pane's content size for a tree laid out in `size` (the SplitTreeView: ratio positions the divider, which takes
+    /// 1 pt; every pane of a split tab has a header strip, a lone pane none).
+    func paneSizes(in size: CGSize, header: CGFloat = PaneGeometry.headerHeight) -> [PaneID: CGSize] {
+        var out: [PaneID: CGSize] = [:]
+        func walk(_ node: SplitNode, _ s: CGSize, headed: Bool) {
+            switch node {
+            case .leaf(let spec):
+                out[spec.id] = CGSize(width: s.width, height: max(0, s.height - (headed ? header : 0)))
+            case .split(let axis, let ratio, let a, let b):
+                let across = axis == .horizontal
+                let total = across ? s.width : s.height
+                let first = min(max(CGFloat(ratio) * total, 0), total), second = max(0, total - first - 1)
+                walk(a, across ? CGSize(width: first, height: s.height) : CGSize(width: s.width, height: first), headed: true)
+                walk(b, across ? CGSize(width: second, height: s.height) : CGSize(width: s.width, height: second), headed: true)
+            }
+        }
+        walk(self, size, headed: { if case .split = self { return true } else { return false } }())
+        return out
+    }
+}
+
+#if DEBUG
+@MainActor func surfaceSelfCheck() {
+    func leaf() -> (PaneSpec, SplitNode) {
+        let spec = PaneSpec(id: UUID(), kind: .terminal(cwd: "/tmp", launch: nil))
+        return (spec, .leaf(spec))
+    }
+    let (a, na) = leaf(), (b, nb) = leaf(), (c, nc) = leaf()
+
+    // A lone pane gets the whole area and no header; panes of a split lose the header, and the divider takes 1 pt.
+    assert(na.paneSizes(in: CGSize(width: 800, height: 600), header: 36)[a.id] == CGSize(width: 800, height: 600))
+    let two = SplitNode.split(axis: .horizontal, ratio: 0.5, a: na, b: nb).paneSizes(in: CGSize(width: 801, height: 600), header: 36)
+    assert(two[a.id] == CGSize(width: 400.5, height: 564) && two[b.id] == CGSize(width: 399.5, height: 564))
+    let stacked = SplitNode.split(axis: .vertical, ratio: 0.25, a: na, b: .split(axis: .horizontal, ratio: 0.5, a: nb, b: nc))
+        .paneSizes(in: CGSize(width: 1001, height: 801), header: 36)
+    assert(stacked[a.id] == CGSize(width: 1001, height: 200.25 - 36))
+    assert(stacked[b.id] == CGSize(width: 500.5, height: 599.75 - 36) && stacked[c.id] == CGSize(width: 499.5, height: 599.75 - 36))
+
+    // pty size: whole cells, so any pixel size inside the same grid is the same winsize.
+    let g1 = PaneGeometry.ptySize(columns: 120, rows: 40, cellWidth: 17, cellHeight: 34)
+    assert(g1.cols == 120 && g1.rows == 40 && g1.width == 2040 && g1.height == 1360)
+    assert(PaneGeometry.ptySize(columns: 4000, rows: 3, cellWidth: 100, cellHeight: 1).width == UInt16.max)
+    let px = PaneGeometry.pixels(CGSize(width: 400.5, height: 300), scale: 2)
+    assert(px.w == 801 && px.h == 600 && PaneGeometry.pixels(.zero, scale: 2).w == 1)
+
+    // A new surface created with an initialSize has that grid before any shell exists (not libghostty's 800x600 default).
+    if ghostty_init(UInt(CommandLine.argc), CommandLine.unsafeArgv) == GHOSTTY_SUCCESS {
+        let rt = Runtime(overrides: "")
+        let scale = Double(NSScreen.main?.backingScaleFactor ?? 2)
+        let big = SurfaceView(app: rt.app, id: UUID(), cwd: "/tmp", initialInput: nil, env: [:], scrollbackLimit: nil,
+                              initialSize: CGSize(width: 1200, height: 800), startShell: false)
+        let dflt = SurfaceView(app: rt.app, id: UUID(), cwd: "/tmp", initialInput: nil, env: [:], scrollbackLimit: nil, startShell: false)
+        if let bs = big.surface, let ds = dflt.surface {
+            let b = ghostty_surface_size(bs), d = ghostty_surface_size(ds)
+            assert(b.cell_width_px > 0 && UInt32(b.width_px) == UInt32(1200 * scale) && UInt32(b.height_px) == UInt32(800 * scale))
+            assert(b.columns > d.columns && b.rows > d.rows)
+        }
+        big.close(); dflt.close()
+    }
+}
+#endif
