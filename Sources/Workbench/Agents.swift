@@ -24,25 +24,71 @@ enum Agents {
     }
 
     static func loadLaunchers() {
-        do {
-            let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-            guard shell.hasSuffix("zsh") else { return }
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: shell)
-            p.arguments = ["-ic", #"for f in ${(ko)functions}; do print -r -- "$f"$'\t'"${functions[$f]//$'\n'/ }"; done"#]
-            let pipe = Pipe()
-            p.standardOutput = pipe
-            p.standardError = FileHandle.nullDevice
-            p.standardInput = FileHandle.nullDevice
-            guard (try? p.run()) != nil else { return }
-            let killer = DispatchWorkItem { p.terminate() }
-            DispatchQueue.global().asyncAfter(deadline: .now() + 10, execute: killer)
-            let out = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            p.waitUntilExit()
-            killer.cancel()
-            let found = parseLaunchers(out, home: NSHomeDirectory())
-            launchers.withLock { $0 = found }
+        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        guard shell.hasSuffix("zsh") else { return }
+        let script = #"for f in ${(ko)functions}; do print -r -- "$f"$'\t'"${functions[$f]//$'\n'/ }"; done"#
+        guard let out = capture(shell, ["-ic", script], timeout: 10) else { return }
+        let found = parseLaunchers(out, home: NSHomeDirectory())
+        launchers.withLock { $0 = found }
+    }
+
+    /// Runs a program and returns its stdout, ending at the program's exit or after `timeout` seconds, whichever is
+    /// first (nil if it cannot start). Not at EOF: a `.zshrc` that leaves something running with stdout inherited keeps
+    /// the pipe open forever. The child leads its own process group, so the timeout's SIGKILL (an interactive zsh
+    /// ignores SIGTERM) takes down its children too.
+    static func capture(_ path: String, _ args: [String], timeout: TimeInterval) -> String? {
+        var fds: [Int32] = [0, 0]
+        guard pipe(&fds) == 0 else { return nil }
+        let (rd, wr) = (fds[0], fds[1])
+        var actions: posix_spawn_file_actions_t?
+        posix_spawn_file_actions_init(&actions)
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
+        posix_spawn_file_actions_adddup2(&actions, wr, 1)
+        posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0)
+        var attr: posix_spawnattr_t?
+        posix_spawnattr_init(&attr)
+        defer { posix_spawnattr_destroy(&attr) }
+        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT))
+        posix_spawnattr_setpgroup(&attr, 0)
+        var pid: pid_t = 0
+        let argv = ([path] + args).map { strdup($0) } + [nil]
+        defer { argv.forEach { free($0) } }
+        let rc = posix_spawn(&pid, path, &actions, &attr, argv, environ)
+        close(wr)
+        guard rc == 0 else { close(rd); return nil }
+        defer { close(rd); var st: Int32 = 0; waitpid(pid, &st, 0) }
+
+        let kq = kqueue()
+        defer { close(kq) }
+        var changes = [kevent(ident: UInt(rd), filter: Int16(EVFILT_READ), flags: UInt16(EV_ADD), fflags: 0, data: 0, udata: nil),
+                       kevent(ident: UInt(pid), filter: Int16(EVFILT_PROC), flags: UInt16(EV_ADD | EV_ONESHOT), fflags: UInt32(NOTE_EXIT), data: 0, udata: nil)]
+        _ = fcntl(rd, F_SETFL, fcntl(rd, F_GETFL) | O_NONBLOCK)
+        var out = Data()
+        func drain() -> Bool {   // false at EOF
+            var buf = [UInt8](repeating: 0, count: 64 << 10)
+            while true {
+                let n = read(rd, &buf, buf.count)
+                if n > 0 { out.append(contentsOf: buf[..<n]) } else { return n < 0 && errno == EAGAIN }
+            }
         }
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            let left = deadline.timeIntervalSinceNow
+            if left <= 0 { kill(-pid, SIGKILL); break }
+            var ts = timespec(tv_sec: Int(left), tv_nsec: Int((left - floor(left)) * 1e9))
+            var ev = kevent()
+            let n = kevent(kq, changes, Int32(changes.count), &ev, 1, &ts)
+            changes = []
+            if n < 0 && errno != EINTR { kill(-pid, SIGKILL); break }
+            guard n > 0 else { continue }
+            if ev.filter == Int16(EVFILT_PROC) { break }   // exited; stragglers may still hold the pipe
+            if !drain() {   // EOF: stop watching the pipe, still wait for the exit
+                changes = [kevent(ident: UInt(rd), filter: Int16(EVFILT_READ), flags: UInt16(EV_DELETE), fflags: 0, data: 0, udata: nil)]
+            }
+        }
+        _ = drain()
+        return String(decoding: out, as: UTF8.self)
     }
 
     /// Lines of "name<TAB>body". A function is a Claude launcher if it runs `claude`, a Codex launcher if it runs
@@ -95,14 +141,23 @@ enum Agents {
     /// nil if no agent runs there or the file can't be found. Scans processes and the disk: call off the main thread.
     static func transcript(for pane: PaneID) -> URL? { sessions()[pane].flatMap(transcript) }
 
+    /// session id → its jsonl; that never changes, but finding it lists every project folder (hundreds).
+    private static let claudeTranscripts = Mutex<[String: URL]>([:])
+
+    /// The folder is a slug of the cwd; find the file by name instead. A remembered path that is gone is searched again.
+    static func claudeTranscript(id: String, root: String) -> URL? {
+        let fm = FileManager.default, key = "\(root)/\(id)"
+        if let url = claudeTranscripts.withLock({ $0[key] }), fm.fileExists(atPath: url.path) { return url }
+        let url = ((try? fm.contentsOfDirectory(atPath: root)) ?? []).map { URL(fileURLWithPath: "\(root)/\($0)/\(id).jsonl") }
+            .first { fm.fileExists(atPath: $0.path) }
+        if let url { claudeTranscripts.withLock { $0[key] = url } }
+        return url
+    }
+
     private static func transcript(_ s: Session) -> URL? {
         guard let id = s.id?.lowercased() else { return nil }
         let fm = FileManager.default
-        if s.claude {   // the folder is a slug of the cwd; find the file by name instead
-            let root = s.home + "/projects"
-            return ((try? fm.contentsOfDirectory(atPath: root)) ?? []).map { URL(fileURLWithPath: "\(root)/\($0)/\(id).jsonl") }
-                .first { fm.fileExists(atPath: $0.path) }
-        }
+        if s.claude { return claudeTranscript(id: id, root: s.home + "/projects") }
         func newestFirst(_ dir: URL) -> [URL] {
             ((try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []).sorted { $0.lastPathComponent > $1.lastPathComponent }
         }
@@ -414,5 +469,34 @@ func agentsSelfCheck() {
     assert(w([p1: [[1, 2]]], [2], [1: 0, 2: 100], [1: 1_000_000]).isEmpty)   // pid 2 vanished: not negative, not counted
     assert(w([p1: [[1, 2]], p2: [[3]]], [2, 3], [1: 0, 2: 0, 3: 0], [1: 30_000_000, 2: 0, 3: 1_000_000]) == [p1])   // independent
     assert(w([p1: [[1], [2]]], [1], [1: 0], [1: 0]) == [p1])   // any tree without a listener
+
+    // Claude transcript lookup: found by name in any project folder; remembered; searched again once the file moves.
+    let root = dir + "/projects"
+    let id = UUID().uuidString.lowercased()
+    try! FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
+    for f in ["-a", "-b"] { try! FileManager.default.createDirectory(atPath: root + "/" + f, withIntermediateDirectories: true) }
+    let first = URL(fileURLWithPath: "\(root)/-a/\(id).jsonl")
+    FileManager.default.createFile(atPath: first.path, contents: Data())
+    assert(Agents.claudeTranscript(id: id, root: root) == first)
+    chmod(root, 0o100)   // searchable but not listable: only a remembered path can still be found
+    assert(Agents.claudeTranscript(id: id, root: root) == first, "second lookup must not list the folders again")
+    chmod(root, 0o700)
+    let moved = URL(fileURLWithPath: "\(root)/-b/\(id).jsonl")
+    try! FileManager.default.moveItem(at: first, to: moved)
+    assert(Agents.claudeTranscript(id: id, root: root) == moved)
+    assert(Agents.claudeTranscript(id: UUID().uuidString, root: root) == nil)
+
+    // Launcher discovery's capture ends at the child's exit, not at EOF, and never waits on a hung or stubborn child.
+    func timed(_ script: String, timeout: TimeInterval) -> (String?, TimeInterval) {
+        let t0 = Date()
+        return (Agents.capture("/bin/sh", ["-c", script], timeout: timeout), Date().timeIntervalSince(t0))
+    }
+    var r = timed("echo one; echo two", timeout: 10)
+    assert(r.0 == "one\ntwo\n" && r.1 < 5, "\(r)")
+    r = timed("echo hi; sleep 6 &", timeout: 10)   // the sleep inherits stdout and keeps the pipe open
+    assert(r.0 == "hi\n" && r.1 < 4, "exit, not EOF: \(r)")
+    r = timed("echo partial; trap '' TERM; sleep 30", timeout: 1)   // ignores SIGTERM
+    assert(r.0 == "partial\n" && r.1 < 4, "killed at the timeout: \(r)")
+    assert(Agents.capture("/nonexistent/zsh", [], timeout: 1) == nil)
 }
 #endif
