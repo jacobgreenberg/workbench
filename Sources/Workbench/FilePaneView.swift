@@ -233,7 +233,8 @@ private final class FocusTextView: NSTextView {
     static let zoomRange: ClosedRange<CGFloat> = 0.5...3
     private let zoomBar = ZoomBar()
     private var scrollScale: CGFloat = 1   // the next render restores the scroll offset scaled by this (zoom changed)
-    private var lastRender: TimeInterval = 0   // how long the newest landed render took, from request to landing: the throttle backs off by it
+    private var renderInFlight = false   // the newest reload's render has not landed: a file change never supersedes it, it marks `dirty` instead
+    private var dirty = false             // the file changed while a render was in flight; one more reload when it lands
     /// Shared by every pane: at most one render in flight, and a superseded pane (or one whose file was swapped under it) skips its read and parse.
     private static let renderQueue = DispatchQueue(label: "pane.file", qos: .userInitiated)
 
@@ -328,8 +329,9 @@ private final class FocusTextView: NSTextView {
     private func reload() {
         guard window != nil else { stale = true; return }   // hidden panes leave the window: don't read or parse until shown
         generation += 1
+        renderInFlight = true; dirty = false   // this render reads the file afresh; older renders are superseded and never land
         latest.value.store(generation, ordering: .relaxed)
-        let gen = generation, path = path, palette = palette, latest = latest, zoom = zoom, scale = scrollScale, started = Date()
+        let gen = generation, path = path, palette = palette, latest = latest, zoom = zoom, scale = scrollScale
         scrollScale = 1
         Self.renderQueue.async { [weak self] in
             guard latest.value.load(ordering: .relaxed) == gen else { return }
@@ -340,7 +342,7 @@ private final class FocusTextView: NSTextView {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self, gen == self.generation, !self.closed else { return }
-                    self.lastRender = Date().timeIntervalSince(started)
+                    self.renderInFlight = false
                     let clip = self.scrollView.contentView
                     let origin = NSPoint(x: clip.bounds.origin.x, y: clip.bounds.origin.y * scale)   // text height scales with zoom
                     let ranges = self.textView.selectedRanges
@@ -356,6 +358,7 @@ private final class FocusTextView: NSTextView {
                     if origin.y > 0 { self.textView.layoutSubtreeIfNeeded() }
                     clip.scroll(to: origin)
                     self.scrollView.reflectScrolledClipView(clip)
+                    if self.dirty { self.changed() }
                 }
             }
         }
@@ -410,15 +413,21 @@ private final class FocusTextView: NSTextView {
         }
     }
 
-    /// At most one reload per 100 ms, or twice the last render when that is longer (a big highlighted file): a file that is
-    /// written continuously still refreshes while it is written, without keeping the main thread and render queue saturated.
+    /// A file change never supersedes a render that is running (a file written continuously, or a render slower than the
+    /// throttle, would then never land): it waits for that render, then reloads. Otherwise at most one reload per 100 ms.
     private func changed() {
-        guard !closed, pending == nil else { return }
+        guard !closed else { return }
+        if renderInFlight { dirty = true; return }
+        guard pending == nil else { return }
         let w = DispatchWorkItem { [weak self] in
-            MainActor.assumeIsolated { self?.pending = nil; self?.reload() }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.pending = nil
+                if self.renderInFlight { self.dirty = true } else { self.reload() }   // an explicit reload started meanwhile
+            }
         }
         pending = w
-        DispatchQueue.main.asyncAfter(deadline: .now() + max(0.1, min(2 * lastRender, 3)), execute: w)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: w)
     }
 }
 
@@ -542,6 +551,37 @@ private final class FocusTextView: NSTextView {
     spin(5) { live.shownText.hasSuffix("line 14\n") }
     assert(live.shownText.hasSuffix("line 14\n"))
     live.close()
+    host.contentView?.subviews.forEach { $0.removeFromSuperview() }
+
+    // starvation: a file that grows into renders slower than the throttle, written continuously, must still show renders while
+    // it is written (a change that superseded the running render would leave the old text on screen until the writer stopped)
+    let slow = dir.appendingPathComponent("\(UUID().uuidString).swift")
+    let body = String((0..<20_000).map { "let value\($0) = \($0) + 42 // comment\n" }.joined())
+    let t1 = Date()
+    _ = Renderer(text: body, path: slow.path, palette: Palette(theme), zoom: 1).render()
+    let renderTime = Date().timeIntervalSince(t1)
+    assert(renderTime > 0.15, "the starvation check needs renders slower than the 100 ms throttle: \(renderTime) s")
+    try? "let small = 1\n".write(to: slow, atomically: true, encoding: .utf8)   // renders fast: the throttle stays at 100 ms
+    defer { try? FileManager.default.removeItem(at: slow) }
+    let busy = FilePaneView(id: UUID(), path: slow.path, theme: theme)
+    host.contentView?.addSubview(busy)
+    spin(10) { busy.shownText == "let small = 1\n" }
+    assert(busy.shownText == "let small = 1\n")
+    let writer = try! FileHandle(forWritingTo: slow)
+    try? writer.truncate(atOffset: 0)
+    writer.write(Data(body.utf8))
+    var seen = Set([busy.shownText.utf16.count]), written = body.utf16.count
+    for i in 0..<Int((renderTime * 8 / 0.02).rounded(.up)) {   // keeps writing for ~8 renders
+        let line = "let extra\(i) = 1\n"
+        writer.write(Data(line.utf8)); written += line.utf16.count
+        spin(0.02)
+        seen.insert(busy.shownText.utf16.count)
+    }
+    assert(seen.count >= 3, "renders must keep landing while the file is written: saw \(seen.count) distinct texts")
+    try? writer.close()
+    spin(10) { busy.shownText.utf16.count == written }
+    assert(busy.shownText.utf16.count == written)   // the last write is shown
+    busy.close()
     host.contentView?.subviews.forEach { $0.removeFromSuperview() }
 
     // retarget resets the scroll at once, and a reload racing the retarget render must not bring the old offset back
