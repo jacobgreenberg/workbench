@@ -838,6 +838,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         seekWork?.cancel()
         seekWork = nil
         TranscriptSearch.cancel()
+        TranscriptSearch.release()
         findSurface?.perform("end_search")
     }
 
@@ -856,9 +857,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         transcriptDebounce = nil
         let query = findBar.text
         guard !query.isEmpty else { findSurface?.perform("end_search"); findBar.setCounts(total: -1, selected: -1); return }
-        TranscriptSearch.search(url, query) { [weak self] result in
+        TranscriptSearch.search(url, query) { [weak self] total in
             guard let self, transcript == url, findBar.text == query else { return }
-            transcriptTotal = result.matches.count
+            transcriptTotal = total
             findBar.setCounts(total: transcriptTotal, selected: -1)
             if transcriptTotal > 0 { seek(up: true, skipScreen: false) } else { findSurface?.perform("end_search") }
         }
@@ -1753,9 +1754,10 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         findPane = id
         findResolving = true
         TranscriptSearch.locate(id) { [weak self] url in
-            guard let self, findResolving, findPane == id else { return }
+            // locate already parsed the transcript: if Find is not going to use it, let it go.
+            guard let self, findResolving, findPane == id else { return TranscriptSearch.release() }
             findResolving = false
-            if let url { beginTranscriptFind(id, url) } else { surfaceView(for: id)?.perform("start_search") }
+            if let url { beginTranscriptFind(id, url) } else { TranscriptSearch.release(); surfaceView(for: id)?.perform("start_search") }
         }
     }
     @objc func findNext(_ sender: Any?) { if transcript != nil { stepTranscript(1) } else { findSurface?.perform("navigate_search:next") } }
