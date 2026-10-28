@@ -349,17 +349,27 @@ let vsCodeBundle = "com.microsoft.VSCode"
 
     private let reorder = Reorder(vertical: true)
 
+    /// The rows on screen and their views: the table keeps views only for those, so a list longer than the sidebar reorders
+    /// within the part showing. nil = this press cannot start a reorder.
+    fileprivate func reorderViews(for row: Int) -> (rows: Range<Int>, views: [NSView])? {
+        let shown = table.rows(in: table.visibleRect)
+        let range = shown.location..<(shown.location + shown.length)
+        let views = range.compactMap { table.rowView(atRow: $0, makeIfNecessary: false) }
+        guard views.count == range.count, range.contains(row), !InlineRename.isEditing else { return nil }
+        return (range, views)
+    }
+
     /// Press on a row: a drag lifts it and slides the others (rows are layer-backed views moved by transforms); a press
     /// released before the 4 pt threshold is a click and selects the row, which reports once via the selection change.
     private func press(_ event: NSEvent, row: Int) -> Bool {
-        let views = rows.indices.compactMap { table.rowView(atRow: $0, makeIfNecessary: false) }
-        guard views.count == rows.count, !InlineRename.isEditing else { return false }
+        guard let (range, views) = reorderViews(for: row) else { return false }
         views.forEach { $0.wantsLayer = true }
         let y0 = table.convert(event.locationInWindow, from: nil).y
         var dragged = false
         trackDrag(from: event, in: table.window) { [self] p, done in
             dragged = true
-            reorder.drag(views, row, by: table.convert(p, from: nil).y - y0, done: done) { [self] from, to in
+            reorder.drag(views, row - range.lowerBound, by: table.convert(p, from: nil).y - y0, done: done) { [self] f, t in
+                let from = f + range.lowerBound, to = t + range.lowerBound
                 rows.insert(rows.remove(at: from), at: to)
                 if selected == from { selected = to } else if from < selected, selected <= to { selected -= 1 } else if to <= selected, selected < from { selected += 1 }
                 syncing = true
@@ -390,6 +400,13 @@ let vsCodeBundle = "com.microsoft.VSCode"
         sidebar.update(rows: r, selected: -1, hiddenCount: 0, showingHidden: false, theme: theme)
         sidebar.layoutSubtreeIfNeeded()
     }
+
+    // More projects than fit: a press on a row that is showing can still start a reorder, among the rows showing.
+    let many = (0..<30).map { _ in UUID() }
+    show(rows(many))
+    let start = sidebar.reorderViews(for: 1)
+    assert(start != nil && start!.rows.lowerBound == 0 && start!.rows.count < 30 && start!.views.count == start!.rows.count)
+    assert(sidebar.reorderViews(for: 29) == nil)   // scrolled out: no view to lift
 
     // A rename ends when its row is replaced, so it cannot commit to whatever sits at that index afterwards.
     let a = UUID(), b = UUID(), c = UUID()
