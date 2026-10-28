@@ -214,7 +214,7 @@ private final class FocusTextView: NSTextView {
     let paneID: PaneID
     private var path: String
     private var palette: Palette
-    private let scrollView = NSScrollView()
+    fileprivate let scrollView = NSScrollView()   // fileprivate: the self-check scrolls it
     private let textView = FocusTextView(usingTextLayoutManager: true)
     private(set) var generation = 0
     private var stale = false   // a render was skipped while hidden; the next window attach renders
@@ -233,6 +233,7 @@ private final class FocusTextView: NSTextView {
     static let zoomRange: ClosedRange<CGFloat> = 0.5...3
     private let zoomBar = ZoomBar()
     private var scrollScale: CGFloat = 1   // the next render restores the scroll offset scaled by this (zoom changed)
+    private var lastRender: TimeInterval = 0   // how long the newest landed render took, from request to landing: the throttle backs off by it
     /// Shared by every pane: at most one render in flight, and a superseded pane (or one whose file was swapped under it) skips its read and parse.
     private static let renderQueue = DispatchQueue(label: "pane.file", qos: .userInitiated)
 
@@ -299,7 +300,8 @@ private final class FocusTextView: NSTextView {
         dirSource?.cancel(); dirSource = nil
         fileSource?.cancel(); fileSource = nil
         textView.selectedRanges = [NSValue(range: NSRange(location: 0, length: 0))]
-        scrollScale = 0   // the next render restores offset 0
+        scrollView.contentView.scroll(to: .zero)   // now, not in a render: a reload that supersedes this one must not bring back the old file's offset
+        scrollView.reflectScrolledClipView(scrollView.contentView)
         reload()
     }
 
@@ -327,7 +329,7 @@ private final class FocusTextView: NSTextView {
         guard window != nil else { stale = true; return }   // hidden panes leave the window: don't read or parse until shown
         generation += 1
         latest.value.store(generation, ordering: .relaxed)
-        let gen = generation, path = path, palette = palette, latest = latest, zoom = zoom, scale = scrollScale
+        let gen = generation, path = path, palette = palette, latest = latest, zoom = zoom, scale = scrollScale, started = Date()
         scrollScale = 1
         Self.renderQueue.async { [weak self] in
             guard latest.value.load(ordering: .relaxed) == gen else { return }
@@ -338,6 +340,7 @@ private final class FocusTextView: NSTextView {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self, gen == self.generation, !self.closed else { return }
+                    self.lastRender = Date().timeIntervalSince(started)
                     let clip = self.scrollView.contentView
                     let origin = NSPoint(x: clip.bounds.origin.x, y: clip.bounds.origin.y * scale)   // text height scales with zoom
                     let ranges = self.textView.selectedRanges
@@ -407,14 +410,15 @@ private final class FocusTextView: NSTextView {
         }
     }
 
-    /// At most one reload per 100 ms: a file that is written continuously still refreshes while it is written.
+    /// At most one reload per 100 ms, or twice the last render when that is longer (a big highlighted file): a file that is
+    /// written continuously still refreshes while it is written, without keeping the main thread and render queue saturated.
     private func changed() {
         guard !closed, pending == nil else { return }
         let w = DispatchWorkItem { [weak self] in
             MainActor.assumeIsolated { self?.pending = nil; self?.reload() }
         }
         pending = w
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(100), execute: w)
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0.1, min(2 * lastRender, 3)), execute: w)
     }
 }
 
@@ -522,9 +526,10 @@ private final class FocusTextView: NSTextView {
     try? "edited\n".write(to: two, atomically: false, encoding: .utf8)
     spin(5) { live.shownText == "edited\n" }
     assert(live.shownText == "edited\n")
+    let unwatched = live.generation
     try? "old file changed\n".write(to: one, atomically: false, encoding: .utf8)
     spin(0.5)
-    assert(live.shownText == "edited\n")   // the old file is no longer watched
+    assert(live.generation == unwatched)   // the old file is no longer watched: a reload from its watcher would bump the generation
     // throttle: a file written more often than the debounce delay still refreshes while the writer is going
     let before = live.generation
     let handle = try! FileHandle(forWritingTo: two)
@@ -537,6 +542,28 @@ private final class FocusTextView: NSTextView {
     spin(5) { live.shownText.hasSuffix("line 14\n") }
     assert(live.shownText.hasSuffix("line 14\n"))
     live.close()
+    host.contentView?.subviews.forEach { $0.removeFromSuperview() }
+
+    // retarget resets the scroll at once, and a reload racing the retarget render must not bring the old offset back
+    let longA = dir.appendingPathComponent("\(UUID().uuidString).txt"), longB = dir.appendingPathComponent("\(UUID().uuidString).txt")
+    try? String((0..<400).map { "a line \($0)\n" }.joined()).write(to: longA, atomically: true, encoding: .utf8)
+    try? String((0..<400).map { "b line \($0)\n" }.joined()).write(to: longB, atomically: true, encoding: .utf8)
+    defer { try? FileManager.default.removeItem(at: longA); try? FileManager.default.removeItem(at: longB) }
+    let scrolled = FilePaneView(id: UUID(), path: longA.path, theme: theme)
+    scrolled.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+    host.contentView?.addSubview(scrolled)
+    spin(5) { scrolled.shownText.hasPrefix("a line 0\n") }
+    scrolled.layoutSubtreeIfNeeded()
+    scrolled.scrollView.contentView.scroll(to: NSPoint(x: 0, y: 2000))
+    assert(scrolled.scrollView.contentView.bounds.origin.y > 0)
+    scrolled.retarget(path: longB.path)
+    assert(scrolled.scrollView.contentView.bounds.origin.y == 0)   // before any render lands
+    scrolled.apply(theme: theme)   // a second reload supersedes the retarget's render
+    spin(5) { scrolled.shownText.hasPrefix("b line 0\n") }
+    assert(scrolled.shownText.hasPrefix("b line 0\n"))
+    spin(0.3)
+    assert(scrolled.scrollView.contentView.bounds.origin.y == 0)
+    scrolled.close()
     host.contentView?.subviews.forEach { $0.removeFromSuperview() }
 
     // highlight colors are memoized per capture name: keywords still get the palette's keyword color, plain text the body color

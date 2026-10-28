@@ -32,14 +32,14 @@ private let clutterNames: Set<String> = ["node_modules", "build", "dist", "Deriv
     private let titleLabel = NSTextField(labelWithString: "No project")
     private let filterButton = NSButton()
     private let scroll = NSScrollView()
-    private let outline = NSOutlineView()
+    fileprivate let outline = NSOutlineView()   // fileprivate: the self-check drives it
     private var root: Node?
     private var stream: FSEventStreamRef?
     private var selectPending: DispatchWorkItem?
     private let queue = DispatchQueue(label: "pane.filetree", qos: .userInitiated)
     private var generation = 0                  // bumped when the whole tree is replaced; older scan results are dropped
     private var refreshCounter = 0
-    private var pendingExpand = Set<String>()   // expanded before a reload, expanded again as their parent's children land
+    fileprivate var pendingExpand = Set<String>()   // expanded before a reload, expanded again as their parent's children land
 
     init() {
         super.init(frame: .zero)
@@ -123,6 +123,7 @@ private let clutterNames: Set<String> = ["node_modules", "build", "dist", "Deriv
 
     func show(root path: String?) {
         guard let path else {
+            selectPending?.cancel(); selectPending = nil
             stopStream()
             generation += 1
             pendingExpand = []
@@ -133,6 +134,7 @@ private let clutterNames: Set<String> = ["node_modules", "build", "dist", "Deriv
         }
         let url = URL(fileURLWithPath: path).standardizedFileURL
         if let root, root.url.path == url.path { return }
+        selectPending?.cancel(); selectPending = nil   // a click on the old project's row must not preview into this one
         stopStream()
         generation += 1
         pendingExpand = []
@@ -142,7 +144,7 @@ private let clutterNames: Set<String> = ["node_modules", "build", "dist", "Deriv
         startStream(path: url.path)
     }
 
-    func close() { stopStream() }
+    func close() { selectPending?.cancel(); selectPending = nil; stopStream() }
 
     nonisolated static func scan(_ dir: URL, hideClutter: Bool) -> [(url: URL, isDirectory: Bool)] {
         let urls = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey], options: [])) ?? []
@@ -186,6 +188,12 @@ private let clutterNames: Set<String> = ["node_modules", "build", "dist", "Deriv
         if node === root { outline.reloadData() } else { outline.reloadItem(node, reloadChildren: true) }
         pendingExpand.formUnion(paths)
         expandPending(nodes)
+        // A folder that is gone from the listing (renamed away) can never be visited: don't leave it queued to spring open if the name returns.
+        let present = Set(nodes.map(\.url.path))
+        for p in paths where pendingExpand.contains(p) {
+            let rest = p.dropFirst(node.url.path.count + 1)
+            if !present.contains(node.url.path + "/" + (rest.split(separator: "/", maxSplits: 1).first.map(String.init) ?? "")) { pendingExpand.remove(p) }
+        }
     }
 
     private func loaded(_ node: Node) -> [Node] {
@@ -233,7 +241,7 @@ private let clutterNames: Set<String> = ["node_modules", "build", "dist", "Deriv
         outline.reloadData()
     }
 
-    private func refresh(_ node: Node) {
+    fileprivate func refresh(_ node: Node) {
         guard root != nil, node.children != nil else { return }
         load(node, refresh: true)
     }
@@ -413,4 +421,53 @@ func fileTreeSelfCheck() {
     assert(FileTreeView.within("/p/B", open) == ["/p/B/c"])
     assert(FileTreeView.within("/p", open) == open)
     assert(FileTreeView.within("/p/A", open).isEmpty)
+    MainActor.assumeIsolated { fileTreeViewSelfCheck() }
+}
+
+/// The view itself, headless: a pending row preview dies with its project, and a refresh drops queued folders that are gone.
+@MainActor private func fileTreeViewSelfCheck() {
+    let fm = FileManager.default
+    func spin(_ seconds: Double, until done: () -> Bool = { false }) {
+        let end = Date().addingTimeInterval(seconds)
+        while !done() && Date() < end { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+    }
+    let base = fm.temporaryDirectory.appendingPathComponent("filetree-view-\(UUID().uuidString)")
+    let a = base.appendingPathComponent("a"), b = base.appendingPathComponent("b")
+    try! fm.createDirectory(at: a.appendingPathComponent("S/T"), withIntermediateDirectories: true)
+    try! fm.createDirectory(at: b, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: base) }
+    try! Data().write(to: a.appendingPathComponent("f.txt"))
+    let view = FileTreeView()
+    var selected: [String] = []
+    view.onSelect = { selected.append($0) }
+
+    // a click, then a project switch inside the coalescing delay: the old project's file is not previewed
+    view.show(root: a.path)
+    spin(5) { view.outline.numberOfRows == 2 }   // S, f.txt
+    view.outline.selectRowIndexes([1], byExtendingSelection: false)
+    view.show(root: b.path)
+    spin(0.4)
+    assert(selected.isEmpty)
+    view.show(root: a.path)
+    spin(5) { view.outline.numberOfRows == 2 }
+    view.outline.selectRowIndexes([1], byExtendingSelection: false)
+    spin(5) { !selected.isEmpty }
+    assert(selected.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path } == [a.appendingPathComponent("f.txt").resolvingSymlinksInPath().path])   // the same click is delivered when nothing intervenes
+    view.close()
+
+    // an expanded folder renamed away is not left queued to spring open when its name returns
+    view.show(root: a.path)
+    spin(5) { view.outline.numberOfRows == 2 }
+    let s = view.outline.item(atRow: 0) as! Node
+    view.outline.expandItem(s)
+    spin(5) { s.children != nil }
+    let t = s.children![0]
+    view.outline.expandItem(t)
+    spin(5) { t.children != nil }
+    try! fm.moveItem(at: a.appendingPathComponent("S/T"), to: a.appendingPathComponent("S/U"))
+    view.refresh(s)
+    spin(5) { s.children?.map { $0.url.lastPathComponent } == ["U"] }
+    assert(s.children?.map { $0.url.lastPathComponent } == ["U"])
+    assert(view.pendingExpand.isEmpty)
+    view.close()
 }
