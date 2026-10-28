@@ -50,7 +50,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
 
     override var acceptsFirstResponder: Bool { true }
 
-    init(app: ghostty_app_t, id: PaneID, cwd: String, initialInput: String?, env: [String: String], scrollbackLimit: Int?, initialSize: CGSize? = nil) {
+    init(app: ghostty_app_t, id: PaneID, cwd: String, initialInput: String?, env: [String: String], scrollbackLimit: Int?, initialSize: CGSize? = nil, startShell: Bool = true) {
         self.paneID = id
         self.box = SurfaceBox(id: id)
         super.init(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
@@ -80,7 +80,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         // and a 200 ms termios poll, so only the first responder in the key window is told it is focused.
         ghostty_surface_set_focus(created, false)
 
-        let attached = Session.attach(id)
+        let attached = startShell ? Session.attach(id) : nil
         // A new shell starts at the size the pane will have (libghostty's default is 800x600 px, ~48x17: a pane created
         // for a hidden tab would run at that until shown); an attached one plays its replay on the host's grid below.
         if attached == nil, let initialSize {
@@ -97,7 +97,9 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
             let padW = size.width_px > usedW ? size.width_px - usedW : 0, padH = size.height_px > usedH ? size.height_px - usedH : 0
             ghostty_surface_set_size(created, UInt32(grid.cols) * size.cell_width_px + padW, UInt32(grid.rows) * size.cell_height_px + padH)
         }
-        if let session = attached ?? Session.spawn(id, cwd: cwd, argv: argv, env: shellEnv, cols: cols, rows: rows) {
+        if !startShell {
+            // no shell: a surface for the self check only
+        } else if let session = attached ?? Session.spawn(id, cwd: cwd, argv: argv, env: shellEnv, cols: cols, rows: rows) {
             if attached == nil, initialSize != nil, size.cell_width_px > 0 {
                 // Record the pixel size too, so the first layout after spawn is not a winsize change (a SIGWINCH) at the same grid.
                 let pty = PaneGeometry.ptySize(columns: size.columns, rows: size.rows, cellWidth: size.cell_width_px, cellHeight: size.cell_height_px)
@@ -1116,5 +1118,20 @@ extension SplitNode {
     assert(PaneGeometry.ptySize(columns: 4000, rows: 3, cellWidth: 100, cellHeight: 1).width == UInt16.max)
     let px = PaneGeometry.pixels(CGSize(width: 400.5, height: 300), scale: 2)
     assert(px.w == 801 && px.h == 600 && PaneGeometry.pixels(.zero, scale: 2).w == 1)
+
+    // A new surface created with an initialSize has that grid before any shell exists (not libghostty's 800x600 default).
+    if ghostty_init(UInt(CommandLine.argc), CommandLine.unsafeArgv) == GHOSTTY_SUCCESS {
+        let rt = Runtime(overrides: "")
+        let scale = Double(NSScreen.main?.backingScaleFactor ?? 2)
+        let big = SurfaceView(app: rt.app, id: UUID(), cwd: "/tmp", initialInput: nil, env: [:], scrollbackLimit: nil,
+                              initialSize: CGSize(width: 1200, height: 800), startShell: false)
+        let dflt = SurfaceView(app: rt.app, id: UUID(), cwd: "/tmp", initialInput: nil, env: [:], scrollbackLimit: nil, startShell: false)
+        if let bs = big.surface, let ds = dflt.surface {
+            let b = ghostty_surface_size(bs), d = ghostty_surface_size(ds)
+            assert(b.cell_width_px > 0 && UInt32(b.width_px) == UInt32(1200 * scale) && UInt32(b.height_px) == UInt32(800 * scale))
+            assert(b.columns > d.columns && b.rows > d.rows)
+        }
+        big.close(); dflt.close()
+    }
 }
 #endif
