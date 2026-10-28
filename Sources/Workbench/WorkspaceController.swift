@@ -401,6 +401,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     /// tab survives. Killed again within 30 s: the pane stays as it was, with a note, instead of restarting in a loop.
     private func restartLost(_ id: PaneID) {
         guard let old = views[id] as? SurfaceView, spec(id) != nil else { return }
+        let focus = keyboardInPanes
         if let last = lostAt[id], Date().timeIntervalSince(last) < 30 {
             return old.show("\r\n[Workbench: this terminal's session was killed]\r\n")
         }
@@ -409,7 +410,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         destroy(id)
         createHidden(id)
         if activeTab?.root.contains(id) == true { tree.clear() }   // re-place the new view
-        render()
+        render(focus: focus)
     }
     private var lostAt: [PaneID: Date] = [:]
 
@@ -476,6 +477,13 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
 
     @objc func goBack(_ sender: Any?) { step(-1) }
     @objc func goForward(_ sender: Any?) { step(1) }
+
+    /// Keyboard focus is in a pane, or nowhere. Renders that no keypress asked for (a shell exiting elsewhere, a killed host,
+    /// an agent's `pane open`) refocus a terminal only then, not out of a TODO row, the find bar or the file tree.
+    private var keyboardInPanes: Bool {
+        guard let v = window?.firstResponder as? NSView else { return true }
+        return v.isDescendant(of: tree)
+    }
 
     /// `focus` false: the keyboard stays where it is (a pane opened beside the one you are typing in).
     private func render(focus: Bool = true) {
@@ -793,7 +801,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         case let .openURL(url):
             openURL(url, from: id)
         case .closeRequested:
-            closePane(id, confirm: false)
+            closePane(id, confirm: false, focus: keyboardInPanes)
         case .sessionLost:
             restartLost(id)
         case .startSearch, .endSearch, .searchTotal, .searchSelected:
@@ -1149,7 +1157,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
 
     // Close paths resolve their target by id only after any confirm dialog: the modal run loop keeps
     // processing shell exits and socket commands, so indices captured before it may be stale.
-    func closePane(_ id: PaneID, confirm ask: Bool = true) {
+    func closePane(_ id: PaneID, confirm ask: Bool = true, focus: Bool = true) {
         if ask, needsConfirm([id]), !confirm("Close this pane?") { return }
         fileZoom[id] = nil
         guard let (p, t) = locate(id) else { destroy(id); return }
@@ -1163,7 +1171,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             removeTab(project: p, at: t)
         }
         store.changed()
-        render()
+        render(focus: focus)
     }
 
     private func closeTab(at index: Int) {
@@ -1540,7 +1548,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             return "{}"
         case "open":
             guard let path = msg["path"] else { return #"{"error":"no path"}"# }
-            openFile(path)
+            openFile(path, focus: keyboardInPanes)
             return "{}"
         #if DEBUG
         case "restore":  // test harness: restore the backup file at `path`, skipping the Settings dialogs
@@ -1553,6 +1561,8 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             guard responds(to: sel) else { return #"{"error":"unknown action"}"# }
             perform(sel, with: nil)
             return "{}"
+        case "responder":   // test harness: the window's first responder class, and whether it is in the split tree
+            return #"{"responder":"\#(window?.firstResponder.map { String(describing: type(of: $0)) } ?? "")","inPanes":"\#(keyboardInPanes)"}"#
         case "rclick":   // test harness: a real right-click event at the centre of a pane, through window.sendEvent
             guard let id = pane, let v = views[id], let w = v.window else { return #"{"error":"pane not shown"}"# }
             let at = v.convert(NSPoint(x: v.bounds.midX, y: v.bounds.midY), to: nil)
