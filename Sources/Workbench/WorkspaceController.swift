@@ -500,8 +500,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             emptyLabel.stringValue = activeProjectIndex == nil ? "⇧⌘O  Add Project" : "⌘T  New Terminal"
         }
         syncVisibility(refresh: rebuilt)
-        updateChrome()
+        // First: the focus change queues a chrome pass (paneFocused), which this synchronous one then absorbs.
         if focus, !InlineRename.isEditing, let id = focusedPane, let v = views[id] { window?.makeFirstResponder(v) }
+        updateChrome()
         recordLocation()
     }
 
@@ -684,7 +685,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             store.changed()
         }
         if let s = status[id], s == .done || s == .attention { status[id] = .idle }
-        updateChrome()
+        setNeedsChrome()
     }
 
     func focusPane(_ id: PaneID) {
