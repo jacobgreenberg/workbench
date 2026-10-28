@@ -656,7 +656,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
 
     /// A project's tabs as the tab bar and the sidebar show them: title, and the busiest status among their panes.
     private func tabItems(_ p: Project) -> [TabItem] {
-        p.tabs.map { TabItem(title: title(of: $0), status: $0.root.leaves.map { status[$0.id] ?? .idle }.max() ?? .idle) }
+        p.tabs.map { TabItem(title: title(of: $0), status: $0.root.leaves.map { status[$0.id] ?? .idle }.max() ?? .idle, id: $0.id) }
     }
 
     private func title(of tab: Tab) -> String {
