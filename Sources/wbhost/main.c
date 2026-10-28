@@ -347,13 +347,20 @@ static void flush_pending(void) {
     }
 }
 
-static int reaped(int ms_total) {
-    struct timespec ts = {0, 50 * 1000000};
-    for (int i = 0; i < ms_total / 50; i++) {
-        if (waitpid(child, NULL, WNOHANG) != 0) return 1;
-        nanosleep(&ts, NULL);
-    }
-    return waitpid(child, NULL, WNOHANG) != 0;
+// Waits up to `ms` for the child to exit, and reaps it. A private kqueue: the main one also holds the client's reads,
+// which are level-triggered and would end the wait at once.
+static int reaped(int ms) {
+    if (waitpid(child, NULL, WNOHANG) != 0) return 1;
+    int q = kqueue();
+    if (q < 0) { struct timespec ts = {0, 50 * 1000000}; nanosleep(&ts, NULL); return waitpid(child, NULL, WNOHANG) != 0; }
+    struct kevent k, out;
+    EV_SET(&k, child, EVFILT_PROC, EV_ADD | EV_ONESHOT, NOTE_EXIT, 0, NULL);
+    struct timespec ts = {ms / 1000, (ms % 1000) * 1000000L};
+    int n = kevent(q, &k, 1, &out, 1, &ts);   // an error event (already gone) also ends the wait
+    close(q);
+    if (n <= 0) return 0;
+    waitpid(child, NULL, 0);
+    return 1;
 }
 
 static void end_session(void) {
@@ -503,6 +510,19 @@ static void selftest(void) {
     n = vt_preamble(&r.base, pre);
     CHECK(find(pre, n, "\x1b]0;T\x1b\\") && find(pre, n, "\x1b]9;4;1;50\x1b\\"), "title/progress in preamble");
     free(r.buf);
+    // reaped: returns as soon as the child exits (no fixed polling floor), and gives up at the deadline
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    child = fork();
+    if (child == 0) { usleep(5000); _exit(0); }
+    CHECK(reaped(2000), "reaped sees the exit");
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    CHECK((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000 < 40, "reaped has no 50 ms floor");
+    child = fork();
+    if (child == 0) { usleep(400000); _exit(0); }
+    CHECK(!reaped(30), "reaped times out on a live child");
+    kill(child, SIGKILL); waitpid(child, NULL, 0);
+
     puts("selftest ok");
 }
 
