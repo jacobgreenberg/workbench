@@ -224,6 +224,9 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
             session.stopReading()
             if Session.keepOnClose { session.detach() } else { session.kill() }
         }
+        // Out of app routing on main, before the free runs on another thread: otherwise a tick can deliver a title/pwd
+        // message to a surface being torn down. After this no surface API may be called (stopReading already returned).
+        ghostty_surface_request_process_termination(s)
         surface = nil
         nonisolated(unsafe) let ptr = s
         let view = self
