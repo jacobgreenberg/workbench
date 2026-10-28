@@ -66,7 +66,6 @@ let package = Package(
                 .linkedLibrary("c++"),
                 .linkedLibrary("sqlite3"),
                 .linkedFramework("Metal"),
-                .linkedFramework("MetalKit"),
                 .linkedFramework("QuartzCore"),
                 .linkedFramework("IOSurface"),
                 .linkedFramework("CoreText"),
