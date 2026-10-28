@@ -296,6 +296,12 @@ static int grow(unsigned char **b, size_t *cap, size_t need) {
     return 0;
 }
 
+// Idle buffers go back to the system: one big paste must not leave megabytes behind for the life of the shell.
+static void shrink(unsigned char **b, size_t *cap, size_t keep) {
+    if (*cap <= keep) return;
+    free(*b); *b = NULL; *cap = 0;
+}
+
 static void sock_buf(int fd) {
     int sz = SOCK_BUF;
     setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sz, sizeof sz);
@@ -304,6 +310,7 @@ static void sock_buf(int fd) {
 static void drop_client(void) {
     if (client >= 0) close(client);   // closing removes its kqueue filter
     client = -1; flen = 0; rd_paused = 0;
+    shrink(&fbuf, &fcap, 128u << 10);
 }
 
 static void cleanup(void) {
@@ -338,7 +345,7 @@ static void flush_pending(void) {
         if (w < 0 && errno == EAGAIN) break;
         poff = plen;   // pty gone: discard
     }
-    if (poff >= plen) poff = plen = 0;
+    if (poff >= plen) { poff = plen = 0; shrink(&pend, &pcap, 64u << 10); }
     if (rd_paused && client >= 0 && plen - poff < PEND_LOW) { ev((uintptr_t)client, EVFILT_READ, EV_ENABLE, 0); rd_paused = 0; }
     int want = poff < plen;
     if (want != wr_armed && master_live) {
@@ -410,7 +417,10 @@ static void client_read(void) {
         off += 5 + (size_t)len;
         on_frame(f[0], f + 5, len);
     }
-    if (client >= 0) { memmove(fbuf, fbuf + off, flen - off); flen -= off; }
+    if (client >= 0) {
+        memmove(fbuf, fbuf + off, flen - off); flen -= off;
+        if (!flen) shrink(&fbuf, &fcap, 128u << 10);
+    }
 }
 
 // Header: replay length (UInt64 LE), then the pty's cols and rows (UInt16 LE): the app sizes its view to the grid
@@ -523,6 +533,19 @@ static void selftest(void) {
     CHECK(!reaped(30), "reaped times out on a live child");
     kill(child, SIGKILL); waitpid(child, NULL, 0);
 
+    // an idle input queue is released, a small one kept
+    int sp[2];
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sp) == 0, "socketpair");
+    sock_buf(sp[0]); fcntl(sp[0], F_SETFL, O_NONBLOCK);
+    master = sp[0]; master_live = 1;
+    CHECK(grow(&pend, &pcap, 100000) == 0, "grow");
+    memset(pend, 'x', 100000); plen = 100000; poff = 0;
+    flush_pending();
+    CHECK(plen == 0 && poff == 0 && !pend && !pcap, "drained input queue is freed");
+    CHECK(grow(&pend, &pcap, 100) == 0, "grow small");
+    plen = 100; flush_pending();
+    CHECK(pend && pcap == 4096, "small input queue is kept");
+    close(sp[0]); close(sp[1]); master = -1;
     puts("selftest ok");
 }
 
