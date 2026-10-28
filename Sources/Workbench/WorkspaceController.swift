@@ -5,6 +5,8 @@ import UserNotifications
 /// Folds an agent scan into the layout's saved launches. A pane the scan found an agent in takes its resume command (an
 /// unknown id keeps the saved one). A pane without one drops its launch and restores as a plain shell only if an agent was
 /// seen there before (`seen`): a scan is a snapshot, so a pane absent from it may not have started its agent yet.
+/// So a saved command is kept until the pane runs an agent or its own command ends: a non-agent command (`pane split
+/// --command 'npm run dev'`) still running at quit is saved and retyped at the next launch.
 func recordAgents(_ running: [PaneID: String?], in layout: inout Layout, seen: inout Set<PaneID>) {
     for p in layout.projects.indices {
         for t in layout.projects[p].tabs.indices {
@@ -401,7 +403,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     /// tab survives. Killed again within 30 s: the pane stays as it was, with a note, instead of restarting in a loop.
     private func restartLost(_ id: PaneID) {
         guard let old = views[id] as? SurfaceView, spec(id) != nil else { return }
-        let focus = keyboardInPanes
+        let focus = keyboardInPanes || findPane == id   // the find bar of this pane counts as in it: destroy() closes it
         if let last = lostAt[id], Date().timeIntervalSince(last) < 30 {
             return old.show("\r\n[Workbench: this terminal's session was killed]\r\n")
         }
@@ -802,7 +804,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         case let .openURL(url):
             openURL(url, from: id)
         case .closeRequested:
-            closePane(id, confirm: false, focus: keyboardInPanes)
+            closePane(id, confirm: false, focus: keyboardInPanes || findPane == id)   // find bar of this pane: destroy() closes it
         case .sessionLost:
             restartLost(id)
         case .startSearch, .endSearch, .searchTotal, .searchSelected:
@@ -1466,6 +1468,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     }
 
     private var captureScheduled = false
+    private var captureAgain = false   // asked for while a scan was in flight: that scan may predate the change, so scan once more
     /// Panes whose agent a scan has found, or whose own command has ended: only these can have lost one. A pane not in it
     /// may just not have started yet (a resume typed into a login shell, a fresh `pane split --command`).
     private var agentSeen: Set<PaneID> = []
@@ -1473,7 +1476,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     /// Coalesced background scan (~5 ms for ~1300 processes), applied on main. Keeps resume commands current
     /// if the app crashes instead of quitting.
     private func scheduleCapture() {
-        guard !captureScheduled else { return }
+        guard !captureScheduled else { captureAgain = true; return }
         captureScheduled = true
         DispatchQueue.global(qos: .utility).async {
             let running = Agents.running()
@@ -1481,6 +1484,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                 MainActor.assumeIsolated {
                     self.captureScheduled = false
                     self.apply(running)
+                    if self.captureAgain { self.captureAgain = false; self.scheduleCapture() }
                 }
             }
         }
@@ -1926,7 +1930,7 @@ func controllerSelfCheck() {
         .leaf(PaneSpec(id: id, kind: .terminal(cwd: "/", launch: command.map { Launch(command: $0, scrollbackLimit: 7) })))
     }
     let tab = Tab(id: UUID(), title: "t", root: .split(axis: .horizontal, ratio: 0.5, a: leaf(a, "cc2 --resume A"),
-                                                       b: .split(axis: .vertical, ratio: 0.5, a: leaf(b, "cc2 --resume B"), b: leaf(c, nil))), focused: a)
+                                                       b: .split(axis: .vertical, ratio: 0.5, a: leaf(b, "cc2 --resume B"), b: leaf(c, "npm run dev"))), focused: a)
     var layout = Layout.default
     layout.projects = [Project(id: UUID(), path: "/", name: "p", tabs: [tab], activeTab: 0)]
     func launch(_ id: PaneID) -> String? {
@@ -1941,7 +1945,9 @@ func controllerSelfCheck() {
     assert(launch(a) == "cc2 --resume A2")
     recordAgents([b: "cc2 --resume B2"], in: &layout, seen: &seen)   // a's agent is gone, b's is found
     assert(launch(a) == nil && launch(b) == "cc2 --resume B2" && seen == [b])
-    seen.insert(c)   // c's own command ended without an agent: nothing to clear, nothing invented
+    recordAgents([:], in: &layout, seen: &seen)   // c never ran an agent and its command has not ended: kept
+    assert(launch(c) == "npm run dev" && seen.isEmpty)
+    seen.insert(c)   // c's own command ended without an agent: it loses its launch
     recordAgents([:], in: &layout, seen: &seen)
     assert(launch(b) == nil && launch(c) == nil && seen.isEmpty)
 }
