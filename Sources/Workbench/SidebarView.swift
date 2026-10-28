@@ -128,6 +128,7 @@ let vsCodeBundle = "com.microsoft.VSCode"
     let rail = WorkspaceRail()
 
     private var rows: [SidebarRow] = []
+    private var renaming: NSLayoutConstraint?   // the live rename's stretched label constraint; non-nil while one is in progress
     private var selected = -1
     private var theme: Theme?
     private var hiddenCount = 0
@@ -257,15 +258,24 @@ let vsCodeBundle = "com.microsoft.VSCode"
 
     @objc private func rowDoubleClicked() { beginRename(table.clickedRow) }
 
-    private func beginRename(_ row: Int) {
+    fileprivate func beginRename(_ row: Int) {
         guard rows.indices.contains(row), let cell = table.view(atColumn: 0, row: row, makeIfNecessary: false) as? ProjectRowCell else { return }
         // The label hugs its text; stretch it to the row edge while editing so there is room to type.
         let fill = cell.label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -16)
         fill.isActive = true
         InlineRename(cell.label) { [weak self] name in
             fill.isActive = false
+            self?.renaming = nil
             self?.onRename?(row, name)
         }
+        renaming = fill
+    }
+
+    /// Ends the rename without reporting it: the row it edits is being replaced.
+    private func cancelRename() {
+        InlineRename.cancelActive()
+        renaming?.isActive = false
+        renaming = nil
     }
 
     private func select() {
@@ -292,8 +302,13 @@ let vsCodeBundle = "com.microsoft.VSCode"
             toggleItem.title = showingHidden ? "Show Project" : "Hide Project"
         }
         guard rows != self.rows || selected != self.selected || theme.id != self.theme?.id else { return }
-        guard !InlineRename.isEditing else { return }   // a name field is live; the rename's end re-renders
         let reload = rows.map(\.id) != self.rows.map(\.id)
+        if renaming != nil {
+            // A name field is live and its row is still the same row: the rename's end re-renders. Otherwise (another
+            // project or workspace, a row added or moved) the row index it would commit to means something else now.
+            guard reload else { return }
+            cancelRename()
+        }
         self.rows = rows
         self.selected = selected
         self.theme = theme
@@ -363,4 +378,35 @@ let vsCodeBundle = "com.microsoft.VSCode"
     }
 }
 
-@MainActor func sidebarSelfCheck() {}
+@MainActor func sidebarSelfCheck() {
+    let theme = Theme.all().first!
+    let sidebar = SidebarView(frame: NSRect(x: 0, y: 0, width: 320, height: 420))
+    let win = NSWindow(contentRect: sidebar.frame, styleMask: [.titled], backing: .buffered, defer: true)
+    win.contentView?.addSubview(sidebar)
+    var renamed: [(Int, String?)] = []
+    sidebar.onRename = { renamed.append(($0, $1)) }
+    func rows(_ ids: [UUID], status: PaneStatus = .idle) -> [SidebarRow] { ids.map { SidebarRow(id: $0, name: "p", path: "/p", status: status, tabCount: 1) } }
+    func show(_ r: [SidebarRow]) {
+        sidebar.update(rows: r, selected: -1, hiddenCount: 0, showingHidden: false, theme: theme)
+        sidebar.layoutSubtreeIfNeeded()
+    }
+
+    // A rename ends when its row is replaced, so it cannot commit to whatever sits at that index afterwards.
+    let a = UUID(), b = UUID(), c = UUID()
+    show(rows([a, b, c]))
+    sidebar.beginRename(1)
+    assert(InlineRename.isEditing)
+    show(rows([a, b, c], status: .busy))   // same rows: edit stays
+    assert(InlineRename.isEditing)
+    InlineRename.commitActive()
+    assert(renamed.count == 1 && renamed[0].0 == 1)
+    sidebar.beginRename(1)
+    show(rows([UUID(), UUID(), UUID()]))   // another workspace's projects
+    assert(!InlineRename.isEditing)
+    show(rows([a, b, c]))
+    sidebar.beginRename(1)
+    show(rows([a, c]))   // a project went away
+    assert(!InlineRename.isEditing)
+    InlineRename.commitActive()
+    assert(renamed.count == 1)
+}

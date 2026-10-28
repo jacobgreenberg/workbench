@@ -1,6 +1,6 @@
 import AppKit
 
-struct TabItem: Equatable, Sendable { let title: String; let status: PaneStatus }
+struct TabItem: Equatable, Sendable { let title: String; let status: PaneStatus; var id: UUID? = nil /* the Tab's id: an inline rename ends when its tab is no longer at its position */ }
 
 /// Borderless chrome button that shows the pointing-hand cursor on hover.
 final class HandButton: NSButton {
@@ -59,7 +59,11 @@ final class HandButton: NSButton {
 
     func controlTextDidEndEditing(_ obj: Notification) { finish(field.stringValue) }
 
-    private func finish(_ value: String?) {
+    /// Ends the edit in progress without reporting it (the owner is already re-rendering): the field it was on is going away
+    /// or now shows something else.
+    static func cancelActive() { active?.finish(nil, notify: false) }
+
+    private func finish(_ value: String?, notify: Bool = true) {
         guard !finished else { return }
         finished = true
         if InlineRename.active === self { InlineRename.active = nil }
@@ -68,7 +72,7 @@ final class HandButton: NSButton {
         field.isEditable = false
         field.isSelectable = false
         field.abortEditing()
-        done(value)
+        if notify { done(value) }
     }
 }
 
@@ -92,6 +96,9 @@ extension NSView {
     private let label = NSTextField(labelWithString: "")
     private let close = NSImageView(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close Tab")!)
     private var status = PaneStatus.idle
+    private(set) var itemID: UUID?
+    private(set) var renamingID: UUID?   // the tab being renamed, while its label is a field
+    var isRenaming: Bool { label.isEditable }
     private var width: NSLayoutConstraint!
     var preferredWidth: CGFloat { width.constant }
     private var selected = false
@@ -162,6 +169,7 @@ extension NSView {
             width.constant = Self.width(for: item.title)   // also after a rename, where the label already shows the new title
         }
         status = item.status
+        itemID = item.id
         self.selected = selected
         self.theme = theme
         refresh()
@@ -194,13 +202,24 @@ extension NSView {
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         if hovering && p.x >= close.frame.minX - 6 { onClose?() }
-        else if event.clickCount == 2 { InlineRename(label) { [weak self] in self?.onRename?($0) } }
+        else if event.clickCount == 2 { beginRename() }
         else {
             onSelect?()
             let x = event.locationInWindow.x
             trackDrag(from: event, in: window) { [weak self] p, done in self?.onDrag?(p.x - x, done) }
         }
     }
+
+    func beginRename() {
+        renamingID = itemID
+        InlineRename(label) { [weak self] in
+            self?.renamingID = nil
+            self?.onRename?($0)
+        }
+    }
+
+    /// The edit ended without a commit or cancel callback (InlineRename.cancelActive).
+    func renameCancelled() { renamingID = nil }
 
     override func otherMouseDown(with event: NSEvent) {
         if event.buttonNumber == 2 { onClose?() }
@@ -312,6 +331,8 @@ private final class TabScrollView: NSScrollView {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     @objc private func newTapped() { onNew?() }
 
+    func beginRename(_ i: Int) { buttons[i].beginRename() }
+
     #if DEBUG
     func tabCenter(_ i: Int) -> NSPoint? {
         buttons.indices.contains(i) ? buttons[i].convert(NSPoint(x: buttons[i].bounds.midX, y: buttons[i].bounds.midY), to: nil) : nil
@@ -380,7 +401,9 @@ private final class TabScrollView: NSScrollView {
         let index = { [unowned self, unowned b] in buttons.firstIndex { $0 === b } ?? 0 }
         b.onSelect = { [weak self] in self?.onSelect?(index()) }
         b.onClose = { [weak self] in self?.onClose?(index()) }
-        b.onRename = { [weak self] in self?.onRename?(index(), $0) }
+        b.onRename = { [weak self, unowned b] name in
+            if let self, let i = buttons.firstIndex(where: { $0 === b }) { onRename?(i, name) }
+        }
         b.onDrag = { [weak self, unowned b] dx, done in
             guard let self, let from = buttons.firstIndex(where: { $0 === b }) else { return }
             if !done, !b.lifted { b.lifted = true; placeIndicator(animated: false) }
@@ -401,6 +424,12 @@ private final class TabScrollView: NSScrollView {
         // Called on every title/status event of any pane; most change nothing visible here.
         let state = (newItems, selected, theme.id)
         if let last, last == state { return }
+        // An edit never outlives the tab it renames: a project switch, or a tab closing before it, would otherwise commit the name to
+        // whatever tab now sits at that position.
+        if let i = buttons.firstIndex(where: \.isRenaming), !(newItems.indices.contains(i) && newItems[i].id == buttons[i].renamingID) {
+            InlineRename.cancelActive()
+            buttons[i].renameCancelled()
+        }
         let sameTabs = last?.items.map(\.title) == newItems.map(\.title)   // a project switch snaps, a tab click slides
         last = state
         // Add or drop only the difference: the remaining tabs keep their views, so nothing flashes.
@@ -442,8 +471,43 @@ private final class TabScrollView: NSScrollView {
     }
 }
 
+extension InlineRename {
+    /// Ends the edit in progress as Return would.
+    static func commitActive() { active?.finish(active?.field.stringValue) }
+}
+
 @MainActor func tabBarSelfCheck() {
     let theme = Theme.all().first!
+    let bar = TabBarView(frame: .zero)
+    var renamed: [(Int, String?)] = []
+    bar.onRename = { renamed.append(($0, $1)) }
+    let a = UUID(), b = UUID(), c = UUID()
+    func show(_ ids: [UUID]) { bar.update(items: ids.map { TabItem(title: "tab", status: .idle, id: $0) }, selected: 0, theme: theme) }
+    show([a, b, c])
+    bar.beginRename(2)
+    assert(InlineRename.isEditing)
+    show([a, b, c, UUID()])   // others come and go after it: still the same tab
+    assert(InlineRename.isEditing)
+    InlineRename.commitActive()
+    assert(renamed.count == 1 && renamed[0].0 == 2 && renamed[0].1 == "tab")
+    bar.beginRename(2)
+    show([UUID(), UUID(), UUID()])   // another project's tabs
+    assert(!InlineRename.isEditing && renamed.count == 1)
+    show([a, b, c])
+    bar.beginRename(2)
+    show([a, b])   // its tab went away
+    assert(!InlineRename.isEditing && renamed.count == 1)
+    show([a, b, c])
+    bar.beginRename(2)
+    show([a, c])   // a tab before it closed: position 2 is gone
+    assert(!InlineRename.isEditing)
+    show([a, b, c])
+    bar.beginRename(1)
+    show([a, c, b])   // another tab now sits there
+    assert(!InlineRename.isEditing && renamed.count == 1)
+    InlineRename.commitActive()
+    assert(renamed.count == 1)
+
     // A busy dot pulses at a capped frame rate, and not at all under Reduce Motion.
     let dot = NSView()
     dot.wantsLayer = true
@@ -456,4 +520,3 @@ private final class TabScrollView: NSScrollView {
     styleStatusDot(dot, .done, theme: theme)
     assert(dot.layer?.animation(forKey: "pulse") == nil)
 }
-
