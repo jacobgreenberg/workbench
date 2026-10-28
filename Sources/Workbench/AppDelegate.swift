@@ -40,7 +40,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         var live = Set<PaneID>()
         for p in store.layout.projects { for t in p.tabs { for leaf in t.root.leaves { if case .terminal = leaf.kind { live.insert(leaf.id) } } } }
-        DispatchQueue.global(qos: .utility).async { [live] in Session.endOrphans(keeping: live) }
+        // An unreadable layout is not "no panes": ending every host as an orphan would kill the sessions it exists to keep.
+        if store.layoutProblem == nil { DispatchQueue.global(qos: .utility).async { [live] in Session.endOrphans(keeping: live) } }
 
         if let data = readFile(Store.restoreError, cap: 1 << 16) {
             try? FileManager.default.removeItem(at: Store.restoreError)
@@ -48,6 +49,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             alert.alertStyle = .warning
             alert.messageText = "The restore didn't finish"
             alert.informativeText = String(decoding: data, as: UTF8.self)
+            alert.runModal()
+        }
+
+        if let (bad, recovered) = store.layoutProblem {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Workbench couldn't read its saved layout"
+            alert.informativeText = (recovered ? "It reopened the last layout that loaded, so recent changes may be missing."
+                                               : "It started empty.")
+                + " Running terminals and agents were left alone; any not shown end at the next launch. The unreadable file is saved as \(bad.path)."
             alert.runModal()
         }
     }
