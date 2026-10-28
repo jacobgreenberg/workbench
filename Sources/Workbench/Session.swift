@@ -131,11 +131,13 @@ final class Session: @unchecked Sendable {
 
     func start(output: @escaping @Sendable (UnsafeRawBufferPointer) -> Void, ended: @escaping @Sendable () -> Void) {
         let src = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
-        var buf = [UInt8](repeating: 0, count: Session.maxRead)
+        // Uninitialized: untouched pages cost nothing while the pane is idle. Freed once the source is cancelled.
+        let mem = UnsafeMutableRawBufferPointer.allocate(byteCount: Session.maxRead, alignment: 16)
+        src.setCancelHandler { mem.deallocate() }
         var replayLeft: UInt64 = header.count == 12 ? header[..<8].reversed().reduce(0) { $0 << 8 | UInt64($1) } : 0
         src.setEventHandler { [self] in
             let want = Int(min(max(src.data, 1), UInt(Session.maxRead)))
-            let n = buf.withUnsafeMutableBytes { read(fd, $0.baseAddress, want) }
+            let n = read(fd, mem.baseAddress, want)
             if n < 0 && (errno == EINTR || errno == EAGAIN) { return }
             if n <= 0 {
                 src.cancel()
@@ -145,10 +147,11 @@ final class Session: @unchecked Sendable {
             var off = 0
             if header.count < 12 {   // a new session's header: replay length 0
                 let take = min(12 - header.count, n)
-                header += buf[0..<take]
+                header += mem[0..<take]
                 off = take
             }
-            buf.withUnsafeBytes { all in
+            do {
+                let all = UnsafeRawBufferPointer(mem)
                 if replayLeft > 0, off < n {
                     let take = Int(min(replayLeft, UInt64(n - off)))
                     replaying.store(true, ordering: .releasing)

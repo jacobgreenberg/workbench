@@ -366,6 +366,7 @@ static int reaped(int ms) {
     int n = kevent(q, &k, 1, &out, 1, &ts);   // an error event (already gone) also ends the wait
     close(q);
     if (n <= 0) return 0;
+    if ((out.flags & EV_ERROR) && out.data != ESRCH) return waitpid(child, NULL, WNOHANG) != 0;   // not "already gone": don't block on a live child
     waitpid(child, NULL, 0);
     return 1;
 }
