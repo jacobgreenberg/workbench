@@ -2,6 +2,25 @@ import AppKit
 @preconcurrency import GhosttyKit
 import UserNotifications
 
+/// Folds an agent scan into the layout's saved launches. A pane the scan found an agent in takes its resume command (an
+/// unknown id keeps the saved one). A pane without one drops its launch and restores as a plain shell only if an agent was
+/// seen there before (`seen`): a scan is a snapshot, so a pane absent from it may not have started its agent yet.
+func recordAgents(_ running: [PaneID: String?], in layout: inout Layout, seen: inout Set<PaneID>) {
+    for p in layout.projects.indices {
+        for t in layout.projects[p].tabs.indices {
+            layout.projects[p].tabs[t].root = layout.projects[p].tabs[t].root.mapLeaves { spec in
+                guard case let .terminal(cwd, launch) = spec.kind else { return }
+                guard let entry = running[spec.id] else {
+                    if seen.remove(spec.id) != nil { spec.kind = .terminal(cwd: cwd, launch: nil) }
+                    return
+                }
+                seen.insert(spec.id)
+                if let command = entry { spec.kind = .terminal(cwd: cwd, launch: Launch(command: command, scrollbackLimit: launch?.scrollbackLimit)) }
+            }
+        }
+    }
+}
+
 @MainActor
 final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDelegate {
     /// Idle cost: blink's 600 ms timer, and vsync's CVDisplayLink, which ticks at the display rate per visible
@@ -769,6 +788,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             } else if status[id] == .busy {
                 setStatus(id, .idle)   // agent exited without a Stop hook
             }
+            agentSeen.insert(id)   // its command ended, so an agent started in it is gone
             scheduleCapture()   // a command ended: maybe an agent exited (its count leaves the sidebar)
         case let .openURL(url):
             openURL(url, from: id)
@@ -1123,6 +1143,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         titles[id] = nil
         progressing.remove(id)
         background.remove(id)
+        agentSeen.remove(id)
         if findPane == id { hideFind(refocus: false) }
     }
 
@@ -1436,6 +1457,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     }
 
     private var captureScheduled = false
+    /// Panes whose agent a scan has found, or whose own command has ended: only these can have lost one. A pane not in it
+    /// may just not have started yet (a resume typed into a login shell, a fresh `pane split --command`).
+    private var agentSeen: Set<PaneID> = []
 
     /// Coalesced background scan (~5 ms for ~1300 processes), applied on main. Keeps resume commands current
     /// if the app crashes instead of quitting.
@@ -1454,21 +1478,12 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     }
 
     /// Record, per terminal pane, the command that resumes the agent running in it (through the launcher it was
-    /// started with); a pane with no agent running forgets any earlier one. Also run right before a backup snapshot.
+    /// started with); a pane whose agent has ended forgets it. Also run right before a backup snapshot.
     func captureAgents() { apply(Agents.running()) }
 
     private func apply(_ running: [PaneID: String?]) {
         var layout = store.layout
-        for p in layout.projects.indices {
-            for t in layout.projects[p].tabs.indices {
-                layout.projects[p].tabs[t].root = layout.projects[p].tabs[t].root.mapLeaves { spec in
-                    guard case let .terminal(cwd, launch) = spec.kind else { return }
-                    // Not in `running`: no agent, so it restores as a plain shell. Running with an unknown id: keep.
-                    guard let entry = running[spec.id] else { spec.kind = .terminal(cwd: cwd, launch: nil); return }
-                    if let command = entry { spec.kind = .terminal(cwd: cwd, launch: Launch(command: command, scrollbackLimit: launch?.scrollbackLimit)) }
-                }
-            }
-        }
+        recordAgents(running, in: &layout, seen: &agentSeen)
         guard layout != store.layout else { return }
         store.layout = layout
         store.changed()
@@ -1891,4 +1906,31 @@ extension WorkspaceController: NSToolbarDelegate {
         item.visibilityPriority = .high
         return item
     }
+}
+
+func controllerSelfCheck() {
+    // recordAgents: a pane absent from a scan loses its launch only after an agent was seen there.
+    let (a, b, c) = (PaneID(), PaneID(), PaneID())
+    func leaf(_ id: PaneID, _ command: String?) -> SplitNode {
+        .leaf(PaneSpec(id: id, kind: .terminal(cwd: "/", launch: command.map { Launch(command: $0, scrollbackLimit: 7) })))
+    }
+    let tab = Tab(id: UUID(), title: "t", root: .split(axis: .horizontal, ratio: 0.5, a: leaf(a, "cc2 --resume A"),
+                                                       b: .split(axis: .vertical, ratio: 0.5, a: leaf(b, "cc2 --resume B"), b: leaf(c, nil))), focused: a)
+    var layout = Layout.default
+    layout.projects = [Project(id: UUID(), path: "/", name: "p", tabs: [tab], activeTab: 0)]
+    func launch(_ id: PaneID) -> String? {
+        guard case let .terminal(_, l)? = layout.projects[0].tabs[0].root.leaves.first(where: { $0.id == id })?.kind else { return nil }
+        return l?.command
+    }
+    var seen: Set<PaneID> = []
+    recordAgents([a: "cc2 --resume A2"], in: &layout, seen: &seen)   // b's agent has not started yet
+    assert(launch(a) == "cc2 --resume A2" && launch(b) == "cc2 --resume B" && seen == [a])
+    if case let .terminal(_, l)? = layout.projects[0].tabs[0].root.leaves.first?.kind { assert(l?.scrollbackLimit == 7) }
+    recordAgents([a: nil], in: &layout, seen: &seen)   // running, id unknown: keep
+    assert(launch(a) == "cc2 --resume A2")
+    recordAgents([b: "cc2 --resume B2"], in: &layout, seen: &seen)   // a's agent is gone, b's is found
+    assert(launch(a) == nil && launch(b) == "cc2 --resume B2" && seen == [b])
+    seen.insert(c)   // c's own command ended without an agent: nothing to clear, nothing invented
+    recordAgents([:], in: &layout, seen: &seen)
+    assert(launch(b) == nil && launch(c) == nil && seen.isEmpty)
 }
