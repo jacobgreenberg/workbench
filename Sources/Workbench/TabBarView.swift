@@ -418,14 +418,15 @@ private final class TabScrollView: NSScrollView {
     }
 }
 
-/// Status dot: hidden when idle, a slow breathing pulse while busy, solid green when done, amber when it needs you.
-/// The pulse is a Core Animation layer animation, so it runs in the render server without waking the app.
+/// Status dot: hidden when idle, a slow breathing pulse while busy (solid under Reduce Motion), solid green when done,
+/// amber when it needs you. The pulse is a Core Animation layer animation, so it runs in the render server without waking
+/// the app; it is capped at 20 fps, as it runs for as long as an agent works.
 @MainActor func styleStatusDot(_ dot: NSView, _ status: PaneStatus, theme: Theme) {
     dot.isHidden = status == .idle
     let key = switch status { case .idle, .busy: "primary"; case .done: "chart2"; case .attention: "chart3" }
     dot.layer?.backgroundColor = theme.color(key).cgColor
     guard let layer = dot.layer else { return }
-    if status != .busy {
+    if status != .busy || reduceMotion {
         layer.removeAnimation(forKey: "pulse")
     } else if layer.animation(forKey: "pulse") == nil {
         let a = CABasicAnimation(keyPath: "opacity")
@@ -435,9 +436,24 @@ private final class TabScrollView: NSScrollView {
         a.autoreverses = true
         a.repeatCount = .infinity
         a.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        a.preferredFrameRateRange = CAFrameRateRange(minimum: 10, maximum: 30, preferred: 20)
         a.isRemovedOnCompletion = false
         layer.add(a, forKey: "pulse")
     }
 }
 
-@MainActor func tabBarSelfCheck() {}
+@MainActor func tabBarSelfCheck() {
+    let theme = Theme.all().first!
+    // A busy dot pulses at a capped frame rate, and not at all under Reduce Motion.
+    let dot = NSView()
+    dot.wantsLayer = true
+    styleStatusDot(dot, .busy, theme: theme)
+    if let pulse = dot.layer?.animation(forKey: "pulse") {
+        assert(pulse.preferredFrameRateRange.maximum == 30 && pulse.preferredFrameRateRange.preferred == 20)
+    } else {
+        assert(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+    }
+    styleStatusDot(dot, .done, theme: theme)
+    assert(dot.layer?.animation(forKey: "pulse") == nil)
+}
+
