@@ -50,7 +50,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
 
     override var acceptsFirstResponder: Bool { true }
 
-    init(app: ghostty_app_t, id: PaneID, cwd: String, initialInput: String?, env: [String: String], scrollbackLimit: Int?) {
+    init(app: ghostty_app_t, id: PaneID, cwd: String, initialInput: String?, env: [String: String], scrollbackLimit: Int?, initialSize: CGSize? = nil) {
         self.paneID = id
         self.box = SurfaceBox(id: id)
         super.init(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
@@ -80,9 +80,15 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         // and a 200 ms termios poll, so only the first responder in the key window is told it is focused.
         ghostty_surface_set_focus(created, false)
 
+        let attached = Session.attach(id)
+        // A new shell starts at the size the pane will have (libghostty's default is 800x600 px, ~48x17: a pane created
+        // for a hidden tab would run at that until shown); an attached one plays its replay on the host's grid below.
+        if attached == nil, let initialSize {
+            let px = PaneGeometry.pixels(initialSize, scale: c.scale_factor)
+            ghostty_surface_set_size(created, px.w, px.h)
+        }
         let size = ghostty_surface_size(created)
         let cols = size.columns > 0 ? size.columns : 80, rows = size.rows > 0 ? size.rows : 24
-        let attached = Session.attach(id)
         let (argv, shellEnv) = Session.shell(cwd: cwd, paneEnv: env)
         if let grid = attached?.grid, size.cell_width_px > 0, size.cell_height_px > 0 {
             // Play the replay on the grid it was drawn for (the layout resizes after, as for any live terminal):
@@ -92,6 +98,11 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
             ghostty_surface_set_size(created, UInt32(grid.cols) * size.cell_width_px + padW, UInt32(grid.rows) * size.cell_height_px + padH)
         }
         if let session = attached ?? Session.spawn(id, cwd: cwd, argv: argv, env: shellEnv, cols: cols, rows: rows) {
+            if attached == nil, initialSize != nil, size.cell_width_px > 0 {
+                // Record the pixel size too, so the first layout after spawn is not a winsize change (a SIGWINCH) at the same grid.
+                let pty = PaneGeometry.ptySize(columns: size.columns, rows: size.rows, cellWidth: size.cell_width_px, cellHeight: size.cell_height_px)
+                session.resize(cols: pty.cols, rows: pty.rows, width: pty.width, height: pty.height)
+            }
             if attached == nil, let initialInput { let d = Array(initialInput.utf8); d.withUnsafeBytes { session.write($0) } }
             box.session.withLock { $0 = session }
             nonisolated(unsafe) let surfacePtr = created
