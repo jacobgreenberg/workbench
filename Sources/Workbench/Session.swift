@@ -131,13 +131,11 @@ final class Session: @unchecked Sendable {
 
     func start(output: @escaping @Sendable (UnsafeRawBufferPointer) -> Void, ended: @escaping @Sendable () -> Void) {
         let src = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
-        // Uninitialized: untouched pages cost nothing while the pane is idle. Freed once the source is cancelled.
-        let mem = UnsafeMutableRawBufferPointer.allocate(byteCount: Session.maxRead, alignment: 16)
-        src.setCancelHandler { mem.deallocate() }
+        var buf = [UInt8](repeating: 0, count: 65536)
         var replayLeft: UInt64 = header.count == 12 ? header[..<8].reversed().reduce(0) { $0 << 8 | UInt64($1) } : 0
         src.setEventHandler { [self] in
-            let want = Int(min(max(src.data, 1), UInt(Session.maxRead)))
-            let n = read(fd, mem.baseAddress, want)
+            let want = Int(min(max(src.data, 1), 65536))
+            let n = buf.withUnsafeMutableBytes { read(fd, $0.baseAddress, want) }
             if n < 0 && (errno == EINTR || errno == EAGAIN) { return }
             if n <= 0 {
                 src.cancel()
@@ -147,11 +145,10 @@ final class Session: @unchecked Sendable {
             var off = 0
             if header.count < 12 {   // a new session's header: replay length 0
                 let take = min(12 - header.count, n)
-                header += mem[0..<take]
+                header += buf[0..<take]
                 off = take
             }
-            do {
-                let all = UnsafeRawBufferPointer(mem)
+            buf.withUnsafeBytes { all in
                 if replayLeft > 0, off < n {
                     let take = Int(min(replayLeft, UInt64(n - off)))
                     replaying.store(true, ordering: .releasing)
@@ -170,8 +167,6 @@ final class Session: @unchecked Sendable {
     /// Largest 'i' payload per frame: the host drops a client that sends more than 1 MiB in one, and Ghostty hands a
     /// whole paste to `write` at once. The pty sees the same byte stream either way.
     static let maxInput = 64 << 10
-    /// Reader cap per read; the host's socket buffers (256 KiB) let a lagging reader catch up in few large reads.
-    private static let maxRead = 256 << 10
 
     static func frame(_ type: UInt8, _ payload: ArraySlice<UInt8>) -> [UInt8] {
         var buf: [UInt8] = [type]
@@ -333,5 +328,12 @@ func sessionSelfCheck() {
     assert(exact.withUnsafeBytes { Session.inputFrames($0).count } == 1, "exactly one frame's worth stays whole")
     assert([UInt8]().withUnsafeBytes { Session.inputFrames($0).isEmpty }, "empty input sends nothing")
     assert(Session.frame(UInt8(ascii: "k"), []) == [UInt8(ascii: "k"), 0, 0, 0, 0], "kill frame")
+    // the host's own self-test (input queue compaction etc.), built next to the app in a debug build
+    if let exe = Bundle.main.executableURL {
+        let p = Process()
+        p.executableURL = exe.deletingLastPathComponent().appendingPathComponent("wbhost")
+        p.arguments = ["--selftest"]
+        if (try? p.run()) != nil { p.waitUntilExit(); assert(p.terminationStatus == 0, "wbhost --selftest") }
+    }
 }
 #endif

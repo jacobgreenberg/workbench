@@ -10,7 +10,7 @@
 // app -> host frames: type byte, payload length UInt32 LE, payload:
 //   'i' input for the shell (<= 1 MiB; the app sends <= 64 KiB), 'w' 8 bytes cols/rows/xpixel/ypixel UInt16 LE, 'k'
 //   (empty) end the session. Anything else drops that client; the session keeps running.
-//   Input the shell has not read yet is queued; past 1 MiB the host stops reading the client until it falls below 256 KiB.
+//   Input the shell has not read yet is queued (the host always reads the client, so 'k' and EOF are never stuck behind it).
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -32,9 +32,7 @@
 
 #define RING_CAP (1u << 20)   // ponytail: bounds how much a reattach can restore; raise if scrollback loss matters
 #define MAX_FRAME (1u << 20)
-#define MAX_PENDING (4u << 20)   // sanity bound: backpressure keeps the queue near PEND_HIGH
-#define PEND_HIGH (1u << 20)
-#define PEND_LOW (256u << 10)
+#define MAX_PENDING (64u << 20)   // sanity bound on queued input (a paste); past it the client is dropped. No backpressure: the host must always read 'k'/EOF
 #define SOCK_BUF (256 << 10)     // the sender's buffer bounds what a lagging reader drains per read (default 8 KB)
 #define OSC_MAX 512
 #define OBUF_MAX 4096
@@ -263,7 +261,7 @@ static unsigned char *build_replay(const struct ring *r, size_t *outlen) {
 // ---- Host ----
 
 static struct ring ring;
-static int kq = -1, master = -1, listener = -1, client = -1, master_live = 1, wr_armed, need_winch, rd_paused;
+static int kq = -1, master = -1, listener = -1, client = -1, master_live = 1, wr_armed, need_winch;
 static pid_t child;
 static const char *sock_path;
 static ino_t listen_ino;
@@ -309,7 +307,7 @@ static void sock_buf(int fd) {
 
 static void drop_client(void) {
     if (client >= 0) close(client);   // closing removes its kqueue filter
-    client = -1; flen = 0; rd_paused = 0;
+    client = -1; flen = 0;
     shrink(&fbuf, &fcap, 128u << 10);
 }
 
@@ -346,7 +344,6 @@ static void flush_pending(void) {
         poff = plen;   // pty gone: discard
     }
     if (poff >= plen) { poff = plen = 0; shrink(&pend, &pcap, 64u << 10); }
-    if (rd_paused && client >= 0 && plen - poff < PEND_LOW) { ev((uintptr_t)client, EVFILT_READ, EV_ENABLE, 0); rd_paused = 0; }
     int want = poff < plen;
     if (want != wr_armed && master_live) {
         ev((uintptr_t)master, EVFILT_WRITE, want ? EV_ADD : EV_DELETE, 0);
@@ -385,11 +382,10 @@ static void end_session(void) {
 static void on_frame(unsigned char type, const unsigned char *p, uint32_t n) {
     if (type == 'i') {
         if (plen - poff + n > MAX_PENDING) { drop_client(); return; }
-        if (poff && poff == plen) poff = plen = 0;
+        if (poff && poff >= plen - poff) { memmove(pend, pend + poff, plen - poff); plen -= poff; poff = 0; }   // amortized: the buffer tracks the unsent size
         if (grow(&pend, &pcap, plen + n) < 0) { drop_client(); return; }
         memcpy(pend + plen, p, n); plen += n;
         flush_pending();
-        if (client >= 0 && !rd_paused && plen - poff > PEND_HIGH) { ev((uintptr_t)client, EVFILT_READ, EV_DISABLE, 0); rd_paused = 1; }
     } else if (type == 'w') {
         struct winsize ws = {.ws_col = (unsigned short)(p[0] | p[1] << 8), .ws_row = (unsigned short)(p[2] | p[3] << 8),
                              .ws_xpixel = (unsigned short)(p[4] | p[5] << 8), .ws_ypixel = (unsigned short)(p[6] | p[7] << 8)};
@@ -546,6 +542,27 @@ static void selftest(void) {
     CHECK(grow(&pend, &pcap, 100) == 0, "grow small");
     plen = 100; flush_pending();
     CHECK(pend && pcap == 4096, "small input queue is kept");
+    // a long paste into a slowly reading program: the queue tracks the unsent size, not everything ever queued
+    fcntl(sp[1], F_SETFL, O_NONBLOCK);
+    static unsigned char blk[64u << 10], rbuf[64u << 10];
+    while (read(sp[1], rbuf, sizeof rbuf) > 0) {}   // the 'x' bytes above
+    size_t prefill = 0, fed = 0, got = 0, maxcap = 0;
+    for (ssize_t w; (w = write(sp[0], blk, sizeof blk)) > 0;) prefill += (size_t)w;   // the pty is full: input now queues
+    for (int i = 0; i < 256; i++) {   // 16 MiB through; the program reads 60 KiB per 64 KiB frame, so the backlog never empties and grows to 1 MiB
+        for (size_t j = 0; j < sizeof blk; j++) blk[j] = (unsigned char)((fed + j) * 7);
+        on_frame('i', blk, sizeof blk); fed += sizeof blk;
+        for (size_t want = 60u << 10; want;) {
+            ssize_t r = read(sp[1], rbuf, want);
+            if (r <= 0) break;
+            want -= (size_t)r;
+            for (ssize_t j = 0; j < r; j++) if (got + (size_t)j >= prefill) CHECK(rbuf[j] == (unsigned char)((got + (size_t)j - prefill) * 7), "queued input arrives in order");
+            got += (size_t)r;
+        }
+        flush_pending();
+        if (pcap > maxcap) maxcap = pcap;
+    }
+    CHECK(plen - poff > 0, "backlog stayed queued");
+    CHECK(maxcap <= 4 * MAX_FRAME, "input queue does not grow past the unsent size");
     close(sp[0]); close(sp[1]); master = -1;
     puts("selftest ok");
 }
