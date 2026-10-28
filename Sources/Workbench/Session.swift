@@ -131,10 +131,10 @@ final class Session: @unchecked Sendable {
 
     func start(output: @escaping @Sendable (UnsafeRawBufferPointer) -> Void, ended: @escaping @Sendable () -> Void) {
         let src = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
-        var buf = [UInt8](repeating: 0, count: 65536)
+        var buf = [UInt8](repeating: 0, count: Session.maxRead)
         var replayLeft: UInt64 = header.count == 12 ? header[..<8].reversed().reduce(0) { $0 << 8 | UInt64($1) } : 0
         src.setEventHandler { [self] in
-            let want = Int(min(max(src.data, 1), 65536))
+            let want = Int(min(max(src.data, 1), UInt(Session.maxRead)))
             let n = buf.withUnsafeMutableBytes { read(fd, $0.baseAddress, want) }
             if n < 0 && (errno == EINTR || errno == EAGAIN) { return }
             if n <= 0 {
@@ -167,6 +167,8 @@ final class Session: @unchecked Sendable {
     /// Largest 'i' payload per frame: the host drops a client that sends more than 1 MiB in one, and Ghostty hands a
     /// whole paste to `write` at once. The pty sees the same byte stream either way.
     static let maxInput = 64 << 10
+    /// Reader cap per read; the host's socket buffers (256 KiB) let a lagging reader catch up in few large reads.
+    private static let maxRead = 256 << 10
 
     static func frame(_ type: UInt8, _ payload: ArraySlice<UInt8>) -> [UInt8] {
         var buf: [UInt8] = [type]

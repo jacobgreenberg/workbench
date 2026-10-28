@@ -35,6 +35,7 @@
 #define MAX_PENDING (4u << 20)   // sanity bound: backpressure keeps the queue near PEND_HIGH
 #define PEND_HIGH (1u << 20)
 #define PEND_LOW (256u << 10)
+#define SOCK_BUF (256 << 10)     // the sender's buffer bounds what a lagging reader drains per read (default 8 KB)
 #define OSC_MAX 512
 #define OBUF_MAX 4096
 #define PRE_MAX 2048
@@ -295,6 +296,11 @@ static int grow(unsigned char **b, size_t *cap, size_t need) {
     return 0;
 }
 
+static void sock_buf(int fd) {
+    int sz = SOCK_BUF;
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sz, sizeof sz);
+}
+
 static void drop_client(void) {
     if (client >= 0) close(client);   // closing removes its kqueue filter
     client = -1; flen = 0; rd_paused = 0;
@@ -411,6 +417,7 @@ static void accept_client(void) {
     int fd = accept(listener, NULL, NULL);
     if (fd < 0) return;
     fcntl(fd, F_SETFD, FD_CLOEXEC);
+    sock_buf(fd);
     drop_client();   // newest app instance wins
     client = fd;
     if (ev((uintptr_t)fd, EVFILT_READ, EV_ADD, 0) < 0) { drop_client(); return; }
@@ -513,6 +520,7 @@ int main(int argc, char **argv) {
     kq = kqueue();
     if (kq < 0 || fcntl(kq, F_SETFD, FD_CLOEXEC) < 0) { perror("kqueue"); cleanup(); return 1; }
     client = fcntl(3, F_SETFD, FD_CLOEXEC) < 0 ? -1 : 3;
+    if (client >= 0) sock_buf(client);
 
     struct winsize ws = {.ws_row = (unsigned short)rows, .ws_col = (unsigned short)cols};
     pid_t pid = forkpty(&master, NULL, NULL, &ws);
