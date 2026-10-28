@@ -110,19 +110,20 @@ final class TranscriptIndex: @unchecked Sendable {
 
     init(_ url: URL) { self.url = url; codex = url.lastPathComponent.hasPrefix("rollout-") }
 
-    /// Reads only what was appended since last time, whole lines only (a half-written last line waits).
-    func update() {
+    /// Reads only what was appended since last time, whole lines only (a half-written last line waits). `stop` is asked
+    /// between chunks: true abandons the parse with a valid partial index, which the next update resumes.
+    func update(chunk size: Int = 8 << 20, stop: () -> Bool = { false }) {
         guard let h = try? FileHandle(forReadingFrom: url) else { return }
         defer { try? h.close() }
         if let size = try? h.seekToEnd(), size < offset { entries = []; offset = 0 }   // rewritten: start over
         guard (try? h.seek(toOffset: offset)) != nil else { return }
         var buf = Data()
         var more = true
-        while more {
+        while more && !stop() {
             // One pool per chunk: Foundation's read buffers and JSON graphs are autoreleased, and this whole parse is a
             // single work item, so without it a big session holds about twice its size until the item ends.
             autoreleasepool {
-                guard let chunk = try? h.read(upToCount: 8 << 20), !chunk.isEmpty else { more = false; return }
+                guard let chunk = try? h.read(upToCount: size), !chunk.isEmpty else { more = false; return }
                 buf.append(chunk)
                 guard let nl = buf.lastIndex(of: 10) else { return }
                 let end = nl - buf.startIndex
@@ -138,7 +139,7 @@ final class TranscriptIndex: @unchecked Sendable {
 enum TranscriptSearch {
     private static let queue = DispatchQueue(label: "workbench.transcript", qos: .userInitiated)
     nonisolated(unsafe) private static var current: TranscriptIndex?   // queue-confined: the one parsed file kept
-    private static let generation = Mutex(0)
+    private static let generation = Mutex(0)   // bumped by every new call; a parse in flight stops between chunks once it is stale
     private static let activity = Mutex(0)   // bumped by every use of the index; a release only fires if it is still the latest
     /// How long the parsed file stays after Find closes, so closing and reopening it is instant.
     static let keepAfterClose: TimeInterval = 60
@@ -146,9 +147,12 @@ enum TranscriptSearch {
     /// Supersedes any search in flight.
     static func cancel() { generation.withLock { $0 += 1 } }
 
+    private static func supersede() -> Int { generation.withLock { $0 += 1; return $0 } }
+
     /// Find is done with the parsed transcript: drop it after `keepAfterClose`, unless Find is used again meanwhile.
     static func release(after delay: TimeInterval = keepAfterClose) {
         let mine = activity.withLock { $0 += 1; return $0 }
+        cancel()   // Find is closed: a parse still running stops at its next chunk
         queue.asyncAfter(deadline: .now() + delay) {
             if activity.withLock({ $0 }) == mine { current = nil }
         }
@@ -164,30 +168,33 @@ enum TranscriptSearch {
 
     /// The pane's transcript, if an agent runs there. The parse starts right away, so it overlaps the typing that follows.
     static func locate(_ pane: PaneID, done: @escaping @Sendable @MainActor (URL?) -> Void) {
+        let mine = supersede()
         queue.async {
             let url = Agents.transcript(for: pane)
+            // The index is taken before done runs, so a release() made from it is ordered after this use.
+            let index = url.map { index(for: $0) }
             DispatchQueue.main.async { MainActor.assumeIsolated { done(url) } }
-            if let url { index(for: url).update() }
+            index?.update(stop: { generation.withLock { $0 } != mine })
         }
     }
 
-    private static func count(_ url: URL, _ query: String) -> Int {
+    private static func count(_ url: URL, _ query: String, _ mine: Int) -> Int {
         let index = index(for: url)
-        if !query.isEmpty { index.update() }
+        if !query.isEmpty { index.update(stop: { generation.withLock { $0 } != mine }) }
         return TranscriptParser.count(in: index.entries, query)
     }
 
     #if DEBUG
     static func cachedURL() -> URL? { queue.sync { current?.url } }
-    static func countNow(_ url: URL, _ query: String) -> Int { queue.sync { count(url, query) } }
+    static func countNow(_ url: URL, _ query: String) -> Int { queue.sync { count(url, query, generation.withLock { $0 }) } }
     #endif
 
     /// How many times `query` occurs in the transcript.
     static func search(_ url: URL, _ query: String, done: @escaping @Sendable @MainActor (Int) -> Void) {
-        let mine = generation.withLock { $0 += 1; return $0 }
+        let mine = supersede()
         queue.async {
             guard generation.withLock({ $0 }) == mine else { return }
-            let total = count(url, query)
+            let total = count(url, query, mine)
             DispatchQueue.main.async {
                 guard generation.withLock({ $0 }) == mine else { return }
                 MainActor.assumeIsolated { done(total) }
@@ -245,8 +252,31 @@ func transcriptSelfCheck() {
     try! h.seekToEnd(); try! h.write(contentsOf: Data((l2.dropFirst(20) + "\n").utf8)); try! h.close()
     index.update()
     assert(index.entries.map(\.text) == ["one", "two"])
+    transcriptAbandonSelfCheck()
     transcriptCacheSelfCheck(url)
     transcriptMemorySelfCheck()
+}
+
+/// A parse abandoned between chunks (a newer Find waiting behind it) leaves a valid partial index; the next update
+/// resumes where it stopped and ends with exactly what one uninterrupted parse gives.
+private func transcriptAbandonSelfCheck() {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".jsonl")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let lines = (0..<200).map { #"{"type":"user","message":{"content":"line \#($0) wörld"}}"# + "\n" }
+    try! Data(lines.joined().utf8).write(to: url)
+    let whole = TranscriptIndex(url)
+    whole.update(chunk: 1 << 10)
+    assert(whole.entries.count == 200)
+    let index = TranscriptIndex(url)
+    var asked = 0
+    index.update(chunk: 1 << 10, stop: { asked += 1; return asked > 1 })   // lets the first chunk through
+    assert(asked == 2 && index.entries.count > 0 && index.entries.count < 200, "partial: \(index.entries.count)")
+    assert(index.entries == Array(whole.entries.prefix(index.entries.count)), "partial index is a prefix of the whole")
+    index.update(chunk: 1 << 10)
+    assert(index.entries == whole.entries, "resumed parse matches an uninterrupted one: \(index.entries.count)")
+    let none = TranscriptIndex(url)
+    none.update(chunk: 1 << 10, stop: { true })
+    assert(none.entries.isEmpty, "stopped before the first chunk reads nothing")
 }
 
 /// The parsed file is kept across Find sessions for a while, then dropped; any use in between keeps it.

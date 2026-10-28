@@ -1791,7 +1791,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         findPane = id
         findResolving = true
         TranscriptSearch.locate(id) { [weak self] url in
-            // locate already parsed the transcript: if Find is not going to use it, let it go.
+            // locate has taken the index (and is parsing it) by now: if Find is not going to use it, let it go.
             guard let self, findResolving, findPane == id else { return TranscriptSearch.release() }
             findResolving = false
             if let url { beginTranscriptFind(id, url) } else { TranscriptSearch.release(); surfaceView(for: id)?.perform("start_search") }
