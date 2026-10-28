@@ -243,22 +243,21 @@ func readFile(_ url: URL, cap: Int) -> Data? {
             .appendingPathComponent("Workbench")
     }()
 
-    static let workspaceImages = directory.appendingPathComponent("workspaces")
+    nonisolated static let workspaceImages = directory.appendingPathComponent("workspaces")
 
     var layout: Layout
+    /// Set when layout.json existed but could not be read: the file it was moved to, and whether layout.last-good.json stood in
+    /// for it. Launch leaves surviving sessions alone and tells the user.
+    private(set) var layoutProblem: (bad: URL, recovered: Bool)?
     var onChange: (() -> Void)?   // after every change (Backup's git sync debounces on it)
     private var pending: DispatchWorkItem?
     private let queue = DispatchQueue(label: "pane.store")
 
     init() {
         try? FileManager.default.createDirectory(at: Store.directory, withIntermediateDirectories: true)
-        let url = Store.directory.appendingPathComponent("layout.json")
-        let decoded = readFile(url, cap: 16 << 20).flatMap { try? JSONDecoder().decode(Layout.self, from: $0) }
-        if decoded == nil, FileManager.default.fileExists(atPath: url.path) {
-            // Never overwrite a layout we failed to read; keep it for recovery.
-            try? FileManager.default.removeItem(at: url.appendingPathExtension("bak"))
-            try? FileManager.default.moveItem(at: url, to: url.appendingPathExtension("bak"))
-        }
+        let load = Store.loadLayout(in: Store.directory)
+        let decoded = load.layout
+        layoutProblem = load.quarantined.map { ($0, decoded != nil) }
         var l = decoded ?? Layout.default
         // migration: the links used to be built in; existing setups keep them (clearing in Settings stores an empty list, not nil)
         if decoded != nil && l.jira == nil {
@@ -277,6 +276,27 @@ func readFile(_ url: URL, cap: Int) -> Data? {
             }
         }
         layout = l
+    }
+
+    /// layout.json decoded. A file that exists but does not decode (truncated by a crash, or a newer build's format) is moved to
+    /// `layout.json.bad-<time>`, never over an earlier one, and layout.last-good.json (a copy of the last layout that loaded with
+    /// projects in it) is tried before giving up. A missing file is just a first launch.
+    nonisolated static func loadLayout(in dir: URL) -> (layout: Layout?, quarantined: URL?) {
+        let fm = FileManager.default
+        let url = dir.appendingPathComponent("layout.json"), good = dir.appendingPathComponent("layout.last-good.json")
+        func decode(_ u: URL) -> Layout? { readFile(u, cap: 16 << 20).flatMap { try? JSONDecoder().decode(Layout.self, from: $0) } }
+        if let l = decode(url) {
+            if !l.projects.isEmpty { try? fm.removeItem(at: good); try? fm.copyItem(at: url, to: good) }
+            return (l, nil)
+        }
+        guard fm.fileExists(atPath: url.path) else { return (nil, nil) }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyyMMdd-HHmmss"
+        var bad = url.appendingPathExtension("bad-" + f.string(from: Date())), n = 1
+        while fm.fileExists(atPath: bad.path) { bad = url.appendingPathExtension("bad-" + f.string(from: Date()) + "-\(n)"); n += 1 }
+        guard (try? fm.moveItem(at: url, to: bad)) != nil else { return (nil, url) }   // can't move it aside: still reported, and still not overwritten until the next save
+        return (decode(good), bad)
     }
 
     func changed() {
@@ -406,5 +426,25 @@ func modelSelfCheck() {
     assert(try! JSONDecoder().decode(Tab.self, from: Data(oldTab.utf8)).customTitle == nil)
     let data = try! JSONEncoder().encode(layout)
     assert(try! JSONDecoder().decode(Layout.self, from: data) == layout)
+
+    // An unreadable layout is quarantined (never over an earlier one), recovered from last-good when there is one, and reported.
+    let ldir = dir.appendingPathComponent("load")
+    try! FileManager.default.createDirectory(at: ldir, withIntermediateDirectories: true)
+    let lj = ldir.appendingPathComponent("layout.json"), lgood = ldir.appendingPathComponent("layout.last-good.json")
+    assert(Store.loadLayout(in: ldir).layout == nil && Store.loadLayout(in: ldir).quarantined == nil)   // first launch: nothing to report
+    try! data.write(to: lj)
+    var loaded = Store.loadLayout(in: ldir)
+    assert(loaded.layout == layout && loaded.quarantined == nil && (try! Data(contentsOf: lgood)) == data)
+    try! Data(#"{"projects":[{"id":"x","tabs":[{"root":{"leaf":{"_0":{"kind":{"future":{}}}}}}]}]}"#.utf8).write(to: lj)   // a newer build's format
+    loaded = Store.loadLayout(in: ldir)
+    assert(loaded.layout == layout && loaded.quarantined?.lastPathComponent.hasPrefix("layout.json.bad-") == true)
+    assert(!FileManager.default.fileExists(atPath: lj.path) && (try! Data(contentsOf: loaded.quarantined!)).starts(with: Data(#"{"projects""#.utf8)))
+    let first = loaded.quarantined!
+    try! Data().write(to: lj)   // zero-length, as after a power loss
+    try! FileManager.default.removeItem(at: lgood)
+    loaded = Store.loadLayout(in: ldir)
+    assert(loaded.layout == nil && loaded.quarantined != nil && loaded.quarantined != first && FileManager.default.fileExists(atPath: first.path))
+    try! JSONEncoder().encode(Layout.default).write(to: lj)   // an empty layout never replaces last-good
+    assert(Store.loadLayout(in: ldir).layout == Layout.default && !FileManager.default.fileExists(atPath: lgood.path))
 }
 #endif

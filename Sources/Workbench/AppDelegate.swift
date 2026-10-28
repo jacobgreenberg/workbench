@@ -40,7 +40,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         var live = Set<PaneID>()
         for p in store.layout.projects { for t in p.tabs { for leaf in t.root.leaves { if case .terminal = leaf.kind { live.insert(leaf.id) } } } }
-        DispatchQueue.global(qos: .utility).async { [live] in Session.endOrphans(keeping: live) }
+        // An unreadable layout is not "no panes": ending every host as an orphan would kill the sessions it exists to keep.
+        if store.layoutProblem == nil { DispatchQueue.global(qos: .utility).async { [live] in Session.endOrphans(keeping: live) } }
 
         if let data = readFile(Store.restoreError, cap: 1 << 16) {
             try? FileManager.default.removeItem(at: Store.restoreError)
@@ -48,6 +49,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             alert.alertStyle = .warning
             alert.messageText = "The restore didn't finish"
             alert.informativeText = String(decoding: data, as: UTF8.self)
+            alert.runModal()
+        }
+
+        if let (bad, recovered) = store.layoutProblem {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Workbench couldn't read its saved layout"
+            alert.informativeText = (recovered ? "It reopened the last layout that loaded, so recent changes may be missing."
+                                               : "It started empty.")
+                + " Running terminals and agents were left alone; any not shown end at the next launch. The unreadable file is saved as \(bad.path)."
             alert.runModal()
         }
     }
@@ -72,6 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     // so ghostty_app_free is skipped to avoid racing the background surface frees.
     func applicationWillTerminate(_ notification: Notification) {
         control?.stop()
+        if pendingRestore == nil { BackupSync.shared.startFlush(store) }   // a change still waiting for its debounce; git runs while the sessions end
         workspace.terminateAll(keeping: Set(pendingRestore?.0.layout.projects.flatMap { $0.tabs.flatMap { $0.root.leaves.map(\.id) } } ?? []))
         Session.waitForEnds(timeout: 5)   // hosts give a shell up to 3 s to exit; under Restart nothing is ending
         if let (backup, rollback) = pendingRestore {
@@ -84,7 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
             relaunch()
         } else {
-            BackupSync.shared.flush(store)   // a change still waiting for its debounce
+            BackupSync.shared.finishFlush()
             if relaunchAfterQuit { relaunch() }
         }
     }

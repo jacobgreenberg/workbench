@@ -29,14 +29,17 @@ struct Backup: Codable, Sendable {
     }()
     nonisolated static let ghosttyConfigURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/ghostty/config")
 
-    @MainActor static func current(_ layout: Layout) throws -> Backup {
+    @MainActor static func current(_ layout: Layout) throws -> Backup { try current(layout, themes: Theme.userDirectory) }
+
+    /// Reads files only (no main-actor state), so git sync builds it on its own queue.
+    nonisolated static func current(_ layout: Layout, themes themesDir: URL) throws -> Backup {
         var l = layout
         let active = l.projects.indices.contains(l.activeProject) ? l.projects[l.activeProject].id : nil
         l.projects.removeAll { $0.scratch == true }
         l.activeProject = l.projects.firstIndex { $0.id == active } ?? (l.projects.isEmpty ? -1 : 0)
         l.backupRemote = nil
         var themes: [String: String] = [:]
-        let files = (try? FileManager.default.contentsOfDirectory(at: Theme.userDirectory, includingPropertiesForKeys: nil)) ?? []
+        let files = (try? FileManager.default.contentsOfDirectory(at: themesDir, includingPropertiesForKeys: nil)) ?? []
         for f in files where f.pathExtension == "json" {
             guard let d = readFile(f, cap: 1 << 20), let s = String(data: d, encoding: .utf8) else {
                 throw BackupError(message: "Couldn't include the theme \(f.lastPathComponent): it is unreadable, not UTF-8, or over 1 MB.")
@@ -76,14 +79,19 @@ struct Backup: Codable, Sendable {
         return data
     }
 
-    /// What git sync writes: the setup without what changes as you work (selection, focus, terminal titles, export time), so a commit means the setup itself changed.
+    /// What git sync writes: the setup without what changes as you work (selection, focus, terminal titles, export time, which panels are open), so a commit means the setup itself changed.
     var forSync: Backup {
         var b = self
         b.exported = Date(timeIntervalSince1970: 0)
         b.layout.activeProject = b.layout.projects.isEmpty ? -1 : 0
         b.layout.activeWorkspace = nil
+        b.layout.sidebarVisible = true
+        b.layout.showHidden = nil
+        b.layout.showClutterFiles = nil
         for p in b.layout.projects.indices {
             b.layout.projects[p].activeTab = 0
+            b.layout.projects[p].inspectorOpen = nil
+            b.layout.projects[p].inspectorTab = nil
             for t in b.layout.projects[p].tabs.indices {
                 b.layout.projects[p].tabs[t].focused = nil
                 b.layout.projects[p].tabs[t].title = ""
@@ -199,7 +207,7 @@ struct Backup: Codable, Sendable {
         if remote.isEmpty { completion(BackupError(message: "Enter a git remote URL.")); return }
         queue.async {
             try? FileManager.default.removeItem(at: BackupSync.clone)
-            let r = BackupSync.git(Store.directory.path, ["clone", "-q", "--", remote, BackupSync.clone.path])
+            let r = BackupSync.git(Store.directory.path, ["clone", "-q", "--", remote, BackupSync.clone.path], timeout: 300)
             let err = r.status != 0 ? BackupError(message: "Couldn't clone \(remote): \(r.message)") : nil
             DispatchQueue.main.async { MainActor.assumeIsolated { completion(err) } }
         }
@@ -214,43 +222,52 @@ struct Backup: Codable, Sendable {
         DispatchQueue.main.asyncAfter(deadline: .now() + 600, execute: item)   // at most one commit per 10 minutes; quit flushes
     }
 
-    func syncNow(_ store: Store) { start(store, wait: false) }
+    func syncNow(_ store: Store) { start(store) }
 
-    /// At quit: runs a sync that was waiting for its debounce, giving git at most 5 s.
-    func flush(_ store: Store) {
+    private var flushing: DispatchSemaphore?
+
+    /// At quit: starts a sync that was waiting for its debounce. finishFlush waits for it, so git overlaps the sessions' exit.
+    func startFlush(_ store: Store) {
         guard pending != nil else { return }
-        start(store, wait: true)
+        flushing = start(store)
     }
 
-    /// Stops syncing: drops the waiting sync, and queued work sees a newer generation and does nothing.
+    /// Waits for the sync startFlush began, giving git at most 5 s.
+    func finishFlush() {
+        _ = flushing?.wait(timeout: .now() + 5)
+        flushing = nil
+    }
+
+    /// Stops syncing: drops the waiting sync, ends the git call in flight, and queued work sees a newer generation and does nothing.
     func stop() {
         generation.withLock { $0 += 1 }
+        BackupSync.running.withLock { if let p = $0, p.isRunning { p.terminate() } }
         pending?.cancel()
         pending = nil
         setStatus("")
     }
 
-    private func start(_ store: Store, wait: Bool) {
+    /// Signalled when the sync finishes.
+    @discardableResult private func start(_ store: Store) -> DispatchSemaphore? {
         pending?.cancel()
         pending = nil
-        guard store.layout.backupRemote != nil else { return }
-        let data: Data
-        do { data = try Backup.current(store.layout).forSync.encoded() } catch {
-            setStatus("Sync failed: \((error as? BackupError)?.message ?? error.localizedDescription)")
-            return
-        }
+        guard store.layout.backupRemote != nil else { return nil }
+        let layout = store.layout, themes = Theme.userDirectory   // value copies: the snapshot is built and encoded on the queue, not on main
         let gen = generation.withLock { $0 }, lock = generation
         let done = DispatchSemaphore(value: 0)
         queue.async {
-            let result = BackupSync.run(data, gen: gen, lock: lock)
-            if let result { DispatchQueue.main.async { MainActor.assumeIsolated { BackupSync.shared.setStatus(result) } } }
+            let result: String?
+            do { result = BackupSync.run(try Backup.current(layout, themes: themes).forSync.encoded(), gen: gen, lock: lock) } catch {
+                result = "Sync failed: \((error as? BackupError)?.message ?? error.localizedDescription)"
+            }
+            if let result, lock.withLock({ $0 }) == gen { DispatchQueue.main.async { MainActor.assumeIsolated { BackupSync.shared.setStatus(result) } } }
             done.signal()
         }
-        if wait { _ = done.wait(timeout: .now() + 5) }
+        return done
     }
 
     /// nil = stopped meanwhile.
-    nonisolated private static func run(_ data: Data, gen: Int, lock: OSAllocatedUnfairLock<Int>) -> String? {
+    nonisolated fileprivate static func run(_ data: Data, in clone: URL = BackupSync.clone, gen: Int, lock: OSAllocatedUnfairLock<Int>) -> String? {
         func live() -> Bool { lock.withLock { $0 } == gen }
         guard live() else { return nil }
         let repo = clone.path, name = Backup.fileName(for: Backup.thisMachine)
@@ -262,28 +279,39 @@ struct Backup: Codable, Sendable {
         }
         let add = git(repo, ["add", "--", name])
         if add.status != 0 { return "Sync failed: \(add.message)" }
+        var committed = false
         if git(repo, ["diff", "--cached", "--quiet", "--", name]).status == 1 {
             let c = git(repo, ["commit", "-q", "-m", "Workbench backup (\(Backup.thisMachine))", "--", name])
             if c.status != 0 { return "Sync failed: \(c.message)" }
+            committed = true
         }
+        /// Commits the upstream lacks; nil = no upstream yet.
+        func ahead() -> Int? {
+            let r = git(repo, ["rev-list", "--count", "@{u}..HEAD"])
+            return r.status == 0 ? Int(r.out.trimmingCharacters(in: .whitespacesAndNewlines)) : nil
+        }
+        let synced = "Synced at \(DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .short))"
+        // Each Mac writes only its own file: with nothing new and nothing unpushed there is nothing to send, so the remote is not contacted.
+        if !committed, ahead() == 0 { return synced }
         guard live() else { return nil }
         let f = git(repo, ["fetch", "-q"])
         if f.status != 0 { return "Sync failed: \(f.message)" }
-        let upstream = git(repo, ["rev-parse", "-q", "--verify", "@{u}"]).status == 0
-        if upstream {
-            let r = git(repo, ["rebase", "-q", "@{u}"])
-            if r.status != 0 {
-                _ = git(repo, ["rebase", "--abort"])
-                return "Sync failed: \(r.message)"
-            }
-        }
-        let ahead = upstream ? Int(git(repo, ["rev-list", "--count", "@{u}..HEAD"]).out.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0 : 1
+        if let failure = rebaseOntoUpstream(repo) { return "Sync failed: \(failure)" }
         guard live() else { return nil }
-        if ahead > 0 {
+        if (ahead() ?? 1) > 0 {
             let p = git(repo, ["push", "-q", "-u", "origin", "HEAD"])
             if p.status != 0 { return "Sync failed: \(p.message)" }
         }
-        return "Synced at \(DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .short))"
+        return synced
+    }
+
+    /// Rebases the clone onto its upstream (none yet = nothing to do); nil when it worked, else what went wrong.
+    nonisolated private static func rebaseOntoUpstream(_ repo: String) -> String? {
+        guard git(repo, ["rev-parse", "-q", "--verify", "@{u}"]).status == 0 else { return nil }
+        let r = git(repo, ["rebase", "-q", "@{u}"])
+        if r.status == 0 { return nil }
+        _ = git(repo, ["rebase", "--abort"])
+        return r.message
     }
 
     func fetchBackups(completion: @escaping @MainActor @Sendable (Result<[Backup], BackupError>) -> Void) {
@@ -300,13 +328,7 @@ struct Backup: Codable, Sendable {
         }
         let f = git(repo, ["fetch", "-q"])
         if f.status != 0 { return .failure(BackupError(message: "git fetch failed: \(f.message)")) }
-        if git(repo, ["rev-parse", "-q", "--verify", "@{u}"]).status == 0 {
-            let r = git(repo, ["rebase", "-q", "@{u}"])
-            if r.status != 0 {
-                _ = git(repo, ["rebase", "--abort"])
-                return .failure(BackupError(message: "Couldn't update the sync copy: \(r.message)"))
-            }
-        }
+        if let failure = rebaseOntoUpstream(repo) { return .failure(BackupError(message: "Couldn't update the sync copy: \(failure)")) }
         let files = ((try? FileManager.default.contentsOfDirectory(at: clone, includingPropertiesForKeys: nil)) ?? [])
             .filter { $0.lastPathComponent.hasPrefix("workbench-") && $0.lastPathComponent.hasSuffix(".json") }
         var found: [Backup] = []
@@ -321,20 +343,39 @@ struct Backup: Codable, Sendable {
         return .success(found)
     }
 
-    nonisolated private static func git(_ dir: String, _ args: [String]) -> (status: Int32, out: String, message: String) {
+    /// The git call in flight (the queue is serial, so at most one), so stop() can end it.
+    nonisolated private static let running = OSAllocatedUnfairLock<Process?>(initialState: nil)
+
+    /// `timeout` ends a call that has not finished: a half-open connection (captive Wi-Fi, a dropped VPN, sleep mid-transfer) would otherwise hold the serial queue, and every sync, fetch and Connect behind it, forever.
+    nonisolated fileprivate static func git(_ dir: String, _ args: [String], timeout: TimeInterval = 90) -> (status: Int32, out: String, message: String) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        p.arguments = ["-C", dir] + args
-        p.environment = ProcessInfo.processInfo.environment.merging(["GIT_TERMINAL_PROMPT": "0"]) { $1 }   // fail instead of waiting on a password prompt nobody sees
+        p.arguments = ["-C", dir, "-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=30"] + args
+        var env = ProcessInfo.processInfo.environment
+        env["GIT_TERMINAL_PROMPT"] = "0"   // fail instead of waiting on a password prompt nobody sees
+        if env["GIT_SSH_COMMAND"] == nil && env["GIT_SSH"] == nil {   // ssh has no connect timeout or keepalive by default, and BatchMode fails instead of asking for a passphrase
+            env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
+        }
+        p.environment = env
         let out = Pipe(), err = Pipe()
         p.standardOutput = out
         p.standardError = err
         do { try p.run() } catch { return (-1, "", error.localizedDescription) }
-        // ponytail: sequential reads; git's stderr here is a few lines
+        running.withLock { $0 = p }
+        let timedOut = OSAllocatedUnfairLock(initialState: false)
+        let watchdog = DispatchWorkItem { if p.isRunning { timedOut.withLock { $0 = true }; p.terminate() } }   // one-shot, cancelled below
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
+        let errHandle = err.fileHandleForReading, errData = OSAllocatedUnfairLock(initialState: Data()), errDone = DispatchGroup()
+        errDone.enter()   // both pipes drain at once, so neither can fill and block git
+        DispatchQueue.global().async { let d = errHandle.readDataToEndOfFile(); errData.withLock { $0 = d }; errDone.leave() }
         let stdout = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        let text = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        errDone.wait()
         p.waitUntilExit()
+        watchdog.cancel()
+        running.withLock { $0 = nil }
+        let text = String(decoding: errData.withLock { $0 }, as: UTF8.self)
         let line = text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty }
+        if timedOut.withLock({ $0 }) { return (-1, stdout, "git \(args[0]) timed out") }
         return (p.terminationStatus, stdout, line ?? "git \(args[0]) exited with \(p.terminationStatus)")
     }
 }
@@ -399,5 +440,55 @@ struct Backup: Codable, Sendable {
     var bf = b
     bf.layout.projects[0].tabs[0].focused = leafA.id
     assert((try! bf.forSync.encoded()) == (try! { var x = bf; x.layout.projects[0].tabs[0].focused = leafB.id; x.layout.activeProject = 0; return x }().forSync.encoded()))
+    var views = b   // toggling the sidebar, the inspector or the Files filter is not a change to the setup
+    views.layout.sidebarVisible = false
+    views.layout.showHidden = true
+    views.layout.showClutterFiles = true
+    views.layout.projects[0].inspectorOpen = true
+    views.layout.projects[0].inspectorTab = 1
+    assert((try! views.forSync.encoded()) == (try! b.forSync.encoded()))
+    assert((try! views.encoded()) != (try! b.encoded()))   // Settings Export keeps them
+
+    // Snapshot: built from values and files only, so git sync does it off main.
+    let tdir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try! FileManager.default.createDirectory(at: tdir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tdir) }
+    try! Data(#"{"id":"t"}"#.utf8).write(to: tdir.appendingPathComponent("t.json"))
+    let off = DispatchSemaphore(value: 0), snapLayout = l, snapshot = OSAllocatedUnfairLock<Backup?>(initialState: nil)
+    Thread.detachNewThread { snapshot.withLock { $0 = try? Backup.current(snapLayout, themes: tdir) }; off.signal() }
+    off.wait()
+    assert(snapshot.withLock { $0 }?.themes == ["t.json": #"{"id":"t"}"#])
+
+    // git: a call that outlives its timeout is ended (and says so), not waited on forever.
+    let t0 = Date()
+    let hung = BackupSync.git(tdir.path, ["-c", "alias.hang=!sleep 20", "hang"], timeout: 1)
+    assert(Date().timeIntervalSince(t0) < 8 && hung.status != 0 && hung.message.hasSuffix("timed out"))
+    let quick = BackupSync.git(tdir.path, ["--version"])
+    assert(quick.status == 0 && quick.out.hasPrefix("git version"))
+
+    // Sync with nothing new contacts no remote; a change still fetches, rebases and pushes.
+    func sh(_ dir: URL, _ args: [String]) -> String {
+        let r = BackupSync.git(dir.path, args)
+        assert(r.status == 0, "git \(args): \(r.message)")
+        return r.out.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    for k in ["GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"] { setenv(k, "t", 1) }
+    for k in ["GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"] { setenv(k, "t@t", 1) }
+    let remote = tdir.appendingPathComponent("remote.git"), mine = tdir.appendingPathComponent("mine"), other = tdir.appendingPathComponent("other")
+    _ = sh(tdir, ["init", "-q", "--bare", remote.path])
+    _ = sh(tdir, ["clone", "-q", remote.path, mine.path])
+    let lock = OSAllocatedUnfairLock(initialState: 0)
+    let first = Data("1".utf8)
+    assert(BackupSync.run(first, in: mine, gen: 0, lock: lock)?.hasPrefix("Synced") == true)   // no upstream yet: pushes
+    assert(sh(remote, ["rev-list", "--count", "HEAD"]) == "1")
+    _ = sh(tdir, ["clone", "-q", remote.path, other.path])
+    try! Data("x".utf8).write(to: other.appendingPathComponent("other.txt"))
+    _ = sh(other, ["add", "other.txt"]); _ = sh(other, ["commit", "-q", "-m", "other Mac"]); _ = sh(other, ["push", "-q"])
+    let known = sh(mine, ["rev-parse", "@{u}"])
+    assert(BackupSync.run(first, in: mine, gen: 0, lock: lock)?.hasPrefix("Synced") == true)
+    assert(sh(mine, ["rev-parse", "@{u}"]) == known)   // unchanged: no fetch
+    assert(BackupSync.run(Data("2".utf8), in: mine, gen: 0, lock: lock)?.hasPrefix("Synced") == true)
+    assert(sh(mine, ["rev-parse", "@{u}"]) != known && sh(remote, ["rev-list", "--count", "HEAD"]) == "3")   // changed: fetch, rebase, push
+    assert(BackupSync.run(first, in: mine, gen: 1, lock: lock) == nil)   // stopped meanwhile
 }
 #endif
