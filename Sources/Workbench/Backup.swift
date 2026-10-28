@@ -346,17 +346,19 @@ struct Backup: Codable, Sendable {
     /// The git call in flight (the queue is serial, so at most one), so stop() can end it.
     nonisolated private static let running = OSAllocatedUnfairLock<Process?>(initialState: nil)
 
-    /// `timeout` ends a call that has not finished: a half-open connection (captive Wi-Fi, a dropped VPN, sleep mid-transfer) would otherwise hold the serial queue, and every sync, fetch and Connect behind it, forever.
+    /// The environment git runs in: the user's own, so their ssh config and core.sshCommand apply (GIT_SSH_COMMAND would override core.sshCommand). git has no terminal here, so ssh cannot ask for a passphrase or host key and fails instead; only https credentials need turning off.
+    nonisolated fileprivate static func gitEnvironment(_ base: [String: String]) -> [String: String] {
+        var env = base
+        env["GIT_TERMINAL_PROMPT"] = "0"   // fail instead of waiting on a password prompt nobody sees
+        return env
+    }
+
+    /// `timeout` is the only connection timeout, ssh's own are left to the user's config. It ends a call that has not finished: a half-open connection (captive Wi-Fi, a dropped VPN, sleep mid-transfer) would otherwise hold the serial queue, and every sync, fetch and Connect behind it, forever.
     nonisolated fileprivate static func git(_ dir: String, _ args: [String], timeout: TimeInterval = 90) -> (status: Int32, out: String, message: String) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
         p.arguments = ["-C", dir, "-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=30"] + args
-        var env = ProcessInfo.processInfo.environment
-        env["GIT_TERMINAL_PROMPT"] = "0"   // fail instead of waiting on a password prompt nobody sees
-        if env["GIT_SSH_COMMAND"] == nil && env["GIT_SSH"] == nil {   // ssh has no connect timeout or keepalive by default, and BatchMode fails instead of asking for a passphrase
-            env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
-        }
-        p.environment = env
+        p.environment = gitEnvironment(ProcessInfo.processInfo.environment)
         let out = Pipe(), err = Pipe()
         p.standardOutput = out
         p.standardError = err
@@ -459,6 +461,10 @@ struct Backup: Codable, Sendable {
     off.wait()
     assert(snapshot.withLock { $0 }?.themes == ["t.json": #"{"id":"t"}"#])
 
+    // git: the user's ssh command is never overridden (GIT_SSH_COMMAND beats core.sshCommand), and one they set is kept.
+    assert(BackupSync.gitEnvironment([:])["GIT_SSH_COMMAND"] == nil && BackupSync.gitEnvironment([:])["GIT_SSH"] == nil)
+    assert(BackupSync.gitEnvironment([:])["GIT_TERMINAL_PROMPT"] == "0")
+    assert(BackupSync.gitEnvironment(["GIT_SSH_COMMAND": "ssh -i k"])["GIT_SSH_COMMAND"] == "ssh -i k")
     // git: a call that outlives its timeout is ended (and says so), not waited on forever.
     let t0 = Date()
     let hung = BackupSync.git(tdir.path, ["-c", "alias.hang=!sleep 20", "hang"], timeout: 1)
