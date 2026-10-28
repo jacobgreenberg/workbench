@@ -2,7 +2,7 @@
 
 Native macOS terminal IDE for running many Claude Code / Codex sessions. Swift 6 + AppKit + GhosttyKit (libghostty, our fork `jacobgreenberg/ghostty` branch `workbench` (based on cmux `manaflow-ai/ghostty@cb1ef70`), built from source by `scripts/ghosttykit.sh` at its pinned SHA). Single SwiftPM executable target `Workbench`, all sources in `Sources/Workbench/`. Reference Ghostty sources (read-only) are in `vendor/ghostty-src/macos/Sources/Ghostty/`; the C API is `vendor/ghostty-src/include/ghostty.h`.
 
-Build: `swift build -c release`, then `scripts/bundle.sh` → `build.noindex/Workbench.app` (`--install` swaps it into /Applications atomically). Run: `open build.noindex/Workbench.app`.
+Build: `swift build -c release`, then `scripts/bundle.sh` → `build.noindex/Workbench.app` (`--install` rsyncs it file by file into /Applications/Workbench.app, never moving the bundle: WorkbenchHost's privacy grants are keyed by its path, and a running host whose bundle moved loses them). Run: `open build.noindex/Workbench.app`.
 
 Tests: `swift build && .build/debug/Workbench --selfcheck` (the in-binary self-checks, DEBUG; main.swift lists them). The GUI needs a bundle (UNUserNotificationCenter aborts without one): `scripts/bundle.sh --debug` → `build.noindex/Workbench-debug.app`; run its `Contents/MacOS/Workbench` with `PANE_STATE_DIR=<short dir>` so it never shares the socket, layout or sessions of the real app, and drive it over `<dir>/pane.sock` (the test-harness commands in WorkspaceController.handleControl).
 

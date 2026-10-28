@@ -49,10 +49,9 @@ rm -rf "$APP.old"
 echo "built $APP"
 
 if [ "${1:-}" = "--install" ]; then
-  # stage + rename: the running app's helper, hooks and terminfo are never missing, and a failed copy leaves the old app
-  rm -rf /Applications/.Workbench.app.new /Applications/.Workbench.app.old
-  ditto "$APP" /Applications/.Workbench.app.new
-  mv /Applications/Workbench.app /Applications/.Workbench.app.old 2>/dev/null || true
-  mv /Applications/.Workbench.app.new /Applications/Workbench.app
-  rm -rf /Applications/.Workbench.app.old
+  # File by file into the existing bundle, never moving it: each file is written beside its target and renamed over it,
+  # so the helper, hooks and terminfo are never missing. A running process's path follows its bundle, and macOS keys
+  # WorkbenchHost's privacy grants (Removable Volumes, Accessibility) by that path: renaming the old bundle away would
+  # strip them from every running session until its pane restarts.
+  rsync -a --delete "$APP/" /Applications/Workbench.app/
 fi
