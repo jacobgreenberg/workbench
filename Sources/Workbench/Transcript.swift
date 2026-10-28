@@ -15,11 +15,6 @@ struct TranscriptMatch: Sendable, Equatable {
     let range: NSRange
 }
 
-struct TranscriptResult: Sendable {
-    let entries: [TranscriptEntry]
-    let matches: [TranscriptMatch]
-}
-
 /// Claude Code / Codex session jsonl → entries. Everything that isn't conversation text or tool traffic is skipped.
 enum TranscriptParser {
     private static let claudeTypes = [Data(#""type":"user""#.utf8), Data(#""type":"assistant""#.utf8)]
@@ -78,19 +73,30 @@ enum TranscriptParser {
 
     /// Case- and diacritic-insensitive substring search; every occurrence is a match.
     static func matches(in entries: [TranscriptEntry], _ query: String) -> [TranscriptMatch] {
-        guard !query.isEmpty else { return [] }
         var out: [TranscriptMatch] = []
+        forEachMatch(in: entries, query) { out.append(.init(entry: $0, range: $1)) }
+        return out
+    }
+
+    /// How many matches there are; a short query on a big session has millions, which `matches` would materialize.
+    static func count(in entries: [TranscriptEntry], _ query: String) -> Int {
+        var n = 0
+        forEachMatch(in: entries, query) { _, _ in n += 1 }
+        return n
+    }
+
+    private static func forEachMatch(in entries: [TranscriptEntry], _ query: String, _ body: (Int, NSRange) -> Void) {
+        guard !query.isEmpty else { return }
         for (i, e) in entries.enumerated() {
             let s = e.text as NSString
             var r = NSRange(location: 0, length: s.length)
             while r.length > 0 {
                 let f = s.range(of: query, options: [.caseInsensitive, .diacriticInsensitive], range: r)
                 guard f.location != NSNotFound, f.length > 0 else { break }
-                out.append(.init(entry: i, range: f))
+                body(i, f)
                 r = NSRange(location: NSMaxRange(f), length: s.length - NSMaxRange(f))
             }
         }
-        return out
     }
 }
 
@@ -111,13 +117,19 @@ final class TranscriptIndex: @unchecked Sendable {
         if let size = try? h.seekToEnd(), size < offset { entries = []; offset = 0 }   // rewritten: start over
         guard (try? h.seek(toOffset: offset)) != nil else { return }
         var buf = Data()
-        while let chunk = try? h.read(upToCount: 8 << 20), !chunk.isEmpty {
-            buf.append(chunk)
-            guard let nl = buf.lastIndex(of: 10) else { continue }
-            let end = nl - buf.startIndex
-            for line in buf.prefix(end).split(separator: 10) { entries += TranscriptParser.entries(Data(line), codex: codex) }
-            offset += UInt64(end + 1)
-            buf = Data(buf.dropFirst(end + 1))
+        var more = true
+        while more {
+            // One pool per chunk: Foundation's read buffers and JSON graphs are autoreleased, and this whole parse is a
+            // single work item, so without it a big session holds about twice its size until the item ends.
+            autoreleasepool {
+                guard let chunk = try? h.read(upToCount: 8 << 20), !chunk.isEmpty else { more = false; return }
+                buf.append(chunk)
+                guard let nl = buf.lastIndex(of: 10) else { return }
+                let end = nl - buf.startIndex
+                for line in buf.prefix(end).split(separator: 10) { entries += TranscriptParser.entries(Data(line), codex: codex) }
+                offset += UInt64(end + 1)
+                buf.removeSubrange(buf.startIndex...nl)
+            }
         }
     }
 }
@@ -125,33 +137,60 @@ final class TranscriptIndex: @unchecked Sendable {
 /// Background side of transcript Find. A newer call supersedes older ones (their work is skipped or their result dropped).
 enum TranscriptSearch {
     private static let queue = DispatchQueue(label: "workbench.transcript", qos: .userInitiated)
-    nonisolated(unsafe) private static var indexes: [URL: TranscriptIndex] = [:]   // queue-confined
+    nonisolated(unsafe) private static var current: TranscriptIndex?   // queue-confined: the one parsed file kept
     private static let generation = Mutex(0)
+    private static let activity = Mutex(0)   // bumped by every use of the index; a release only fires if it is still the latest
+    /// How long the parsed file stays after Find closes, so closing and reopening it is instant.
+    static let keepAfterClose: TimeInterval = 60
 
     /// Supersedes any search in flight.
     static func cancel() { generation.withLock { $0 += 1 } }
 
-    /// The pane's transcript, if an agent runs there.
+    /// Find is done with the parsed transcript: drop it after `keepAfterClose`, unless Find is used again meanwhile.
+    static func release(after delay: TimeInterval = keepAfterClose) {
+        let mine = activity.withLock { $0 += 1; return $0 }
+        queue.asyncAfter(deadline: .now() + delay) {
+            if activity.withLock({ $0 }) == mine { current = nil }
+        }
+    }
+
+    private static func index(for url: URL) -> TranscriptIndex {
+        activity.withLock { $0 += 1 }
+        if let c = current, c.url == url { return c }
+        let index = TranscriptIndex(url)
+        current = index
+        return index
+    }
+
+    /// The pane's transcript, if an agent runs there. The parse starts right away, so it overlaps the typing that follows.
     static func locate(_ pane: PaneID, done: @escaping @Sendable @MainActor (URL?) -> Void) {
         queue.async {
             let url = Agents.transcript(for: pane)
             DispatchQueue.main.async { MainActor.assumeIsolated { done(url) } }
+            if let url { index(for: url).update() }
         }
     }
 
-    static func search(_ url: URL, _ query: String, done: @escaping @Sendable @MainActor (TranscriptResult) -> Void) {
+    private static func count(_ url: URL, _ query: String) -> Int {
+        let index = index(for: url)
+        if !query.isEmpty { index.update() }
+        return TranscriptParser.count(in: index.entries, query)
+    }
+
+    #if DEBUG
+    static func cachedURL() -> URL? { queue.sync { current?.url } }
+    static func countNow(_ url: URL, _ query: String) -> Int { queue.sync { count(url, query) } }
+    #endif
+
+    /// How many times `query` occurs in the transcript.
+    static func search(_ url: URL, _ query: String, done: @escaping @Sendable @MainActor (Int) -> Void) {
         let mine = generation.withLock { $0 += 1; return $0 }
         queue.async {
             guard generation.withLock({ $0 }) == mine else { return }
-            if indexes.count > 3 { indexes = indexes.filter { $0.key == url } }   // ponytail: keeps a few parsed files
-            let index = indexes[url] ?? TranscriptIndex(url)
-            indexes[url] = index
-            if !query.isEmpty { index.update() }
-            guard generation.withLock({ $0 }) == mine else { return }
-            let result = TranscriptResult(entries: index.entries, matches: TranscriptParser.matches(in: index.entries, query))
+            let total = count(url, query)
             DispatchQueue.main.async {
                 guard generation.withLock({ $0 }) == mine else { return }
-                MainActor.assumeIsolated { done(result) }
+                MainActor.assumeIsolated { done(total) }
             }
         }
     }
@@ -192,6 +231,7 @@ func transcriptSelfCheck() {
     let m = TranscriptParser.matches(in: claude, "O")
     assert(m.map(\.entry) == [0, 0, 1, 1, 2, 4] && m.map(\.range.location) == [4, 7, 0, 6, 1, 8], "\(m)")   // "wörld" matches "o"
     assert(TranscriptParser.matches(in: claude, "ÖUT B").map(\.entry) == [1] && TranscriptParser.matches(in: claude, "").isEmpty)
+    assert(TranscriptParser.count(in: claude, "O") == m.count && TranscriptParser.count(in: claude, "ÖUT B") == 1 && TranscriptParser.count(in: claude, "") == 0)
 
     // Incremental read: a half-written last line is left for the next update.
     let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".jsonl")
@@ -205,5 +245,57 @@ func transcriptSelfCheck() {
     try! h.seekToEnd(); try! h.write(contentsOf: Data((l2.dropFirst(20) + "\n").utf8)); try! h.close()
     index.update()
     assert(index.entries.map(\.text) == ["one", "two"])
+    transcriptCacheSelfCheck(url)
+    transcriptMemorySelfCheck()
+}
+
+/// The parsed file is kept across Find sessions for a while, then dropped; any use in between keeps it.
+private func transcriptCacheSelfCheck(_ url: URL) {
+    func count(_ q: String) -> Int { TranscriptSearch.countNow(url, q) }   // done is delivered on the main queue, which is blocked here
+    assert(count("o") == 2 && count("zzz") == 0 && count("T") == 1)
+    assert(TranscriptSearch.cachedURL() == url)
+    TranscriptSearch.release(after: 0.1)
+    Thread.sleep(forTimeInterval: 0.4)
+    assert(TranscriptSearch.cachedURL() == nil, "dropped after close")
+    assert(count("one") == 1 && TranscriptSearch.cachedURL() == url)   // reparsed on demand
+    TranscriptSearch.release(after: 0.3)
+    Thread.sleep(forTimeInterval: 0.1)
+    assert(count("two") == 1)   // Find reopened before the delay ran out
+    Thread.sleep(forTimeInterval: 0.5)
+    assert(TranscriptSearch.cachedURL() == url, "a release superseded by later use must not drop the index")
+    TranscriptSearch.release(after: 0.05)
+    Thread.sleep(forTimeInterval: 0.3)
+    assert(TranscriptSearch.cachedURL() == nil)
+}
+
+/// A big transcript parsed in one work item must not leave Foundation's per-chunk garbage (read buffers, JSON graphs)
+/// behind until the item ends: footprint after the parse stays near the size of the entries kept.
+private func transcriptMemorySelfCheck() {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".jsonl")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let text = String(repeating: "lorem ipsum dolor sit amet ", count: 150)   // ~4 KB of text per line
+    let line = #"{"type":"user","message":{"content":"\#(text)"}}"# + "\n"
+    let chunk = Data(String(repeating: line, count: 2000).utf8)   // ~8 MB
+    FileManager.default.createFile(atPath: url.path, contents: nil)
+    let h = try! FileHandle(forWritingTo: url)
+    for _ in 0..<12 { try! h.write(contentsOf: chunk) }
+    try! h.close()
+    func footprint() -> Int {
+        var info = task_vm_info_data_t()
+        var n = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+        _ = withUnsafeMutablePointer(to: &info) { $0.withMemoryRebound(to: integer_t.self, capacity: Int(n)) { task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &n) } }
+        return Int(info.phys_footprint)
+    }
+    nonisolated(unsafe) var grown = 0, kept = 0
+    // A fresh queue, like the real one: no pool is drained until the work item ends.
+    DispatchQueue(label: "selfcheck.transcript", qos: .userInitiated).sync {
+        let before = footprint()
+        let index = TranscriptIndex(url)
+        index.update()
+        grown = footprint() - before
+        kept = index.entries.reduce(0) { $0 + $1.text.utf8.count }
+        assert(index.entries.count == 24000)
+    }
+    assert(grown < kept * 3 / 2, "parse left \(grown >> 20) MB for \(kept >> 20) MB of entries")
 }
 #endif
