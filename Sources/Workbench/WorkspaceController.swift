@@ -1416,7 +1416,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         }
         if case .file(path) = leaf.kind { return focus ? self.focus(leaf.id) : () }
         mutatePane(leaf.id) { $0.kind = .file(path: path) }
-        destroy(leaf.id)   // the provider rebuilds the view for the new path
+        (views[leaf.id] as? FilePaneView)?.retarget(path: path)   // same view, so the tree skips its rebuild
         if focus { mutateActiveTab { $0.focused = leaf.id } }
         render(focus: focus)
     }

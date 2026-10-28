@@ -41,9 +41,12 @@ private struct Palette: Sendable {
 /// Colors `text` (already in `out` at `offset`) by its tree-sitter highlights; later, more specific captures win.
 private func highlight(_ out: NSMutableAttributedString, at offset: Int, _ text: String, key: String, _ p: Palette) {
     guard text.utf16.count <= 2 << 20, let spans = Syntax.highlights(text, key: key) else { return }   // ponytail: big files stay plain
+    var colors: [String: NSColor?] = [:]   // a file has thousands of spans but a few dozen distinct capture names
     for s in spans {
-        guard let c = p.color(capture: s.name), NSMaxRange(s.range) <= text.utf16.count else { continue }
-        out.addAttribute(.foregroundColor, value: c.ns, range: NSRange(location: offset + s.range.location, length: s.range.length))
+        let c: NSColor?
+        if let hit = colors[s.name] { c = hit } else { c = p.color(capture: s.name)?.ns; colors[s.name] = c }
+        guard let c, NSMaxRange(s.range) <= text.utf16.count else { continue }
+        out.addAttribute(.foregroundColor, value: c, range: NSRange(location: offset + s.range.location, length: s.range.length))
     }
 }
 
@@ -209,7 +212,7 @@ private final class FocusTextView: NSTextView {
 
 @MainActor final class FilePaneView: NSView, NSTextViewDelegate {
     let paneID: PaneID
-    private let path: String
+    private var path: String
     private var palette: Palette
     private let scrollView = NSScrollView()
     private let textView = FocusTextView(usingTextLayoutManager: true)
@@ -230,7 +233,8 @@ private final class FocusTextView: NSTextView {
     static let zoomRange: ClosedRange<CGFloat> = 0.5...3
     private let zoomBar = ZoomBar()
     private var scrollScale: CGFloat = 1   // the next render restores the scroll offset scaled by this (zoom changed)
-    private let renderQueue = DispatchQueue(label: "pane.file", qos: .userInitiated)   // one render in flight per pane
+    /// Shared by every pane: at most one render in flight, and a superseded pane (or one whose file was swapped under it) skips its read and parse.
+    private static let renderQueue = DispatchQueue(label: "pane.file", qos: .userInitiated)
 
     init(id: PaneID, path: String, theme: Theme, zoom: CGFloat = 1) {
         paneID = id
@@ -287,6 +291,20 @@ private final class FocusTextView: NSTextView {
         reload()
     }
 
+    /// Shows another file in this same view: scroll and selection start over, zoom stays, the watch moves to the new file.
+    func retarget(path newPath: String) {
+        guard newPath != path else { return }
+        path = newPath
+        pending?.cancel(); pending = nil
+        dirSource?.cancel(); dirSource = nil
+        fileSource?.cancel(); fileSource = nil
+        textView.selectedRanges = [NSValue(range: NSRange(location: 0, length: 0))]
+        scrollScale = 0   // the next render restores offset 0
+        reload()
+    }
+
+    var shownText: String { textView.string }
+
     func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
         if let url = link as? URL ?? (link as? String).flatMap(URL.init(string:)) { onOpenLink?(url) }
         return true
@@ -311,7 +329,7 @@ private final class FocusTextView: NSTextView {
         latest.value.store(generation, ordering: .relaxed)
         let gen = generation, path = path, palette = palette, latest = latest, zoom = zoom, scale = scrollScale
         scrollScale = 1
-        renderQueue.async { [weak self] in
+        Self.renderQueue.async { [weak self] in
             guard latest.value.load(ordering: .relaxed) == gen else { return }
             let text = Self.load(path)
             guard latest.value.load(ordering: .relaxed) == gen else { return }
@@ -323,8 +341,8 @@ private final class FocusTextView: NSTextView {
                     let clip = self.scrollView.contentView
                     let origin = NSPoint(x: clip.bounds.origin.x, y: clip.bounds.origin.y * scale)   // text height scales with zoom
                     let ranges = self.textView.selectedRanges
-                    self.textView.textStorage?.setAttributedString(result)
-                    let len = (self.textView.string as NSString).length
+                    Self.replace(self.textView.textStorage!, with: result)
+                    let len = result.length
                     self.textView.selectedRanges = ranges.map { v in
                         let r = v.rangeValue
                         let l = min(r.location, len)
@@ -339,6 +357,14 @@ private final class FocusTextView: NSTextView {
             }
         }
         rewatchFileIfNeeded()
+    }
+
+    /// Swapping a full storage for another is quadratic in attribute runs; emptying it first in the same edit is not (and does not flash).
+    static func replace(_ storage: NSTextStorage, with text: NSAttributedString) {
+        storage.beginEditing()
+        storage.setAttributedString(NSAttributedString())
+        storage.setAttributedString(text)
+        storage.endEditing()
     }
 
     /// Regular files only (a FIFO or device would block or never end), read once up to the preview cap.
@@ -381,11 +407,11 @@ private final class FocusTextView: NSTextView {
         }
     }
 
+    /// At most one reload per 100 ms: a file that is written continuously still refreshes while it is written.
     private func changed() {
-        guard !closed else { return }
-        pending?.cancel()
+        guard !closed, pending == nil else { return }
         let w = DispatchWorkItem { [weak self] in
-            MainActor.assumeIsolated { self?.reload() }
+            MainActor.assumeIsolated { self?.pending = nil; self?.reload() }
         }
         pending = w
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(100), execute: w)
@@ -471,4 +497,62 @@ private final class FocusTextView: NSTextView {
     assert(size(big, 0) == 2 * size(small, 0) && size(big, big.length - 2) == 2 * size(small, small.length - 2))   // heading and inline code scale
     pane.removeFromSuperview()
     pane.close()
+
+    // Spins the main run loop so renders and file events land, as in the app.
+    func spin(_ seconds: Double, until done: () -> Bool = { false }) {
+        let end = Date().addingTimeInterval(seconds)
+        while !done() && Date() < end { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+    }
+    let theme = Theme.all().first!
+    let one = dir.appendingPathComponent("\(UUID().uuidString).txt"), two = dir.appendingPathComponent("\(UUID().uuidString).txt")
+    try? "first file\n".write(to: one, atomically: true, encoding: .utf8)
+    try? "second file\n".write(to: two, atomically: true, encoding: .utf8)
+    defer { try? FileManager.default.removeItem(at: one); try? FileManager.default.removeItem(at: two) }
+    let live = FilePaneView(id: UUID(), path: one.path, theme: theme, zoom: 1.5)
+    let host = NSWindow(contentRect: NSRect(x: -10000, y: -10000, width: 300, height: 300), styleMask: [.titled], backing: .buffered, defer: true)
+    host.contentView?.addSubview(live)
+    spin(5) { live.shownText == "first file\n" }
+    assert(live.shownText == "first file\n")
+    // retarget: same view, new file, zoom kept, and the new file is the one watched
+    let g = live.generation
+    live.retarget(path: two.path)
+    assert(live.generation == g + 1 && live.zoom == 1.5)
+    spin(5) { live.shownText == "second file\n" }
+    assert(live.shownText == "second file\n")
+    try? "edited\n".write(to: two, atomically: false, encoding: .utf8)
+    spin(5) { live.shownText == "edited\n" }
+    assert(live.shownText == "edited\n")
+    try? "old file changed\n".write(to: one, atomically: false, encoding: .utf8)
+    spin(0.5)
+    assert(live.shownText == "edited\n")   // the old file is no longer watched
+    // throttle: a file written more often than the debounce delay still refreshes while the writer is going
+    let before = live.generation
+    let handle = try! FileHandle(forWritingTo: two)
+    for i in 0..<15 {
+        handle.write(Data("line \(i)\n".utf8))
+        spin(0.03)
+    }
+    assert(live.generation >= before + 2)
+    try? handle.close()
+    spin(5) { live.shownText.hasSuffix("line 14\n") }
+    assert(live.shownText.hasSuffix("line 14\n"))
+    live.close()
+    host.contentView?.subviews.forEach { $0.removeFromSuperview() }
+
+    // highlight colors are memoized per capture name: keywords still get the palette's keyword color, plain text the body color
+    let swift = Renderer(text: "let a = 1\nlet b = 2\n", path: "x.swift", palette: Palette(theme), zoom: 1).render()
+    let colorAt = { (i: Int) in swift.attribute(.foregroundColor, at: i, effectiveRange: nil) as! NSColor }
+    assert(colorAt(0) == colorAt(10) && colorAt(0) != colorAt(4))   // both `let`s alike, and unlike the identifier
+
+    // replacing a full, many-run storage must not be quadratic in its size
+    let runs = NSMutableAttributedString(string: String(repeating: "let value = 42\n", count: 12_000))
+    for i in stride(from: 0, to: runs.length - 4, by: 7) {
+        runs.addAttribute(.foregroundColor, value: i % 2 == 0 ? NSColor.red : NSColor.blue, range: NSRange(location: i, length: 4))
+    }
+    let tv = NSTextView(usingTextLayoutManager: true)
+    FilePaneView.replace(tv.textStorage!, with: runs)
+    let t0 = Date()
+    FilePaneView.replace(tv.textStorage!, with: runs)
+    assert(Date().timeIntervalSince(t0) < 0.25, "re-setting a highlighted document took \(Date().timeIntervalSince(t0)) s")
+    assert(tv.string.utf16.count == runs.length)
 }
