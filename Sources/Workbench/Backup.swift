@@ -76,14 +76,19 @@ struct Backup: Codable, Sendable {
         return data
     }
 
-    /// What git sync writes: the setup without what changes as you work (selection, focus, terminal titles, export time), so a commit means the setup itself changed.
+    /// What git sync writes: the setup without what changes as you work (selection, focus, terminal titles, export time, which panels are open), so a commit means the setup itself changed.
     var forSync: Backup {
         var b = self
         b.exported = Date(timeIntervalSince1970: 0)
         b.layout.activeProject = b.layout.projects.isEmpty ? -1 : 0
         b.layout.activeWorkspace = nil
+        b.layout.sidebarVisible = true
+        b.layout.showHidden = nil
+        b.layout.showClutterFiles = nil
         for p in b.layout.projects.indices {
             b.layout.projects[p].activeTab = 0
+            b.layout.projects[p].inspectorOpen = nil
+            b.layout.projects[p].inspectorTab = nil
             for t in b.layout.projects[p].tabs.indices {
                 b.layout.projects[p].tabs[t].focused = nil
                 b.layout.projects[p].tabs[t].title = ""
@@ -399,5 +404,13 @@ struct Backup: Codable, Sendable {
     var bf = b
     bf.layout.projects[0].tabs[0].focused = leafA.id
     assert((try! bf.forSync.encoded()) == (try! { var x = bf; x.layout.projects[0].tabs[0].focused = leafB.id; x.layout.activeProject = 0; return x }().forSync.encoded()))
+    var views = b   // toggling the sidebar, the inspector or the Files filter is not a change to the setup
+    views.layout.sidebarVisible = false
+    views.layout.showHidden = true
+    views.layout.showClutterFiles = true
+    views.layout.projects[0].inspectorOpen = true
+    views.layout.projects[0].inspectorTab = 1
+    assert((try! views.forSync.encoded()) == (try! b.forSync.encoded()))
+    assert((try! views.encoded()) != (try! b.encoded()))   // Settings Export keeps them
 }
 #endif
