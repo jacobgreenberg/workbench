@@ -164,11 +164,27 @@ final class Session: @unchecked Sendable {
         src.resume()
     }
 
-    private func send(_ type: UInt8, _ payload: [UInt8]) {
+    /// Largest 'i' payload per frame: the host drops a client that sends more than 1 MiB in one, and Ghostty hands a
+    /// whole paste to `write` at once. The pty sees the same byte stream either way.
+    static let maxInput = 64 << 10
+
+    static func frame(_ type: UInt8, _ payload: ArraySlice<UInt8>) -> [UInt8] {
         var buf: [UInt8] = [type]
         withUnsafeBytes(of: UInt32(payload.count).littleEndian) { buf += $0 }
         buf += payload
-        let frame = buf
+        return buf
+    }
+
+    static func inputFrames(_ bytes: UnsafeRawBufferPointer, limit: Int = maxInput) -> [[UInt8]] {
+        let all = [UInt8](bytes)
+        return stride(from: 0, to: all.count, by: limit).map {
+            frame(UInt8(ascii: "i"), all[$0..<min($0 + limit, all.count)])
+        }
+    }
+
+    private func send(_ type: UInt8, _ payload: [UInt8]) { enqueue(Session.frame(type, payload[...])) }
+
+    private func enqueue(_ frame: [UInt8]) {
         writeQ.async { [self] in
             guard !closed else { return }
             var off = 0
@@ -183,7 +199,7 @@ final class Session: @unchecked Sendable {
 
     func write(_ bytes: UnsafeRawBufferPointer) {
         guard !bytes.isEmpty, !replaying.load(ordering: .acquiring) else { return }   // replies to queries in replayed history
-        send(UInt8(ascii: "i"), [UInt8](bytes))
+        for f in Session.inputFrames(bytes) { enqueue(f) }
     }
 
     func resize(cols: UInt16, rows: UInt16, width: UInt16, height: UInt16) {
@@ -295,3 +311,22 @@ final class Session: @unchecked Sendable {
         return (["/usr/bin/login", hush ? "-qflp" : "-flp", NSUserName(), "/bin/bash", "--noprofile", "--norc", "-c", "exec -l " + Runtime.shellEscape(shell)], env)
     }
 }
+
+#if DEBUG
+func sessionSelfCheck() {
+    func payloads(_ frames: [[UInt8]]) -> [UInt8] { frames.flatMap { $0.dropFirst(5) } }
+    func lengths(_ frames: [[UInt8]]) -> [Int] {
+        frames.map { Int($0[1]) | Int($0[2]) << 8 | Int($0[3]) << 16 | Int($0[4]) << 24 }
+    }
+    let big = (0..<150_000).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ 7) }
+    let frames = big.withUnsafeBytes { Session.inputFrames($0) }
+    assert(frames.count == 3 && frames.allSatisfy { $0[0] == UInt8(ascii: "i") }, "paste split into 64 KiB 'i' frames")
+    assert(lengths(frames) == [Session.maxInput, Session.maxInput, 150_000 - 2 * Session.maxInput], "frame lengths")
+    assert(payloads(frames) == big, "split keeps every byte in order")
+    assert(frames.allSatisfy { $0.count == 5 + lengths([$0])[0] }, "length prefix matches payload")
+    let exact = [UInt8](repeating: 1, count: Session.maxInput)
+    assert(exact.withUnsafeBytes { Session.inputFrames($0).count } == 1, "exactly one frame's worth stays whole")
+    assert([UInt8]().withUnsafeBytes { Session.inputFrames($0).isEmpty }, "empty input sends nothing")
+    assert(Session.frame(UInt8(ascii: "k"), []) == [UInt8(ascii: "k"), 0, 0, 0, 0], "kill frame")
+}
+#endif

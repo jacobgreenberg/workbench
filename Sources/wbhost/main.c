@@ -8,8 +8,9 @@
 // host -> app: 12-byte header (replay length UInt64 LE, pty cols and rows UInt16 LE), the replay, then raw output.
 //   EOF = the session is over.
 // app -> host frames: type byte, payload length UInt32 LE, payload:
-//   'i' input for the shell (<= 1 MiB), 'w' 8 bytes cols/rows/xpixel/ypixel UInt16 LE, 'k' (empty) end the session.
-//   Anything else drops that client; the session keeps running.
+//   'i' input for the shell (<= 1 MiB; the app sends <= 64 KiB), 'w' 8 bytes cols/rows/xpixel/ypixel UInt16 LE, 'k'
+//   (empty) end the session. Anything else drops that client; the session keeps running.
+//   Input the shell has not read yet is queued; past 1 MiB the host stops reading the client until it falls below 256 KiB.
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -31,7 +32,9 @@
 
 #define RING_CAP (1u << 20)   // ponytail: bounds how much a reattach can restore; raise if scrollback loss matters
 #define MAX_FRAME (1u << 20)
-#define MAX_PENDING (4u << 20)
+#define MAX_PENDING (4u << 20)   // sanity bound: backpressure keeps the queue near PEND_HIGH
+#define PEND_HIGH (1u << 20)
+#define PEND_LOW (256u << 10)
 #define OSC_MAX 512
 #define OBUF_MAX 4096
 #define PRE_MAX 2048
@@ -259,7 +262,7 @@ static unsigned char *build_replay(const struct ring *r, size_t *outlen) {
 // ---- Host ----
 
 static struct ring ring;
-static int kq = -1, master = -1, listener = -1, client = -1, master_live = 1, wr_armed, need_winch;
+static int kq = -1, master = -1, listener = -1, client = -1, master_live = 1, wr_armed, need_winch, rd_paused;
 static pid_t child;
 static const char *sock_path;
 static ino_t listen_ino;
@@ -294,7 +297,7 @@ static int grow(unsigned char **b, size_t *cap, size_t need) {
 
 static void drop_client(void) {
     if (client >= 0) close(client);   // closing removes its kqueue filter
-    client = -1; flen = 0;
+    client = -1; flen = 0; rd_paused = 0;
 }
 
 static void cleanup(void) {
@@ -330,6 +333,7 @@ static void flush_pending(void) {
         poff = plen;   // pty gone: discard
     }
     if (poff >= plen) poff = plen = 0;
+    if (rd_paused && client >= 0 && plen - poff < PEND_LOW) { ev((uintptr_t)client, EVFILT_READ, EV_ENABLE, 0); rd_paused = 0; }
     int want = poff < plen;
     if (want != wr_armed && master_live) {
         ev((uintptr_t)master, EVFILT_WRITE, want ? EV_ADD : EV_DELETE, 0);
@@ -364,6 +368,7 @@ static void on_frame(unsigned char type, const unsigned char *p, uint32_t n) {
         if (grow(&pend, &pcap, plen + n) < 0) { drop_client(); return; }
         memcpy(pend + plen, p, n); plen += n;
         flush_pending();
+        if (client >= 0 && !rd_paused && plen - poff > PEND_HIGH) { ev((uintptr_t)client, EVFILT_READ, EV_DISABLE, 0); rd_paused = 1; }
     } else if (type == 'w') {
         struct winsize ws = {.ws_col = (unsigned short)(p[0] | p[1] << 8), .ws_row = (unsigned short)(p[2] | p[3] << 8),
                              .ws_xpixel = (unsigned short)(p[4] | p[5] << 8), .ws_ypixel = (unsigned short)(p[6] | p[7] << 8)};
