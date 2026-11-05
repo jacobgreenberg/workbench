@@ -24,7 +24,7 @@ mkdir -p "$STAGE/Contents/Helpers"; ln -s ../MacOS/Workbench "$STAGE/Contents/He
 cp .build/$CONFIG/wbhost "$STAGE/Contents/Helpers/WorkbenchHost"
 cp Resources/Info.plist "$STAGE/Contents/Info.plist"
 cp -R Resources/themes "$STAGE/Contents/Resources/themes"
-cp -R Resources/fileicons "$STAGE/Contents/Resources/fileicons"
+cp -R Resources/speech "$STAGE/Contents/Resources/speech"   # Read Aloud's voice helper (Speaker.swift)
 cp Resources/claude-hooks.json Resources/AppIcon.icns "$STAGE/Contents/Resources/"
 cp -R "$TI" "$STAGE/Contents/Resources/terminfo"
 cp -R "$SI" "$STAGE/Contents/Resources/ghostty/shell-integration"

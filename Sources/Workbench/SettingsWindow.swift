@@ -20,6 +20,10 @@ final class SettingsWindowController: NSWindowController {
         linksItem.label = "Links"
         linksItem.image = NSImage(systemSymbolName: "link", accessibilityDescription: "Links")
         tabs.addTabViewItem(linksItem)
+        let voiceItem = NSTabViewItem(viewController: ReadAloudViewController(workspace: workspace))
+        voiceItem.label = "Read Aloud"
+        voiceItem.image = NSImage(systemSymbolName: "speaker.wave.2", accessibilityDescription: "Read Aloud")
+        tabs.addTabViewItem(voiceItem)
         let window = NSWindow(contentViewController: tabs)
         window.styleMask = [.titled, .closable]
         window.title = "Settings"
@@ -325,6 +329,69 @@ private final class LinksViewController: NSViewController {
         projectsField.stringValue = projects.joined(separator: ", ")
         statusLabel.stringValue = projects.isEmpty || browse.isEmpty ? "Saved. Ticket links are off." : "Saved. \(projects.count) project keys."
     }
+}
+
+/// Settings > Read Aloud: tone (pitch) and pace of Siri Voice 6, plus a preview.
+/// Siri's own Expressivity slider has no API, so it is not here.
+@MainActor
+private final class ReadAloudViewController: NSViewController {
+    private unowned let workspace: WorkspaceController
+    private let toneSlider = NSSlider(value: 1, minValue: 0.87, maxValue: 1.13, target: nil, action: nil)
+    private let pacePopup = NSPopUpButton()
+    private static let paces: [Double] = [1, 1.25, 1.5, 1.75, 2]   // the header speed button's steps
+
+    init(workspace: WorkspaceController) {
+        self.workspace = workspace
+        super.init(nibName: nil, bundle: nil)
+        title = "Read Aloud"
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override func loadView() {
+        let layout = workspace.store.layout
+        toneSlider.doubleValue = layout.readAloudPitch ?? 1
+        toneSlider.numberOfTickMarks = 5
+        toneSlider.isContinuous = true   // live: drag while Preview plays
+        toneSlider.target = self; toneSlider.action = #selector(tone(_:))
+        toneSlider.setAccessibilityLabel("Tone")
+        toneSlider.widthAnchor.constraint(equalToConstant: 300).isActive = true
+        for p in Self.paces { pacePopup.addItem(withTitle: String(format: "%g×", p)) }
+        pacePopup.selectItem(at: Self.paces.firstIndex(of: layout.readAloudSpeed ?? 1) ?? 0)
+        pacePopup.target = self; pacePopup.action = #selector(pace(_:))
+        func row(_ label: String, _ control: NSView, _ trailing: NSView? = nil) -> NSStackView {
+            let l = NSTextField(labelWithString: label)
+            l.alignment = .right
+            l.widthAnchor.constraint(equalToConstant: 60).isActive = true
+            let r = NSStackView(views: [l, control] + (trailing.map { [$0] } ?? []))
+            r.spacing = 8
+            return r
+        }
+        func caption(_ text: String) -> NSTextField {
+            let c = NSTextField(labelWithString: text)
+            c.font = .systemFont(ofSize: 11); c.textColor = .secondaryLabelColor
+            return c
+        }
+        let preview = NSButton(title: "Preview", target: self, action: #selector(preview(_:)))
+        let stack = NSStackView(views: [
+            settingsHeader("Read Aloud", "The speaker button in a pane's header (or ⌥⌘S) reads the agent's latest reply, or the question it is asking."),
+            row("Tone", toneSlider, caption("lower · higher")),
+            row("Pace", pacePopup, caption("also the speed button in each pane header")),
+            preview,
+        ])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 12
+        stack.edgeInsets = NSEdgeInsets(top: 20, left: 24, bottom: 20, right: 24)
+        view = stack
+        stack.widthAnchor.constraint(equalToConstant: 560).isActive = true
+    }
+
+    @objc private func tone(_ sender: Any?) {
+        workspace.applyReadAloudTone((toneSlider.doubleValue * 100).rounded() / 100)
+    }
+    @objc private func pace(_ sender: Any?) { workspace.applyReadAloudSpeed(Self.paces[pacePopup.indexOfSelectedItem]) }
+    @objc private func preview(_ sender: Any?) { workspace.previewReadAloud() }
 }
 
 /// Settings > Backup: export / import the whole setup as JSON, and optional git sync of it.

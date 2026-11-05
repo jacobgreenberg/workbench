@@ -184,6 +184,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         settings?.showWindow(nil)
         settings?.window?.makeKeyAndOrderFront(nil)
     }
+    #if DEBUG
+    /// Test harness: Settings opened at the pane labelled `tab`; its window number, for a window-only screenshot.
+    func openSettings(tab: String) -> Int {
+        openSettings(nil)
+        let tabs = settings?.window?.contentViewController as? NSTabViewController
+        if let i = tabs?.tabViewItems.firstIndex(where: { $0.label == tab }) { tabs?.selectedTabViewItemIndex = i }
+        return settings?.window?.windowNumber ?? 0
+    }
+    #endif
 
     /// Dark / Light, then the custom themes; the current one checked.
     @objc private func rebuildThemeMenu() {
@@ -199,6 +208,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 themeMenu.addItem(t)
             }
         }
+    }
+
+    /// 1× to 2×; each item's tag is its speed in percent.
+    private func readAloudSpeedMenu() -> NSMenu {
+        let m = NSMenu(title: "Read Aloud Speed")
+        for pct in [100, 125, 150, 175, 200] {
+            let i = NSMenuItem(title: String(format: "%g×", Double(pct) / 100), action: #selector(WorkspaceController.setReadAloudSpeed(_:)), keyEquivalent: "")
+            i.tag = pct   // checked by WorkspaceController.validateMenuItem
+            m.addItem(i)
+        }
+        return m
     }
 
     private func arrow(_ c: Int) -> String { String(Character(UnicodeScalar(c)!)) }
@@ -240,10 +260,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             item("Find Next", #selector(w.findNext(_:)), "g"),
             item("Find Previous", #selector(w.findPrevious(_:)), "g", [.command, .shift]),
             item("Clear", #selector(w.clearScreen(_:)), "k"),
+            .separator(),
+            item("Read Aloud", #selector(w.readAloud(_:)), "s", [.command, .option]),
+            { let t = NSMenuItem(title: "Read Aloud Speed", action: nil, keyEquivalent: ""); t.submenu = readAloudSpeedMenu(); return t }(),
         ]))
         main.addItem(menu("View", [
             item("Toggle Sidebar", #selector(w.toggleProjectSidebar(_:)), "b"),
-            item("Toggle TODO & Files", #selector(w.toggleInspectorPanel(_:)), "b", [.command, .option]),
             item("Equalize Splits", #selector(w.equalizeSplits(_:)), "0", [.command, .shift]),
             .separator(),
             item("Bigger", #selector(w.increaseFontSize(_:)), "="),

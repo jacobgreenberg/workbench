@@ -14,6 +14,9 @@ final class HandButton: NSButton {
         }
     }
     override func cursorUpdate(with event: NSEvent) { NSCursor.pointingHand.set() }
+    /// Acts on the click that activates the window too (pane header controls, like the header itself).
+    var firstMouse = false
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { firstMouse }
 
     /// A round Liquid Glass icon button (new tab, add project).
     static func glass(_ symbol: String, _ label: String, _ size: NSControl.ControlSize = .regular) -> HandButton {

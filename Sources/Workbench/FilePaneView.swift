@@ -229,6 +229,7 @@ private final class FocusTextView: NSTextView {
     var onOpenLink: ((URL) -> Void)?
     var onFocus: ((PaneID) -> Void)?
     var onZoom: ((CGFloat) -> Void)?   // the user changed this pane's zoom
+    var onReadAloud: ((String) -> Void)?   // right-click > Read Aloud Selection
     private(set) var zoom: CGFloat
     static let zoomRange: ClosedRange<CGFloat> = 0.5...3
     private let zoomBar = ZoomBar()
@@ -307,6 +308,21 @@ private final class FocusTextView: NSTextView {
     }
 
     var shownText: String { textView.string }
+
+    /// Adds Read Aloud Selection on top of the text view's menu while text is selected.
+    func textView(_ view: NSTextView, menu: NSMenu, for event: NSEvent, at charIndex: Int) -> NSMenu? {
+        let r = view.selectedRange()
+        guard r.length > 0, onReadAloud != nil else { return menu }
+        let text = (view.string as NSString).substring(with: r)
+        let item = NSMenuItem(title: "Read Aloud Selection", action: #selector(readSelection(_:)), keyEquivalent: "")
+        item.image = NSImage(systemSymbolName: "speaker.wave.2", accessibilityDescription: nil)
+        item.target = self
+        item.representedObject = text
+        menu.insertItem(item, at: 0)
+        menu.insertItem(.separator(), at: 1)
+        return menu
+    }
+    @objc private func readSelection(_ sender: NSMenuItem) { (sender.representedObject as? String).map { onReadAloud?($0) } }
 
     func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
         if let url = link as? URL ?? (link as? String).flatMap(URL.init(string:)) { onOpenLink?(url) }
@@ -508,6 +524,20 @@ private final class FocusTextView: NSTextView {
     let big = Renderer(text: "# T\n\nbody `c`", path: "a.md", palette: Palette(Theme.all().first!), zoom: 2).render()
     let size = { (s: NSAttributedString, i: Int) in (s.attribute(.font, at: i, effectiveRange: nil) as! NSFont).pointSize }
     assert(size(big, 0) == 2 * size(small, 0) && size(big, big.length - 2) == 2 * size(small, small.length - 2))   // heading and inline code scale
+    // Right-click with a selection offers Read Aloud Selection, which hands over exactly the selected text.
+    let sel = pane.scrollView.documentView as! NSTextView
+    let click = NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0,
+                                   context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+    var heard: String?
+    pane.onReadAloud = { heard = $0 }
+    sel.string = "let a = 1"   // the render lands asynchronously
+    sel.setSelectedRange(NSRange(location: 0, length: 0))
+    assert(pane.textView(sel, menu: NSMenu(), for: click, at: 0)?.items.isEmpty == true)   // nothing selected: no item
+    sel.setSelectedRange(NSRange(location: 4, length: 1))
+    let m = pane.textView(sel, menu: NSMenu(), for: click, at: 0)!
+    assert(m.items.first?.title == "Read Aloud Selection")
+    NSApp.sendAction(m.items[0].action!, to: m.items[0].target, from: m.items[0])
+    assert(heard == "a", "\(heard ?? "nil")")
     pane.removeFromSuperview()
     pane.close()
 

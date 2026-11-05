@@ -18,8 +18,16 @@ private final class DividerSplitView: NSSplitView {
     let dot = NSView()
     let pill = NSGlassEffectView()
     private let row = NSStackView()
+    /// Read Aloud for this pane and the shared speed, in a second capsule right of the pill (terminal panes only).
+    let controls = NSGlassEffectView()
+    let speakButton = HandButton(title: "", target: nil, action: nil)
+    let speedButton = HandButton(title: "1×", target: nil, action: nil)
+    private let controlRow = NSStackView()
+    var speakSymbol = ""
     var onClick: (() -> Void)?
     var onDrag: ((NSPoint, _ done: Bool) -> Void)?   // window point; done = mouse released
+    var onSpeak: (() -> Void)?
+    var onSpeed: (() -> Void)?
 
     init(id: PaneID) {
         self.id = id
@@ -48,25 +56,101 @@ private final class DividerSplitView: NSSplitView {
         pill.contentView = inner
         pill.cornerRadius = Self.pillHeight / 2
         addSubview(pill)
+
+        for b in [speakButton, speedButton] {
+            b.isBordered = false
+            b.refusesFirstResponder = true
+            b.target = self
+            b.firstMouse = true
+        }
+        speakButton.action = #selector(speak)
+        speakButton.imagePosition = .imageOnly
+        speakButton.toolTip = "Read Aloud (⌥⌘S)"
+        speedButton.action = #selector(speed)
+        speedButton.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        speedButton.toolTip = "Read Aloud speed"
+        controlRow.spacing = 4
+        controlRow.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 8)
+        controlRow.setViews([speakButton, speedButton], in: .leading)
+        controlRow.translatesAutoresizingMaskIntoConstraints = false
+        let controlInner = NSView()
+        controlInner.addSubview(controlRow)
+        NSLayoutConstraint.activate([
+            controlRow.leadingAnchor.constraint(equalTo: controlInner.leadingAnchor),
+            controlRow.trailingAnchor.constraint(equalTo: controlInner.trailingAnchor),
+            controlRow.centerYAnchor.constraint(equalTo: controlInner.centerYAnchor),
+        ])
+        controls.contentView = controlInner
+        controls.cornerRadius = Self.pillHeight / 2
+        addSubview(controls)
     }
+
+    @objc private func speak() { onSpeak?() }
+    @objc private func speed() { onSpeed?() }
 
     required init?(coder: NSCoder) { fatalError() }
 
     /// The pill hugs its content, up to the strip width minus the insets.
     override func layout() {
         super.layout()
-        let w = min(row.fittingSize.width, max(0, bounds.width - 2 * Self.inset))
-        pill.frame = NSRect(x: Self.inset, y: (bounds.height - Self.pillHeight) / 2, width: w, height: Self.pillHeight)
+        let y = (bounds.height - Self.pillHeight) / 2, gap: CGFloat = 6
+        let cw = controls.isHidden ? 0 : controlRow.fittingSize.width
+        let w = min(row.fittingSize.width, max(0, bounds.width - 2 * Self.inset - (cw > 0 ? cw + gap : 0)))
+        pill.frame = NSRect(x: Self.inset, y: y, width: w, height: Self.pillHeight)
+        controls.frame = NSRect(x: pill.frame.maxX + gap, y: y, width: cw, height: Self.pillHeight)
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override var mouseDownCanMoveWindow: Bool { false }
-    override func hitTest(_ point: NSPoint) -> NSView? { super.hitTest(point) == nil ? nil : self }
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let v = super.hitTest(point) else { return nil }
+        return v is NSButton ? v : self   // the strip and pill drag; the Read Aloud buttons click
+    }
     override func resetCursorRects() { addCursorRect(bounds, cursor: .openHand) }
 
     override func mouseDown(with event: NSEvent) {
         onClick?()
         trackDrag(from: event, in: window) { [weak self] p, done in self?.onDrag?(p, done) }
+    }
+}
+
+/// The dragged pane's title, lifted off its header: a glass capsule with a shadow, following the pointer.
+@MainActor private final class DragGhost: NSView {
+    private let glass = NSGlassEffectView()
+
+    init(title: String, frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.shadowColor = NSColor.black.cgColor
+        layer?.shadowOffset = CGSize(width: 0, height: -6)
+        layer?.shadowRadius = 14
+        let label = NSTextField(labelWithString: title)
+        label.font = .systemFont(ofSize: 11.5, weight: .medium)
+        label.lineBreakMode = .byTruncatingTail
+        label.translatesAutoresizingMaskIntoConstraints = false
+        let inner = NSView()
+        inner.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: inner.leadingAnchor, constant: 12),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: inner.trailingAnchor, constant: -12),
+            label.centerYAnchor.constraint(equalTo: inner.centerYAnchor),
+        ])
+        glass.contentView = inner
+        glass.cornerRadius = frame.height / 2
+        glass.frame = bounds
+        glass.autoresizingMask = [.width, .height]
+        addSubview(glass)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// Lifted: a deep shadow; landed: none (call inside an animation group to ease it).
+    func lift(_ up: Bool) {
+        let a = CABasicAnimation(keyPath: "shadowOpacity")
+        a.fromValue = layer?.presentation()?.shadowOpacity ?? layer?.shadowOpacity
+        a.duration = NSAnimationContext.current.duration
+        layer?.add(a, forKey: "lift")
+        layer?.shadowOpacity = up ? 0.35 : 0
     }
 }
 
@@ -115,8 +199,12 @@ extension SplitNode {
     var onRatiosChanged: ((SplitNode) -> Void)?
     var onMove: ((PaneID, PaneID, FocusDirection) -> Void)?   // pane dragged by its header onto a side of another
     var onHeaderClick: ((PaneID) -> Void)?
+    var onSpeak: ((PaneID) -> Void)?   // a header's speaker button
+    var onSpeed: (() -> Void)?         // a header's speed button (one speed for all panes)
     private var headers: [PaneID: PaneHeader] = [:]
     private let dropIndicator = NSView()
+    private var dragGhost: DragGhost?
+    private var dragGrab = NSPoint.zero   // pointer offset inside the ghost
     private let provider: (PaneSpec) -> NSView
     private var root: SplitNode?
     private var paths: [ObjectIdentifier: [Bool]] = [:]
@@ -186,9 +274,10 @@ extension SplitNode {
             v.translatesAutoresizingMaskIntoConstraints = true
             v.autoresizingMask = [.width, .height]
             leafViews[spec.id] = v
-            guard case .split = root else { return v }   // a lone pane has nothing to be dragged beside: no header
-            let header = PaneHeader(id: spec.id)
+            let header = PaneHeader(id: spec.id)   // a lone pane too: it holds the Read Aloud controls
             header.onClick = { [unowned self] in onHeaderClick?(spec.id) }
+            header.onSpeak = { [unowned self] in onSpeak?(spec.id) }
+            header.onSpeed = { [unowned self] in onSpeed?() }
             header.onDrag = { [unowned self] point, done in drag(spec.id, to: point, done: done) }
             headers[spec.id] = header
             return PaneFrame(header: header, content: v)
@@ -272,9 +361,30 @@ extension SplitNode {
     }
 
     /// Header titles, status dots and colours; cheap to call on every title change (only differences are applied).
-    func updateHeaders(focused: PaneID?, theme: Theme, status: (PaneID) -> PaneStatus, title: (PaneID) -> String) {
+    #if DEBUG
+    /// Test harness: a header button's centre in window coordinates (speed button, else speaker); nil = no such header.
+    func headerButtonCenter(_ id: PaneID, speed: Bool) -> NSPoint? {
+        guard let h = headers[id], !h.controls.isHidden else { return nil }
+        let b = speed ? h.speedButton : h.speakButton
+        return b.convert(NSPoint(x: b.bounds.midX, y: b.bounds.midY), to: nil)
+    }
+    #endif
+
+    /// `speech`: the speaker button's symbol, nil = no Read Aloud controls (file panes); `speed`: the speed button's title.
+    func updateHeaders(focused: PaneID?, theme: Theme, status: (PaneID) -> PaneStatus, speech: (PaneID) -> String?, speed: String,
+                       title: (PaneID) -> String) {
         for (id, h) in headers {
             let t = title(id), isFocused = id == focused
+            let symbol = speech(id)
+            if h.controls.isHidden != (symbol == nil) { h.controls.isHidden = symbol == nil; h.needsLayout = true }
+            if let symbol, h.speakSymbol != symbol {
+                h.speakSymbol = symbol
+                h.speakButton.image = NSImage(systemSymbolName: symbol, accessibilityDescription: symbol == "speaker.wave.2" ? "Read Aloud" : "Stop Reading")?
+                    .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+            }
+            if h.speedButton.title != speed { h.speedButton.title = speed; h.needsLayout = true }
+            h.controls.alphaValue = isFocused ? 1 : 0.8
+            for b in [h.speakButton, h.speedButton] { b.contentTintColor = isFocused ? .labelColor : .secondaryLabelColor }
             if h.label.stringValue != t { h.label.stringValue = t; h.needsLayout = true }
             if h.dot.isHidden != (status(id) == .idle) { h.needsLayout = true }
             styleStatusDot(h.dot, status(id), theme: theme)
@@ -287,22 +397,101 @@ extension SplitNode {
             h.layer?.backgroundColor = theme.color("background").cgColor
         }
         dropIndicator.wantsLayer = true
-        dropIndicator.layer?.backgroundColor = theme.color("primary").withAlphaComponent(0.2).cgColor
-        dropIndicator.layer?.borderColor = theme.color("primary").cgColor
-        dropIndicator.layer?.borderWidth = 1
+        dropIndicator.layer?.cornerRadius = 10
+        dropIndicator.layer?.cornerCurve = .continuous
+        dropIndicator.layer?.backgroundColor = theme.color("primary").withAlphaComponent(0.16).cgColor
+        dropIndicator.layer?.borderColor = theme.color("primary").withAlphaComponent(0.9).cgColor
+        dropIndicator.layer?.borderWidth = 1.5
     }
 
-    /// Header drag in progress (window point): shows where the pane would land; on release, moves it there.
+    /// Header drag in progress (window point): the pane's title lifts off as a glass capsule that follows the pointer, the
+    /// pane dims, and the half it would take glides between targets; on release it moves there and the capsule flies to the
+    /// pane's new header (or back home when dropped nowhere). All transient: render() may rebuild underneath, so the
+    /// overlays are re-added on top each step.
     private func drag(_ id: PaneID, to point: NSPoint, done: Bool) {
-        let target = dropTarget(at: convert(point, from: nil), excluding: id)
-        if done {
-            dropIndicator.removeFromSuperview()
-            if let target { onMove?(id, target.pane, target.edge) }
-        } else if let target {
-            if dropIndicator.superview == nil { addSubview(dropIndicator) }
-            dropIndicator.frame = target.area
+        let p = convert(point, from: nil)
+        let target = dropTarget(at: p, excluding: id)
+        if dragGhost == nil, let h = headers[id] {
+            let pill = convert(h.pill.frame, from: h)
+            let ghost = DragGhost(title: h.label.stringValue, frame: pill)
+            dragGhost = ghost
+            dragGrab = NSPoint(x: p.x - pill.minX, y: p.y - pill.minY)
+            addSubview(ghost)
+            animate(0.18) { ghost.lift(true) }
+        }
+        let source = headers[id]?.superview
+        if let ghost = dragGhost {
+            if ghost.superview !== self { addSubview(ghost) }   // stay on top of the indicator and of any rebuild
+            ghost.setFrameOrigin(NSPoint(x: p.x - dragGrab.x, y: p.y - dragGrab.y))
+        }
+        if !done {
+            if source?.alphaValue == 1 { animate(0.18) { source?.animator().alphaValue = 0.45 } }
+            showIndicator(target)
+            return
+        }
+        let ghost = dragGhost
+        dragGhost = nil
+        if let target {
+            onMove?(id, target.pane, target.edge)   // re-renders synchronously: the views are rebuilt
+            let moved = headers[id]?.superview
+            moved?.alphaValue = 0.45
+            if let ghost, ghost.superview !== self { addSubview(ghost) }
+            if dropIndicator.superview !== self { addSubview(dropIndicator, positioned: .below, relativeTo: ghost) }
+            let home = headers[id].map { convert($0.pill.frame, from: $0) }
+            let landed = moved.map { convert($0.bounds, from: $0) }
+            animate(0.32) {
+                moved?.animator().alphaValue = 1
+                if let landed { dropIndicator.animator().frame = landed.insetBy(dx: 2, dy: 2) }
+                dropIndicator.animator().alphaValue = 0
+                if let home { ghost?.animator().frame = home }
+                ghost?.lift(false)
+                ghost?.animator().alphaValue = 0
+            } done: { [weak self, weak ghost] in
+                ghost?.removeFromSuperview()
+                if let self, dropIndicator.alphaValue == 0 { dropIndicator.removeFromSuperview() }
+            }
         } else {
-            dropIndicator.removeFromSuperview()
+            showIndicator(nil)
+            let home = headers[id].map { convert($0.pill.frame, from: $0) }
+            animate(0.28) {
+                source?.animator().alphaValue = 1
+                if let home { ghost?.animator().frame = home }
+                ghost?.lift(false)
+                ghost?.animator().alphaValue = 0
+            } done: { [weak ghost] in ghost?.removeFromSuperview() }
+        }
+    }
+
+    /// Glides the drop highlight to `target`'s half, growing out of the whole pane when it first appears; fades it when nil.
+    private func showIndicator(_ target: (pane: PaneID, edge: FocusDirection, area: NSRect)?) {
+        guard let target else {
+            guard dropIndicator.superview != nil, dropIndicator.alphaValue > 0 else { return }
+            animate(0.15) { dropIndicator.animator().alphaValue = 0 } done: { [weak self] in
+                if let self, dropIndicator.alphaValue == 0 { dropIndicator.removeFromSuperview() }
+            }
+            return
+        }
+        let area = target.area.insetBy(dx: 6, dy: 6)
+        if dropIndicator.superview !== self || dropIndicator.alphaValue == 0 {
+            if dropIndicator.superview !== self { addSubview(dropIndicator, positioned: .below, relativeTo: dragGhost) }
+            if let pane = headers[target.pane]?.superview { dropIndicator.frame = convert(pane.bounds, from: pane).insetBy(dx: 6, dy: 6) }
+            dropIndicator.alphaValue = 0
+        }
+        guard dropIndicator.frame != area || dropIndicator.alphaValue == 0 else { return }
+        animate(0.22) {
+            dropIndicator.animator().frame = area
+            dropIndicator.animator().alphaValue = 1
+        }
+    }
+
+    private func animate(_ duration: TimeInterval, _ changes: () -> Void, done: (@MainActor () -> Void)? = nil) {
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : duration
+            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.25, 1)   // quick start, soft landing
+            ctx.allowsImplicitAnimation = true
+            changes()
+        } completionHandler: {
+            MainActor.assumeIsolated { done?() }
         }
     }
 

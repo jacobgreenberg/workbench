@@ -3,14 +3,15 @@ import AppKit
 
 #if DEBUG
 if CommandLine.arguments.contains("--selfcheck") {
-    MainActor.assumeIsolated { modelSelfCheck(); backupSelfCheck(); FileIcons.selfCheck(); filePaneSelfCheck(); surfaceSelfCheck(); chromeSelfCheck() }
+    MainActor.assumeIsolated { modelSelfCheck(); backupSelfCheck(); filePaneSelfCheck(); surfaceSelfCheck(); chromeSelfCheck() }
     themeSelfCheck()
-    fileTreeSelfCheck()
     controlSelfCheck()
     agentsSelfCheck()
     controllerSelfCheck()
     transcriptSelfCheck()
+    speechTextSelfCheck()
     sessionSelfCheck()
+    MainActor.assumeIsolated { speakerSelfCheck() }
     print("selfcheck ok")
     exit(0)
 }

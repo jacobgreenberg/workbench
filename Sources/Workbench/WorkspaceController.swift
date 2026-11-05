@@ -50,6 +50,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private var titles: [PaneID: String] = [:]
     private var progressing: Set<PaneID> = []   // panes with an OSC 9;4 progress report up
     private var background: Set<PaneID> = []   // turn ended, background subagents/shells still running: stays busy
+    private var replaying: Set<PaneID> = []   // just reattached: status events come from the host's replay of old output
     private var backgroundPoll = false
     private var searchCounts: (total: Int, selected: Int) = (-1, -1)
     private var findPane: PaneID?
@@ -71,22 +72,16 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private let findBar = FindBar(frame: .zero)
     private let emptyLabel = NSTextField(labelWithString: "")
     private lazy var tree = SplitTreeView { [unowned self] spec in self.view(for: spec) }
-    /// Native split: glass sidebar (projects) | terminals | inspector (tabs: the project's TODOs, the file tree). AppKit owns the
+    /// Native split: glass sidebar (projects) | terminals. AppKit owns the
     /// materials, divider dragging and the collapse animations.
     private let split = NSSplitViewController()
     private var sidebarItem: NSSplitViewItem!
-    private var inspectorItem: NSSplitViewItem!
     private var collapseObservation: NSKeyValueObservation?
-    private let inspector = NSView()
-    private let inspectorTabs = GlassSegments(labels: ["TODO", "Files"])
-    private let todoList = TodoListView()
-    private let fileTree = FileTreeView()
     private let mainPane = NSView()   // the terminals' split item, toolbar strip included
-    private let column = NSView()   // the TODO list or the tree, switched by the tabs
-    private var fileTreeRoot: String?   // whose folder the tree shows
-    private var inspectorProject: UUID?   // whose TODOs, folder and right-sidebar state the inspector shows
-    private var inspectorObservation: NSKeyValueObservation?
     private weak var scratchItem: NSToolbarItem?   // badged with the open scratch tabs
+    private var speakingPane: PaneID?   // whose header shows Read Aloud's progress / stop
+    private static let readAloudSpeeds: [Double] = [1, 1.25, 1.5, 1.75, 2]
+    private var speechLookup = 0   // bumped per Read Aloud press: a transcript read that a later press overtook is dropped
 
     init(store: Store, runtime: Runtime) {
         self.store = store
@@ -125,6 +120,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             }
             return swallow ? nil : event
         }
+        Speaker.shared.onChange = { [weak self] in self?.speechChanged($0) }
+        Speaker.shared.rate = Float(store.layout.readAloudSpeed ?? 1)
+        Speaker.shared.pitch = Float(store.layout.readAloudPitch ?? 1)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
@@ -153,24 +151,6 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         findBar.isHidden = true
         content.addSubview(findBar)
 
-        column.translatesAutoresizingMaskIntoConstraints = false
-        inspector.addSubview(column)
-        // In the toolbar row but part of the inspector, so it slides with it on collapse (a toolbar item would stay put).
-        inspectorTabs.translatesAutoresizingMaskIntoConstraints = false
-        inspector.addSubview(inspectorTabs)
-        let titlebar = NSLayoutGuide()
-        inspector.addLayoutGuide(titlebar)
-        NSLayoutConstraint.activate([
-            titlebar.topAnchor.constraint(equalTo: inspector.topAnchor),
-            titlebar.bottomAnchor.constraint(equalTo: inspector.safeAreaLayoutGuide.topAnchor),
-            inspectorTabs.centerYAnchor.constraint(equalTo: titlebar.centerYAnchor),
-            inspectorTabs.trailingAnchor.constraint(equalTo: inspector.trailingAnchor, constant: -64),   // left of the inspector toggle
-            inspectorTabs.widthAnchor.constraint(equalToConstant: 200),
-        ])
-        for v in [todoList, fileTree] as [NSView] {
-            v.translatesAutoresizingMaskIntoConstraints = false
-            column.addSubview(v)
-        }
 
         NSLayoutConstraint.activate([
             content.topAnchor.constraint(equalTo: main.safeAreaLayoutGuide.topAnchor),   // below the toolbar
@@ -181,19 +161,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             emptyLabel.centerYAnchor.constraint(equalTo: content.centerYAnchor),
             findBar.topAnchor.constraint(equalTo: content.topAnchor, constant: 8),
             findBar.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
-            column.topAnchor.constraint(equalTo: inspector.safeAreaLayoutGuide.topAnchor),
-            column.leadingAnchor.constraint(equalTo: inspector.leadingAnchor),
-            column.trailingAnchor.constraint(equalTo: inspector.trailingAnchor),
-            column.bottomAnchor.constraint(equalTo: inspector.bottomAnchor),
         ])
-        for v in [todoList, fileTree] as [NSView] {
-            NSLayoutConstraint.activate([
-                v.topAnchor.constraint(equalTo: column.topAnchor, constant: 4),
-                v.leadingAnchor.constraint(equalTo: column.leadingAnchor),
-                v.trailingAnchor.constraint(equalTo: column.trailingAnchor),
-                v.bottomAnchor.constraint(equalTo: column.bottomAnchor),
-            ])
-        }
 
         sidebarItem = NSSplitViewItem(sidebarWithViewController: controller(sidebar))
         sidebarItem.minimumThickness = 240 + WorkspaceRail.width
@@ -201,11 +169,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         sidebarItem.isCollapsed = !store.layout.sidebarVisible
         let mainItem = NSSplitViewItem(viewController: controller(main))
         mainItem.minimumThickness = 300
-        inspectorItem = NSSplitViewItem(inspectorWithViewController: controller(inspector))
-        inspectorItem.minimumThickness = 280   // fits the TODO/Files switch (12 + 200 + 64 for the toggle)
-        inspectorItem.maximumThickness = 1600
-        inspectorItem.isCollapsed = true
-        for item in [sidebarItem!, mainItem, inspectorItem!] { split.addSplitViewItem(item) }
+        for item in [sidebarItem!, mainItem] { split.addSplitViewItem(item) }
         split.splitView.autosaveName = "Workbench.split"   // divider positions survive relaunch
         window?.contentViewController = split
         // Collapsing from the toolbar button bypasses our actions; persist whatever AppKit did.
@@ -217,40 +181,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                 self.store.changed()
             }
         }
-        // Open/closed is per project: remember what the toggle (or a divider drag) did for the project on screen.
-        inspectorObservation = inspectorItem.observe(\.isCollapsed) { [weak self] _, _ in
-            MainActor.assumeIsolated { self?.saveInspector { $0.inspectorOpen = self?.inspectorItem.isCollapsed == false ? true : nil } }
-        }
-        inspectorTabs.onSelect = { [unowned self] i in
-            showInspectorTab(i, animated: true)
-            saveInspector { $0.inspectorTab = i == 0 ? nil : i }
-        }
-        showInspectorTab(0, animated: false)
-        fileTree.hideClutter = store.layout.showClutterFiles != true
-    }
-
-    /// 0 TODO, 1 Files.
-    private func showInspectorTab(_ i: Int, animated: Bool) {
-        inspectorTabs.select(i, animated: animated)
-        todoList.isHidden = i != 0
-        fileTree.isHidden = i != 1
     }
 
     private func wireCallbacks() {
-        fileTree.onSelect = { [unowned self] path in
-            let file = URL(fileURLWithPath: path).resolvingSymlinksInPath()
-            if previewable(file) { openFile(file.path, focus: false) }
-        }
-        fileTree.onOpen = { [unowned self] path in open(URL(fileURLWithPath: path)) }   // double-click: the ⌘-click policy
-        fileTree.onToggleClutter = { [unowned self] hide in
-            store.layout.showClutterFiles = hide ? nil : true
-            store.changed()
-        }
-        todoList.onChange = { [unowned self] todos in
-            guard let p = activeProjectIndex, store.layout.projects[p].id == inspectorProject else { return }
-            store.layout.projects[p].todos = todos
-            store.changed()
-        }
         sidebar.onSelect = { [unowned self] i in project(atRow: i).map(selectProject) }
         sidebar.onRemove = { [unowned self] i in project(atRow: i).map(removeProject) }
         sidebar.onShowHidden = { [unowned self] on in setShowHidden(on) }
@@ -284,6 +217,13 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             render()
         }
         tree.onHeaderClick = { [unowned self] id in focus(id) }
+        tree.onSpeak = { [unowned self] id in
+            if Speaker.shared.state != .idle && speakingPane == id { stopReading() } else { readAloud(pane: id) }
+        }
+        tree.onSpeed = { [unowned self] in
+            let all = Self.readAloudSpeeds, i = all.firstIndex(of: store.layout.readAloudSpeed ?? 1) ?? 0
+            applyReadAloudSpeed(all[(i + 1) % all.count])
+        }
         findBar.onChange = { [unowned self] text in
             if transcript != nil { scheduleTranscriptSearch() } else { findSurface?.perform("search:\(text)") }
         }
@@ -359,10 +299,16 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             s.onKey = { [unowned self] id in paneKeyDown(id) }
             s.contextMenu = { [unowned self] id in paneMenu(id) }
             s.onPathClick = { [unowned self] id in clickedPath(nil, from: id).map { open(URL(fileURLWithPath: $0)) } }
+            if s.reattached {
+                // shortcut: a fixed window, not the replay's end (its events reach us via an app tick and another hop); the replay is ≤ 1 MB
+                replaying.insert(spec.id)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self, id = spec.id] in MainActor.assumeIsolated { _ = self?.replaying.remove(id) } }
+            }
             v = s
         case let .file(path):
             let m = FilePaneView(id: spec.id, path: path, theme: theme, zoom: fileZoom[spec.id] ?? 1)
             m.onZoom = { [unowned self, id = spec.id] z in fileZoom[id] = z }
+            m.onReadAloud = { [unowned self, id = spec.id] text in speakSelection(text, pane: id) }
             m.onOpenLink = { [unowned self] url in open(url) }
             m.onFocus = { [unowned self] id in paneFocused(id) }
             v = m
@@ -567,8 +513,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         let end = mainPane.convert(NSPoint(x: mainPane.bounds.maxX, y: 0), to: nil).x
         let item = tabBar.window?.toolbar?.items.first { $0.itemIdentifier == .projectTitle }
         let title = item.flatMap { $0.isHidden ? nil : $0.view.map { $0.fittingSize.width + 16 } } ?? 0
-        let toggle: CGFloat = inspectorItem.isCollapsed ? 52 : 0   // the inspector toggle and its separator sit in this column then
-        tabBar.maxWidth = max(0, end - start - title - toggle - 24)
+        tabBar.maxWidth = max(0, end - start - title - 24)
     }
 
     private var chromePending = false
@@ -607,7 +552,12 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         if let p = activeProjectIndex {
             let project = projects[p]
             tabBar.update(items: tabItems(project), selected: project.activeTab, theme: theme)
-            tree.updateHeaders(focused: focusedPane, theme: theme, status: { [status] in status[$0] ?? .idle }) { [titles] id in
+            let speechState = Speaker.shared.state, speaking = speakingPane
+            tree.updateHeaders(focused: focusedPane, theme: theme, status: { [status] in status[$0] ?? .idle }, speech: { id in
+                guard case .terminal? = spec(id)?.kind else { return nil }
+                guard id == speaking, speechState != .idle else { return "speaker.wave.2" }
+                return speechState == .loading ? "ellipsis" : "stop.fill"
+            }, speed: String(format: "%g×", store.layout.readAloudSpeed ?? 1)) { [titles] id in
                 if let t = titles[id] { return t }
                 switch spec(id)?.kind {
                 case let .file(path)?: return (path as NSString).lastPathComponent
@@ -630,28 +580,6 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             ProcessInfo.processInfo.endActivity(a)
             activity = nil
         }
-        let shownProject = activeProjectIndex.map { store.layout.projects[$0] }
-        if shownProject?.id != inspectorProject {
-            inspectorProject = shownProject?.id   // first: the collapse below saves into this project, unchanged
-            todoList.show(shownProject?.todos ?? [])
-            showInspectorTab(shownProject?.inspectorTab ?? 0, animated: false)
-            inspectorItem.isCollapsed = shownProject?.inspectorOpen != true
-        }
-        let root = activeProjectIndex.map { store.layout.projects[$0].path }
-        if root != fileTreeRoot {
-            fileTreeRoot = root
-            fileTree.show(root: root)
-        }
-    }
-
-    /// Records a change to the right sidebar in the project it is showing.
-    private func saveInspector(_ change: (inout Project) -> Void) {
-        guard let p = activeProjectIndex, store.layout.projects[p].id == inspectorProject else { return }
-        var project = store.layout.projects[p]
-        change(&project)
-        guard project != store.layout.projects[p] else { return }
-        store.layout.projects[p] = project
-        store.changed()
     }
 
     /// A project's tabs as the tab bar and the sidebar show them: title, and the busiest status among their panes.
@@ -682,7 +610,6 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         mainPane.layer?.backgroundColor = theme.color("background").cgColor   // under the toolbar too, or it shows the toolbar's own grey
         for v in views.values { (v as? FilePaneView)?.apply(theme: theme) }
         findBar.apply(theme: theme)
-        inspectorTabs.tint = theme.color("foreground")
     }
 
     // MARK: - Focus & status
@@ -722,6 +649,13 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
 
     private func setStatus(_ id: PaneID, _ new: PaneStatus, title: String? = nil, body: String? = nil, settled: Bool = false) {
         guard locate(id) != nil else { return }   // late event from a closed pane
+        // A replayed turn already ended (or the pane was seen) before the restart: only "still busy" carries over.
+        if replaying.contains(id) {
+            background.remove(id)
+            let restored: PaneStatus = new == .busy ? .busy : .idle
+            if status[id] != restored { status[id] = restored; setNeedsChrome() }
+            return
+        }
         let old = status[id] ?? .idle
         // A turn that ends with background subagents or shells still running is not done: hold busy until they finish.
         if new == .done, old == .busy, !settled {
@@ -1090,6 +1024,14 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         new.target = self
         new.representedObject = [id]
         move.addItem(new)
+        if let text = surfaceView(for: id)?.selectedText {
+            let read = NSMenuItem(title: "Read Aloud Selection", action: #selector(readSelection(_:)), keyEquivalent: "")
+            read.image = NSImage(systemSymbolName: "speaker.wave.2", accessibilityDescription: nil)
+            read.target = self
+            read.representedObject = [id.uuidString, text]
+            move.insertItem(read, at: 0)
+            move.insertItem(.separator(), at: 1)
+        }
         return move
     }
 
@@ -1461,8 +1403,6 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         render(focus: focus)
     }
 
-    @objc func toggleInspectorPanel(_ sender: Any?) { split.toggleInspector(sender) }
-
     /// Something would be lost by quitting: a process other than an idle shell, or an agent mid-turn.
     var needsConfirmQuit: Bool { status.values.contains(.busy) || views.keys.contains { needsConfirm([$0]) } }
 
@@ -1569,6 +1509,29 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                   let b = try? Backup.decode(data), let rollback = try? Backup.saveCurrent(store.layout) else { return #"{"error":"bad backup"}"# }
             DispatchQueue.main.async { (NSApp.delegate as? AppDelegate)?.restore(b, rollback: rollback) }
             return "{}"
+        case "speak":    // test harness: read the transcript at `path` aloud; replies with what is said
+            guard let path = msg["path"], let text = SpeechText.latest(URL(fileURLWithPath: path)) else { return #"{"error":"nothing to read"}"# }
+            Speaker.shared.speak(SpeechText.chunks(text))
+            return String(decoding: try! JSONSerialization.data(withJSONObject: ["text": text]), as: UTF8.self)
+        case "speak-stop":
+            stopReading()
+            return "{}"
+        case "speak-state":
+            return #"{"state":"\#(Speaker.shared.state)","speed":"\#(store.layout.readAloudSpeed ?? 1)","pitch":"\#(store.layout.readAloudPitch ?? 1)","cents":"\#(Int((Speaker.shared.playbackCents ?? 0).rounded()))"}"#
+        case "settings":   // test harness: open Settings at `tab`; replies with its window number
+            return #"{"window":\#((NSApp.delegate as? AppDelegate)?.openSettings(tab: msg["tab"] ?? "") ?? 0)}"#
+        case "speak-tone":   // test harness: what Settings > Read Aloud > Tone does
+            applyReadAloudTone(Double(msg["pitch"] ?? "") ?? 1)
+            return "{}"
+        case "header-click":   // test harness: a real left click on a pane header's `button` (speak / speed), through window.sendEvent
+            guard let id = pane, let w = window, let at = tree.headerButtonCenter(id, speed: msg["button"] == "speed") else { return #"{"error":"no header button"}"# }
+            func event(_ type: NSEvent.EventType) -> NSEvent {
+                NSEvent.mouseEvent(with: type, location: at, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                   windowNumber: w.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+            }
+            w.postEvent(event(.leftMouseUp), atStart: false)   // queued first: the button's tracking loop waits for it
+            w.sendEvent(event(.leftMouseDown))
+            return "{}"   // the button acts after this reply: read the result with speak-state
         case "action":   // test harness: run a menu action, e.g. "newTab:", without needing keyboard focus
             let sel = NSSelectorFromString(msg["name"] ?? "")
             guard responds(to: sel) else { return #"{"error":"unknown action"}"# }
@@ -1654,7 +1617,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                 w.sendEvent(ev(.leftMouseDown, a))
             }
             return "{}"
-        case "menu":     // test harness: pick a pane's "Move to Tab" entry by title
+        case "select-all":   // test harness: select everything in a terminal pane
+            guard let id = pane, let v = surfaceView(for: id) else { return #"{"error":"unknown pane"}"# }
+            v.perform("select_all")
+            return #"{"selected":\#(v.selectedText != nil)}"#
+        case "menu":     // test harness: pick a pane's context menu entry (Move to Tab targets, Read Aloud Selection) by title
             guard let id = pane, let move = paneMenu(id),
                   let item = move.item(withTitle: msg["item"] ?? ""), let action = item.action else { return #"{"error":"no item"}"# }
             NSApp.sendAction(action, to: item.target, from: item)
@@ -1780,6 +1747,76 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         focus(leaves[(i + d + leaves.count) % leaves.count])
     }
     @objc func clearScreen(_ sender: Any?) { focusedPane.flatMap { surfaceView(for: $0) }?.perform("clear_screen") }
+    /// Every Stop (menu, pane header, test harness): stops playback and any reply still being looked up.
+    func stopReading() { speechLookup += 1; Speaker.shared.stop() }
+    /// Speaks the focused agent pane's latest reply, or the question it is waiting on; pressed while speaking, stops.
+    @objc func readAloud(_ sender: Any?) {
+        if Speaker.shared.state != .idle { return stopReading() }
+        guard let id = focusedPane else { return NSSound.beep() }
+        readAloud(pane: id)
+    }
+    /// Speaks `id`'s latest reply (or the question it waits on), replacing whatever is playing.
+    private func readAloud(pane id: PaneID) {
+        speechLookup += 1
+        guard surfaceView(for: id) != nil else { return NSSound.beep() }
+        Speaker.shared.prewarm()
+        let mine = speechLookup
+        let done: @Sendable @MainActor ([String]) -> Void = { [weak self] chunks in
+            guard let self, mine == speechLookup else { return }
+            guard !chunks.isEmpty else { return NSSound.beep() }
+            speakingPane = id
+            Speaker.shared.speak(chunks)
+        }
+        // Finding the transcript scans processes and disk: off main.
+        DispatchQueue.global(qos: .userInitiated).async {
+            let chunks = Agents.transcript(for: id).flatMap(SpeechText.latest).map { SpeechText.chunks($0) } ?? []
+            DispatchQueue.main.async { MainActor.assumeIsolated { done(chunks) } }
+        }
+    }
+    /// Right-click > Read Aloud Selection (terminal and file panes): the selected text, replacing whatever is playing.
+    @objc func readSelection(_ sender: NSMenuItem) {
+        guard let o = sender.representedObject as? [String], o.count == 2 else { return }
+        speakSelection(o[1], pane: UUID(uuidString: o[0]))
+    }
+    func speakSelection(_ text: String, pane: PaneID?) {
+        speechLookup += 1   // a reply still being looked up must not replace it
+        let mine = speechLookup
+        Speaker.shared.prewarm()
+        // Cleaning and chunking a large selection is off main.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let chunks = SpeechText.chunks(SpeechText.selection(text))
+            DispatchQueue.main.async { MainActor.assumeIsolated {
+                guard let self, mine == self.speechLookup else { return }
+                guard !chunks.isEmpty else { return NSSound.beep() }
+                self.speakingPane = pane
+                Speaker.shared.speak(chunks)
+            } }
+        }
+    }
+    /// Edit > Read Aloud Speed: the item's tag is the speed in percent; takes effect mid-reply and is remembered.
+    @objc func setReadAloudSpeed(_ sender: NSMenuItem) { applyReadAloudSpeed(Double(sender.tag) / 100) }
+    func applyReadAloudSpeed(_ speed: Double) {
+        store.layout.readAloudSpeed = speed == 1 ? nil : speed
+        store.changed()
+        Speaker.shared.rate = Float(speed)
+        updateChrome()   // every header's speed button
+    }
+    /// Settings > Read Aloud > Tone: live, and remembered.
+    func applyReadAloudTone(_ pitch: Double) {
+        store.layout.readAloudPitch = pitch == 1 ? nil : pitch
+        store.changed()
+        Speaker.shared.pitch = Float(pitch)
+    }
+    /// Settings > Read Aloud > Preview: a short line in the current voice, tone and pace.
+    func previewReadAloud() {
+        speechLookup += 1   // a read still looking up its transcript must not replace the preview
+        speakingPane = nil
+        Speaker.shared.speak(["Hey. Okay, I found it: the crash was in the tab bar. I fixed it, and all the checks pass. Want me to commit?"])
+    }
+    private func speechChanged(_ state: Speaker.State) {
+        if state == .idle { speakingPane = nil }
+        updateChrome()   // the speaking pane's header button
+    }
     @objc func find(_ sender: Any?) {
         guard let id = focusedPane, let v = surfaceView(for: id) else { return }
         if findPane == id {
@@ -1871,6 +1908,16 @@ extension WorkspaceController {
     }
 }
 
+extension WorkspaceController: NSMenuItemValidation {
+    /// Only checks the current Read Aloud speed (it also changes from the pane headers); every item stays enabled.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(setReadAloudSpeed(_:)) {
+            item.state = Double(item.tag) / 100 == (store.layout.readAloudSpeed ?? 1) ? .on : .off
+        }
+        return true
+    }
+}
+
 extension NSToolbarItem.Identifier {
     static let tabs = NSToolbarItem.Identifier("tabs")
     static let addProject = NSToolbarItem.Identifier("addProject")
@@ -1878,7 +1925,7 @@ extension NSToolbarItem.Identifier {
     static let projectTitle = NSToolbarItem.Identifier("projectTitle")
 }
 
-/// Unified toolbar: sidebar toggle over the sidebar, the tab capsule over the terminals, project name/path on its right (sidebar collapsed only), inspector toggle over the inspector.
+/// Unified toolbar: sidebar toggle over the sidebar, the tab capsule over the terminals, project name/path on its right (sidebar collapsed only).
 extension WorkspaceController: NSToolbarDelegate {
     /// Right-aligned single-line label styled like the native window title (bold 13) / subtitle (11, secondary).
     static func titleLabel(bold: Bool) -> NSTextField {
@@ -1893,7 +1940,7 @@ extension WorkspaceController: NSToolbarDelegate {
         return l
     }
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .addProject, .newScratch, .sidebarTrackingSeparator, .tabs, .flexibleSpace, .projectTitle, .inspectorTrackingSeparator, .flexibleSpace, .toggleInspector]
+        [.toggleSidebar, .addProject, .newScratch, .sidebarTrackingSeparator, .tabs, .flexibleSpace, .projectTitle]
     }
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(toolbar) }
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier, willBeInsertedIntoToolbar: Bool) -> NSToolbarItem? {

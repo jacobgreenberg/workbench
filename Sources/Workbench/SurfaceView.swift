@@ -12,6 +12,7 @@ final class SurfaceBox: Sendable {
 @MainActor
 final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
     let paneID: PaneID
+    private(set) var reattached = false   // an existing session (Restart, crash): its host replays recent output first
     let box: SurfaceBox
     private(set) var surface: ghostty_surface_t?
     var onFocus: ((PaneID) -> Void)?
@@ -81,6 +82,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         ghostty_surface_set_focus(created, false)
 
         let attached = startShell ? Session.attach(id) : nil
+        reattached = attached != nil
         // A new shell starts at the size the pane will have (libghostty's default is 800x600 px, ~48x17: a pane created
         // for a hidden tab would run at that until shown); an attached one plays its replay on the host's grid below.
         if attached == nil, let initialSize {
@@ -509,6 +511,16 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         }
         menu.popUp(positioning: nil, at: pos, in: self)   // not popUpContextMenu: it adds AutoFill
         endLinkHover(at: pos)
+    }
+
+    /// The selected text; nil when nothing is selected.
+    var selectedText: String? {
+        guard let surface, !closed else { return nil }
+        var text = ghostty_text_s()
+        guard ghostty_surface_read_selection(surface, &text) else { return nil }
+        defer { ghostty_surface_free_text(surface, &text) }
+        let s = String(cString: text.text)
+        return s.isEmpty ? nil : s
     }
 
     /// The link at `pos`. Ghostty finds links only with ⌘ held, so this hovers there as if it were: Ghostty reports
@@ -1078,19 +1090,19 @@ extension SplitNode {
     /// 1 pt; every pane of a split tab has a header strip, a lone pane none).
     func paneSizes(in size: CGSize, header: CGFloat = PaneGeometry.headerHeight) -> [PaneID: CGSize] {
         var out: [PaneID: CGSize] = [:]
-        func walk(_ node: SplitNode, _ s: CGSize, headed: Bool) {
+        func walk(_ node: SplitNode, _ s: CGSize) {
             switch node {
             case .leaf(let spec):
-                out[spec.id] = CGSize(width: s.width, height: max(0, s.height - (headed ? header : 0)))
+                out[spec.id] = CGSize(width: s.width, height: max(0, s.height - header))
             case .split(let axis, let ratio, let a, let b):
                 let across = axis == .horizontal
                 let total = across ? s.width : s.height
                 let first = min(max(CGFloat(ratio) * total, 0), total), second = max(0, total - first - 1)
-                walk(a, across ? CGSize(width: first, height: s.height) : CGSize(width: s.width, height: first), headed: true)
-                walk(b, across ? CGSize(width: second, height: s.height) : CGSize(width: s.width, height: second), headed: true)
+                walk(a, across ? CGSize(width: first, height: s.height) : CGSize(width: s.width, height: first))
+                walk(b, across ? CGSize(width: second, height: s.height) : CGSize(width: s.width, height: second))
             }
         }
-        walk(self, size, headed: { if case .split = self { return true } else { return false } }())
+        walk(self, size)
         return out
     }
 }
@@ -1104,7 +1116,7 @@ extension SplitNode {
     let (a, na) = leaf(), (b, nb) = leaf(), (c, nc) = leaf()
 
     // A lone pane gets the whole area and no header; panes of a split lose the header, and the divider takes 1 pt.
-    assert(na.paneSizes(in: CGSize(width: 800, height: 600), header: 36)[a.id] == CGSize(width: 800, height: 600))
+    assert(na.paneSizes(in: CGSize(width: 800, height: 600), header: 36)[a.id] == CGSize(width: 800, height: 564))   // a lone pane has its header too
     let two = SplitNode.split(axis: .horizontal, ratio: 0.5, a: na, b: nb).paneSizes(in: CGSize(width: 801, height: 600), header: 36)
     assert(two[a.id] == CGSize(width: 400.5, height: 564) && two[b.id] == CGSize(width: 399.5, height: 564))
     let stacked = SplitNode.split(axis: .vertical, ratio: 0.25, a: na, b: .split(axis: .horizontal, ratio: 0.5, a: nb, b: nc))
