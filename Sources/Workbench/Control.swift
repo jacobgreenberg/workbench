@@ -150,6 +150,7 @@ enum ControlClient {
             msg = ["cmd": "send", "pane": rest[0], "text": rest.dropFirst().joined(separator: " ")]
         case "open":
             guard let p = rest.first else { return usage() }
+            if p.hasPrefix("http://") || p.hasPrefix("https://") { msg = ["cmd": "open", "pane": paneID ?? "", "url": p]; break }
             let abs = p.hasPrefix("/") ? p : FileManager.default.currentDirectoryPath + "/" + p
             msg = ["cmd": "open", "pane": paneID ?? "", "path": (abs as NSString).standardizingPath]
         case "add":
@@ -182,7 +183,7 @@ enum ControlClient {
           focus <pane-id>
           split [--down] [command...]
           send <pane-id> <text...>
-          open <path>
+          open <path | http(s) url>
           add [dir]
 
         """.utf8))

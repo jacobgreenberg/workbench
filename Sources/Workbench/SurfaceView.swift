@@ -190,6 +190,12 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         text.withCString { ghostty_surface_process_output(s, $0, UInt(text.utf8.count)) }
     }
 
+    /// Writes `text` to the shell as typed keys (straight to the pty: no paste brackets, so a trailing newline runs it).
+    func type(_ text: String) {
+        let d = Array(text.utf8)
+        d.withUnsafeBytes { box.session.withLock { $0 }?.write($0) }
+    }
+
     /// The visible screen as text (an agent on the alternate screen keeps its history here, not in scrollback).
     func viewportText() -> String? {
         read(ghostty_point_s(tag: GHOSTTY_POINT_VIEWPORT, coord: GHOSTTY_POINT_COORD_TOP_LEFT, x: 0, y: 0),
@@ -322,7 +328,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
 
     /// layout() and setFrameSize both fire per resize step; only a changed pixel size reaches Ghostty.
     private func sizeDidChange(_ size: CGSize, force: Bool = false) {
-        guard let surface, !closed else { return }
+        guard let surface, !closed, window != nil else { return }   // off-window: mid re-parent, backing scale unknown
         let px = convertToBacking(size)
         let w = UInt32(max(px.width, 1)), h = UInt32(max(px.height, 1))
         contentSize = size
@@ -400,6 +406,7 @@ final class SurfaceView: NSView, @preconcurrency NSTextInputClient {
         if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
         screenObserver = nil
         guard let window, !closed else { return }
+        sizeDidChange(frame.size)
         screenObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didChangeScreenNotification,
             object: window,

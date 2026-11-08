@@ -169,8 +169,9 @@ private final class DividerSplitView: NSSplitView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    override func layout() {
-        super.layout()
+    /// Placed on every resize, not left to autoresizing: that would first stretch the pane by the frame's change (from
+    /// zero when the tree is rebuilt) and hand its terminal that size.
+    override func resizeSubviews(withOldSize oldSize: NSSize) {
         let h = PaneHeader.height
         header.frame = NSRect(x: 0, y: bounds.height - h, width: bounds.width, height: h)
         content.frame = NSRect(x: 0, y: 0, width: bounds.width, height: max(0, bounds.height - h))
@@ -248,10 +249,11 @@ extension SplitNode {
         view.translatesAutoresizingMaskIntoConstraints = true
         view.autoresizingMask = [.width, .height]
         view.frame = bounds
-        addSubview(view)
         rootView = view
-        layoutSubtreeIfNeeded()
+        // Dividers placed before the tree joins the window: a pane sized there would hand its terminal the whole tree's size
+        // first, and a fullscreen agent (alternate screen, no SIGWINCH at an unchanged pty) is left clipped.
         applyRatios()
+        addSubview(view)
         return true
     }
 
@@ -370,7 +372,7 @@ extension SplitNode {
     }
     #endif
 
-    /// `speech`: the speaker button's symbol, nil = no Read Aloud controls (file panes); `speed`: the speed button's title.
+    /// `speech`: the speaker button's symbol, nil = no Read Aloud controls (file and web panes); `speed`: the speed button's title.
     func updateHeaders(focused: PaneID?, theme: Theme, status: (PaneID) -> PaneStatus, speech: (PaneID) -> String?, speed: String,
                        title: (PaneID) -> String) {
         for (id, h) in headers {
@@ -381,6 +383,7 @@ extension SplitNode {
                 h.speakSymbol = symbol
                 h.speakButton.image = NSImage(systemSymbolName: symbol, accessibilityDescription: symbol == "speaker.wave.2" ? "Read Aloud" : "Stop Reading")?
                     .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+                h.needsLayout = true
             }
             if h.speedButton.title != speed { h.speedButton.title = speed; h.needsLayout = true }
             h.controls.alphaValue = isFocused ? 1 : 0.8

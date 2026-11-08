@@ -10,8 +10,9 @@ struct Launch: Codable, Equatable, Sendable {
 enum PaneKind: Codable, Equatable, Sendable {
     case terminal(cwd: String, launch: Launch?)
     case file(path: String)   // markdown preview, or highlighted code
+    case web(url: String)     // a web page (http/https), e.g. a localhost dashboard
 
-    private enum CodingKeys: String, CodingKey { case terminal, file = "markdown" }   // saved layouts predate code files
+    private enum CodingKeys: String, CodingKey { case terminal, file = "markdown", web }   // saved layouts predate code files
 }
 
 struct PaneSpec: Codable, Equatable, Sendable {
@@ -123,6 +124,8 @@ struct Project: Codable, Identifiable, Equatable, Sendable {
     var scratch: Bool? = nil   // temporary home-folder project: gone when its last tab closes, never restored
     var hidden: Bool? = nil    // off the Active list, shown under Hidden; its terminals and agents keep running
     var workspace: UUID? = nil // the workspace it is listed in (nil only for scratch terminals; fixed up at load)
+    var dashboard: String? = nil // http(s) page the toolbar's chart button shows in a web pane (project menu "Dashboard…")
+    var dashboardCommand: String? = nil // optional server behind it: runs in the project's "Dashboard server" tab, kept running
 }
 
 /// A group of projects (Personal, Work…), picked in the sidebar's rail. Its icon is `image` (cropped and downscaled

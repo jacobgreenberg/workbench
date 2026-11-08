@@ -124,6 +124,7 @@ let vsCodeBundle = "com.microsoft.VSCode"
     var onRemove: ((Int) -> Void)?
     var onRename: ((Int, String?) -> Void)?
     var onMove: ((Int, Int) -> Void)?   // from, to (final index after removal)
+    var onDashboard: ((Int) -> Void)?              // project row: context menu "Dashboard…"
     var onMoveToWorkspace: ((Int, Int) -> Void)?   // project row, workspace index
     let rail = WorkspaceRail()
 
@@ -210,6 +211,7 @@ let vsCodeBundle = "com.microsoft.VSCode"
             menu.addItem(toggleItem)
             menu.addItem(NSMenuItem(title: "Rename", action: #selector(renameTapped), keyEquivalent: ""))
             menu.addItem(NSMenuItem(title: "Copy Path", action: #selector(copyPathTapped), keyEquivalent: ""))
+            menu.addItem(NSMenuItem(title: "Dashboard…", action: #selector(dashboardTapped), keyEquivalent: ""))
             if workspaces.count > 1 {
                 let move = NSMenuItem(title: "Move to Workspace", action: nil, keyEquivalent: "")
                 move.submenu = NSMenu()
@@ -254,6 +256,7 @@ let vsCodeBundle = "com.microsoft.VSCode"
         if rows.indices.contains(table.clickedRow) { onMoveToWorkspace?(table.clickedRow, sender.tag) }
     }
 
+    @objc private func dashboardTapped() { if rows.indices.contains(table.clickedRow) { onDashboard?(table.clickedRow) } }
     @objc private func renameTapped() { beginRename(table.clickedRow) }
 
     @objc private func rowDoubleClicked() { beginRename(table.clickedRow) }

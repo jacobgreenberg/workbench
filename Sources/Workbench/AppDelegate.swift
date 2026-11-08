@@ -40,6 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         var live = Set<PaneID>()
         for p in store.layout.projects { for t in p.tabs { for leaf in t.root.leaves { if case .terminal = leaf.kind { live.insert(leaf.id) } } } }
+        live.formUnion(Services.wanted(store.layout).keys)   // a dashboard server that survived a crash or Restart
         // An unreadable layout is not "no panes": ending every host as an orphan would kill the sessions it exists to keep.
         if store.layoutProblem == nil { DispatchQueue.global(qos: .utility).async { [live] in Session.endOrphans(keeping: live) } }
 

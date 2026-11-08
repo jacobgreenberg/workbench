@@ -23,6 +23,22 @@ func recordAgents(_ running: [PaneID: String?], in layout: inout Layout, seen: i
     }
 }
 
+/// The line that brings back a pane's saved command after it died by a signal no user sends to stop it: KILL (an
+/// endpoint-security kill, a broad pkill) or a crash (ABRT, BUS, SEGV). nil for a normal exit, ^C (INT), TERM or HUP.
+/// An agent resume also gets a note as its prompt: its background work died with it.
+func killedCommandRerun(command: String, exitCode: Int) -> String? {
+    guard [134, 137, 138, 139].contains(exitCode) else { return nil }
+    guard command.contains(" --resume ") || command.contains(" resume ") else { return command + "\n" }
+    let note = "Interruption notice: your process was killed abruptly (exit \(exitCode)) and Workbench resumed you. "
+        + "Any shells, subagents and Monitors you had running died with you: re-check their state (logs, queue entries, "
+        + "worktrees, half-written files) before trusting them, re-launch what is needed, then continue where you left off."
+    return command + " '" + note + "'\n"
+}
+
+/// Terminal modes an agent TUI turns on and a killed one never turns off: mouse reporting (mouse moves would type
+/// `35;67;14M` into the shell), focus events, the kitty keyboard protocol, the alternate screen, a hidden cursor.
+let agentModesReset = "\u{1b}[?1000l\u{1b}[?1002l\u{1b}[?1003l\u{1b}[?1006l\u{1b}[?1015l\u{1b}[?1004l\u{1b}[<u\u{1b}[?1049l\u{1b}[?25h"
+
 @MainActor
 final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDelegate {
     /// Idle cost: blink's 600 ms timer, and vsync's CVDisplayLink, which ticks at the display rate per visible
@@ -42,6 +58,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     }
 
     let store: Store
+    let services = Services()
     let runtime: Runtime
     private(set) var theme: Theme
 
@@ -188,6 +205,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         sidebar.onRemove = { [unowned self] i in project(atRow: i).map(removeProject) }
         sidebar.onShowHidden = { [unowned self] on in setShowHidden(on) }
         sidebar.onToggleHidden = { [unowned self] i in toggleHidden(row: i) }
+        sidebar.onDashboard = { [unowned self] i in project(atRow: i).map(askDashboard) }
         tabBar.onSelect = { [unowned self] i in selectTab(i) }
         tabBar.onClose = { [unowned self] i in closeTab(at: i) }
         tabBar.onNew = { [unowned self] in newTab(nil) }
@@ -312,6 +330,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             m.onOpenLink = { [unowned self] url in open(url) }
             m.onFocus = { [unowned self] id in paneFocused(id) }
             v = m
+        case let .web(url):
+            let w = WebPaneView(id: spec.id, url: url, background: theme.color("background"))
+            w.onFocus = { [unowned self] id in paneFocused(id) }
+            w.onTitle = { [unowned self] in setNeedsChrome() }
+            v = w
         }
         views[spec.id] = v
         return v
@@ -368,6 +391,24 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         render(focus: focus)
     }
     private var lostAt: [PaneID: Date] = [:]
+
+    /// The pane's saved command was killed (its shell lives on): reset the modes it left on and type it again (an agent
+    /// resume with a note). Killed again within 30 s: a note instead, so a kill loop does not respawn forever.
+    private func rerunKilled(_ id: PaneID, exitCode: Int) -> Bool {
+        guard case let .terminal(_, launch?)? = spec(id)?.kind, let view = views[id] as? SurfaceView,
+              let line = killedCommandRerun(command: launch.command, exitCode: exitCode) else { return false }
+        if let last = killedAt[id], Date().timeIntervalSince(last) < 30 {
+            view.show(agentModesReset + "\r\n[Workbench: killed again; not restarting. Command: \(launch.command)]\r\n")
+            return false
+        }
+        killedAt[id] = Date()
+        NSLog("Workbench: command in pane \(id) died (exit \(exitCode)); running it again")
+        view.show(agentModesReset + "\r\n[Workbench: this pane's command was killed; running it again]\r\n")
+        view.type(line)
+        return true
+    }
+    private var killedAt: [PaneID: Date] = [:]
+
 
     /// A pane outside the visible tab, started without a renderer; no-op if it already exists or is gone.
     private func createHidden(_ id: PaneID) {
@@ -442,6 +483,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
 
     /// `focus` false: the keyboard stays where it is (a pane opened beside the one you are typing in).
     private func render(focus: Bool = true) {
+        services.sync(Services.wanted(store.layout))   // a dashboard opened or closed: its server follows
         if let f = findPane, !(activeTab?.root.contains(f) ?? false) { closeFind(refocus: false) }
         var rebuilt = false
         if let tab = activeTab {
@@ -500,6 +542,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         projectName.stringValue = project?.name ?? ""
         projectPath.stringValue = (project?.path as NSString?)?.abbreviatingWithTildeInPath ?? ""
         window.toolbar?.items.first { $0.itemIdentifier == .projectTitle }?.isHidden = project == nil || !sidebarItem.isCollapsed
+        window.toolbar?.items.first { $0.itemIdentifier == .dashboard }?.isHidden = project?.dashboard == nil
         fitTabBar()
     }
 
@@ -561,6 +604,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                 if let t = titles[id] { return t }
                 switch spec(id)?.kind {
                 case let .file(path)?: return (path as NSString).lastPathComponent
+                case .web?: return (views[id] as? WebPaneView)?.title ?? ""
                 case let .terminal(cwd, _)?: return Self.folderTitle(cwd)
                 case nil: return ""
                 }
@@ -733,8 +777,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             if active { progressing.insert(id) } else { progressing.remove(id) }
             if active, status[id] != .busy || background.contains(id) { setStatus(id, .busy) }   // a turn started: it, not the hold, decides when it ends
             else if !active, status[id] == .busy { setStatus(id, .done) }
-        case let .commandFinished(_, ns):
+        case let .commandFinished(code, ns):
             progressing.remove(id)
+            if rerunKilled(id, exitCode: code) { break }   // its saved launch stays: the command is back in a moment
             if ns > 5_000_000_000 {
                 setStatus(id, .done, body: "Command finished")
             } else if status[id] == .busy {
@@ -1098,6 +1143,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private func destroy(_ id: PaneID) {
         if let s = views[id] as? SurfaceView { s.close() }
         if let m = views[id] as? FilePaneView { m.close() }
+        (views[id] as? WebPaneView)?.close()
         views[id]?.removeFromSuperview()
         views[id] = nil
         status[id] = nil
@@ -1360,8 +1406,62 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         render()
     }
 
-    /// A sheet with one text field; `done` gets the trimmed text, never empty. `palette` opens the emoji picker too.
-    private func askText(_ title: String, _ message: String, initial: String, palette: Bool = false, done: @escaping (String) -> Void) {
+    /// One sheet: the page's web address, and optionally the command that serves it, which Services runs behind the
+    /// scenes while the dashboard is open. An empty address removes the dashboard (and its server).
+    private func askDashboard(_ p: Int) {
+        guard let window else { return }
+        let project = store.layout.projects[p]
+        let alert = NSAlert()
+        alert.messageText = "Dashboard for “\(project.name)”"
+        alert.informativeText = "The toolbar's chart button shows this page beside your terminals. Leave the address empty to remove the button."
+        let url = NSTextField(string: project.dashboard ?? "")
+        url.placeholderString = "http://127.0.0.1:8080/"
+        let command = NSTextField(string: project.dashboardCommand ?? "")
+        command.placeholderString = "Optional, e.g. npm run dev"
+        let note = NSTextField(wrappingLabelWithString: "Optional. Runs in the project's folder in the background while the dashboard is open, and restarts if it stops. Leave it empty if the page is served elsewhere.")
+        note.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        note.textColor = .secondaryLabelColor
+        let grid = NSGridView(views: [[NSTextField(labelWithString: "Web address:"), url],
+                                      [NSTextField(labelWithString: "Server command:"), command],
+                                      [NSGridCell.emptyContentView, note]])
+        grid.rowSpacing = 8
+        grid.column(at: 0).xPlacement = .trailing
+        grid.rowAlignment = .firstBaseline
+        grid.translatesAutoresizingMaskIntoConstraints = false
+        url.widthAnchor.constraint(equalToConstant: 260).isActive = true
+        note.preferredMaxLayoutWidth = 260
+        grid.frame.size = grid.fittingSize
+        alert.accessoryView = grid
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = url
+        alert.beginSheetModal(for: window) { [unowned self] response in
+            guard response == .alertFirstButtonReturn, let i = store.layout.projects.firstIndex(where: { $0.id == project.id }) else { return }
+            let address = url.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let server = command.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !address.isEmpty, !Self.isWebURL(address) { return NSSound.beep() }
+            store.layout.projects[i].dashboard = address.isEmpty ? nil : address
+            store.layout.projects[i].dashboardCommand = address.isEmpty || server.isEmpty ? nil : server
+            store.changed()
+            updateWindowTitle()
+            services.sync(Services.wanted(store.layout))
+        }
+    }
+
+    nonisolated static func isWebURL(_ s: String) -> Bool {
+        guard let u = URL(string: s), let scheme = u.scheme?.lowercased(), u.host?.isEmpty == false else { return false }
+        return scheme == "http" || scheme == "https"
+    }
+
+    /// The toolbar's chart button: shows the active project's dashboard beside the terminals, or closes it when the tab already has it.
+    @objc func toggleDashboard(_ sender: Any?) {
+        guard let p = activeProjectIndex, let url = store.layout.projects[p].dashboard else { return }
+        if let leaf = activeTab?.root.leaves.first(where: { $0.kind == .web(url: url) }) { return closePane(leaf.id, confirm: false) }
+        openWeb(url)
+    }
+
+    /// A sheet with one text field; `done` gets the trimmed text, never empty unless `allowEmpty`. `palette` opens the emoji picker too.
+    private func askText(_ title: String, _ message: String, initial: String, palette: Bool = false, allowEmpty: Bool = false, done: @escaping (String) -> Void) {
         guard let window else { return }
         let alert = NSAlert()
         alert.messageText = title
@@ -1374,7 +1474,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         alert.window.initialFirstResponder = field
         alert.beginSheetModal(for: window) { response in
             let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            if response == .alertFirstButtonReturn, !text.isEmpty { done(text) }
+            if response == .alertFirstButtonReturn, allowEmpty || !text.isEmpty { done(text) }
         }
         if palette { DispatchQueue.main.async { alert.window.makeFirstResponder(field); NSApp.orderFrontCharacterPalette(field) } }
     }
@@ -1388,6 +1488,12 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         var active = store.layout.activeProject
         if i < active { active -= 1 }
         store.layout.activeProject = active < 0 ? active : max(0, min(active, store.layout.projects.count - 1))
+    }
+
+    /// Shows `url` in a web pane: the active tab's pane already on it is focused, else one splits in right of the focused pane.
+    func openWeb(_ url: String, focus: Bool = true) {
+        if let leaf = activeTab?.root.leaves.first(where: { $0.kind == .web(url: url) }) { return focus ? self.focus(leaf.id) : () }
+        split(.horizontal, kind: .web(url: url), focus: focus)
     }
 
     /// Previews `path` as a file pane: the active tab's existing one is retargeted, else it splits in right of the focused
@@ -1413,6 +1519,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         for id in Array(views.keys) where !kept.contains(id) { destroy(id) }
         if !kept.isEmpty { Session.keepOnClose = true }
         for id in Array(views.keys) { destroy(id) }
+        services.closeAll()
     }
 
     private var captureScheduled = false
@@ -1472,6 +1579,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                     for leaf in tab.root.leaves {
                         var kind = "terminal"
                         if case .file = leaf.kind { kind = "file" }
+                        if case .web = leaf.kind { kind = "web" }
                         rows.append(["pane": leaf.id.uuidString, "project": project.name, "kind": kind,
                                      "title": tab.customTitle ?? titles[leaf.id] ?? tab.title,
                                      "status": "\(status[leaf.id] ?? .idle)"])
@@ -1500,6 +1608,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             addProject(at: URL(fileURLWithPath: path))
             return "{}"
         case "open":
+            if let url = msg["url"] {
+                guard let scheme = URL(string: url)?.scheme?.lowercased(), ["http", "https"].contains(scheme) else { return #"{"error":"not an http(s) url"}"# }
+                openWeb(url, focus: keyboardInPanes)
+                return "{}"
+            }
             guard let path = msg["path"] else { return #"{"error":"no path"}"# }
             openFile(path, focus: keyboardInPanes)
             return "{}"
@@ -1520,6 +1633,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             return #"{"state":"\#(Speaker.shared.state)","speed":"\#(store.layout.readAloudSpeed ?? 1)","pitch":"\#(store.layout.readAloudPitch ?? 1)","cents":"\#(Int((Speaker.shared.playbackCents ?? 0).rounded()))"}"#
         case "settings":   // test harness: open Settings at `tab`; replies with its window number
             return #"{"window":\#((NSApp.delegate as? AppDelegate)?.openSettings(tab: msg["tab"] ?? "") ?? 0)}"#
+        case "ask-dashboard":   // test harness: the active project's Dashboard… sheet; replies with the window number
+            if let p = activeProjectIndex { askDashboard(p) }
+            return #"{"window":\#(window?.windowNumber ?? 0)}"#
         case "speak-tone":   // test harness: what Settings > Read Aloud > Tone does
             applyReadAloudTone(Double(msg["pitch"] ?? "") ?? 1)
             return "{}"
@@ -1899,6 +2015,7 @@ extension WorkspaceController {
         switch spec.kind {
         case let .terminal(cwd, _): folderTitle(cwd)
         case let .file(path): (path as NSString).lastPathComponent
+        case let .web(url): URL(string: url)?.host ?? url
         }
     }
 
@@ -1923,6 +2040,7 @@ extension NSToolbarItem.Identifier {
     static let addProject = NSToolbarItem.Identifier("addProject")
     static let newScratch = NSToolbarItem.Identifier("newScratch")
     static let projectTitle = NSToolbarItem.Identifier("projectTitle")
+    static let dashboard = NSToolbarItem.Identifier("dashboard")
 }
 
 /// Unified toolbar: sidebar toggle over the sidebar, the tab capsule over the terminals, project name/path on its right (sidebar collapsed only).
@@ -1940,7 +2058,7 @@ extension WorkspaceController: NSToolbarDelegate {
         return l
     }
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .addProject, .newScratch, .sidebarTrackingSeparator, .tabs, .flexibleSpace, .projectTitle]
+        [.toggleSidebar, .addProject, .newScratch, .sidebarTrackingSeparator, .tabs, .flexibleSpace, .projectTitle, .dashboard]
     }
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(toolbar) }
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier, willBeInsertedIntoToolbar: Bool) -> NSToolbarItem? {
@@ -1962,12 +2080,31 @@ extension WorkspaceController: NSToolbarDelegate {
             scratchItem = item
             return item
         }
+        if id == .dashboard {
+            item.label = "Dashboard"
+            item.toolTip = "Show or hide this project's dashboard"
+            item.image = NSImage(systemSymbolName: "chart.bar.xaxis", accessibilityDescription: "Dashboard")
+            item.target = self
+            item.action = #selector(toggleDashboard(_:))
+            item.isHidden = true   // shown by updateWindowTitle for a project that has one
+            return item
+        }
         if id == .projectTitle {
             let stack = NSStackView(views: [projectName, projectPath])
             stack.orientation = .vertical
             stack.alignment = .trailing
             stack.spacing = 0
-            item.view = stack
+            stack.translatesAutoresizingMaskIntoConstraints = false
+            // The toolbar ignores a stack's edgeInsets; a container's constraints keep the title off the window edge / chart button.
+            let box = NSView()
+            box.addSubview(stack)
+            NSLayoutConstraint.activate([
+                stack.leadingAnchor.constraint(equalTo: box.leadingAnchor),
+                stack.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -14),
+                stack.topAnchor.constraint(equalTo: box.topAnchor),
+                stack.bottomAnchor.constraint(equalTo: box.bottomAnchor),
+            ])
+            item.view = box
             item.isBordered = false
             return item
         }
@@ -2006,4 +2143,14 @@ func controllerSelfCheck() {
     seen.insert(c)   // c's own command ended without an agent: it loses its launch
     recordAgents([:], in: &layout, seen: &seen)
     assert(launch(b) == nil && launch(c) == nil && seen.isEmpty)
+
+    // killedCommandRerun: only a killed or crashed command comes back; an agent resume gets the note, quoted for the shell.
+    let line = killedCommandRerun(command: "claude --resume A", exitCode: 137)
+    assert(line?.hasPrefix("claude --resume A 'Interruption notice:") == true && line?.hasSuffix("'\n") == true)
+    assert(line?.dropFirst("claude --resume A '".count).dropLast(2).contains("'") == false)
+    assert(killedCommandRerun(command: "codex resume T", exitCode: 139) != nil)
+    for code in [0, 1, 130, 143, 129] { assert(killedCommandRerun(command: "claude --resume A", exitCode: code) == nil) }
+    assert(killedCommandRerun(command: "npm run dev", exitCode: 137) == "npm run dev\n")
+
+
 }
