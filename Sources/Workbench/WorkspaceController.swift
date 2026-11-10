@@ -227,6 +227,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         sidebar.rail.onDelete = { [unowned self] i in deleteWorkspace(i) }
         tabBar.onRename = { [unowned self] i, name in renameTab(i, name) }
         tabBar.onMove = { [unowned self] from, to in moveTab(from, to) }
+        tabBar.onWindowChange = { [weak self] in self?.fitTabBar() }
         tree.onRatiosChanged = { [unowned self] newRoot in
             mutateActiveTab { $0.root = $0.root.withRatios(from: newRoot) }
         }
@@ -549,14 +550,16 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     /// The tab bar may run from where the toolbar put it to the end of the terminals' column, less the project title
     /// when that shows; past that its tabs scroll.
     private func fitTabBar() {
-        guard tabBar.window != nil else { tabBar.maxWidth = TabBarView.startWidth; return }   // overflowed: come back, then measure
+        guard tabBar.window === window else { tabBar.maxWidth = TabBarView.startWidth; return }   // overflowed: come back, then measure (onWindowChange)
         // The toolbar slot's leading edge, not the bar's: a bar wider than its stale slot is centered on it, left of it.
         guard let slot = tabBar.superview else { return }
         let start = slot.convert(NSPoint.zero, to: nil).x
         let end = mainPane.convert(NSPoint(x: mainPane.bounds.maxX, y: 0), to: nil).x
         let item = tabBar.window?.toolbar?.items.first { $0.itemIdentifier == .projectTitle }
         let title = item.flatMap { $0.isHidden ? nil : $0.view.map { $0.fittingSize.width + 16 } } ?? 0
-        tabBar.maxWidth = max(0, end - start - title - 24)
+        // shortcut: the dashboard button has no view to measure; 56 = its glass circle plus toolbar spacing. Measure it if that changes.
+        let dashboard = tabBar.window?.toolbar?.items.first { $0.itemIdentifier == .dashboard }?.isHidden == false ? 56.0 : 0
+        tabBar.maxWidth = max(0, end - start - title - dashboard - 24)
     }
 
     private var chromePending = false
@@ -1653,6 +1656,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             guard responds(to: sel) else { return #"{"error":"unknown action"}"# }
             perform(sel, with: nil)
             return "{}"
+        case "tabbar":   // test harness: the tab bar's geometry; `width` resizes the window first
+            if let w = msg["width"].flatMap(Double.init), let window { var f = window.frame; f.size.width = w; window.setFrame(f, display: true) }
+            return #"{"inWindow":"\#(tabBar.window === window)","max":"\#(tabBar.maxWidth)","frame":"\#(tabBar.frame.width)","main":"\#(mainPane.frame.width)","win":"\#(window?.frame.width ?? 0)","num":"\#(window?.windowNumber ?? 0)","geo":"\#(tabBar.geometry)"}"#
         case "responder":   // test harness: the window's first responder class, and whether it is in the split tree
             return #"{"responder":"\#(window?.firstResponder.map { String(describing: type(of: $0)) } ?? "")","inPanes":"\#(keyboardInPanes)"}"#
         case "rclick":   // test harness: a real right-click event at the centre of a pane, through window.sendEvent

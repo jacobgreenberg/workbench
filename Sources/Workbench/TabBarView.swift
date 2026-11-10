@@ -255,30 +255,33 @@ private final class TabScrollView: NSScrollView {
     var onNew: (() -> Void)?
     var onRename: ((Int, String?) -> Void)?
     var onMove: ((Int, Int) -> Void)?   // from, to
+    var onWindowChange: (() -> Void)?   // in or out of the toolbar's overflow menu: the owner re-measures maxWidth
     /// The room the toolbar has for the bar, set by the owner as the window resizes (the toolbar itself only ever gives a
     /// view item its minimum, its flexible spaces take the rest).
     /// Starts modest: a bar wider than the toolbar's room drops into its overflow menu, out of the window, where the
     /// owner can no longer measure it.
-    static let startWidth: CGFloat = 400
+    static let startWidth: CGFloat = 240
     var maxWidth: CGFloat = startWidth { didSet { if maxWidth != oldValue { fit() } } }
     private lazy var barWidth = widthAnchor.constraint(equalToConstant: 0)
 
     private let stack = NSStackView()
     private let plus = HandButton.glass("plus", "New Tab", .large)
+    private let more = HandButton.glass("chevron.down", "All Tabs", .large)   // shown while the tabs overflow: a menu of every tab
     private let glass = NSGlassEffectView()
     private let scroll = TabScrollView()   // the tabs, scrolling sideways once they outgrow the bar
     private let indicator = NSView()   // the selected pill, in the theme's foreground at 15%; one view, pinned to the selected tab, slides between tabs
     private var indicatorPins: [NSLayoutConstraint] = []
-    private var plusAfterTabs: NSLayoutConstraint!
-    private var plusAlone: NSLayoutConstraint!   // no tabs: the glass capsule is hidden, so the + sits at the leading edge
+    /// The capsule ends this far before the +: past the menu button while the tabs overflow. Only its constant changes, and it
+    /// is the one non-required constraint, so no toggle can ever conflict with the pins and knock one out.
+    private var glassEnd: NSLayoutConstraint!
     private var buttons: [TabButton] = []
     private var selectedIndex = -1
     private let reorder = Reorder()
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        plusAfterTabs = plus.leadingAnchor.constraint(equalTo: glass.trailingAnchor, constant: 8)
-        plusAlone = plus.leadingAnchor.constraint(equalTo: leadingAnchor)
+        glassEnd = plus.leadingAnchor.constraint(equalTo: glass.trailingAnchor, constant: 8)
+        glassEnd.priority = .init(999)
         wantsLayer = true
         stack.orientation = .horizontal
         stack.spacing = 2
@@ -290,10 +293,13 @@ private final class TabScrollView: NSScrollView {
         indicator.layer?.cornerRadius = Self.pill / 2
         indicator.isHidden = true
         indicator.translatesAutoresizingMaskIntoConstraints = false
-        plus.setContentHuggingPriority(.required, for: .horizontal)   // the glass takes the slack: it has no width of its own
+        for b in [plus, more] { b.setContentHuggingPriority(.required, for: .horizontal) }   // the glass takes the slack: it has no width of its own
         plus.target = self
         plus.action = #selector(newTapped)
-        for v in [glass, stack, plus] as [NSView] {
+        more.target = self
+        more.action = #selector(moreTapped)
+        more.isHidden = true
+        for v in [glass, stack, more, plus] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
         }
         setContentHuggingPriority(.required, for: .horizontal)
@@ -308,6 +314,7 @@ private final class TabScrollView: NSScrollView {
         scroll.documentView = inner
         glass.contentView = scroll
         addSubview(glass)
+        addSubview(more)
         addSubview(plus)
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: Self.height),
@@ -322,9 +329,11 @@ private final class TabScrollView: NSScrollView {
             glass.leadingAnchor.constraint(equalTo: leadingAnchor),
             glass.topAnchor.constraint(equalTo: topAnchor),
             glass.bottomAnchor.constraint(equalTo: bottomAnchor),
-            plusAfterTabs,
+            glassEnd,
             plus.centerYAnchor.constraint(equalTo: centerYAnchor),
             plus.trailingAnchor.constraint(equalTo: trailingAnchor),
+            more.centerYAnchor.constraint(equalTo: centerYAnchor),
+            more.trailingAnchor.constraint(equalTo: plus.leadingAnchor, constant: -8),
         ])
     }
 
@@ -333,9 +342,26 @@ private final class TabScrollView: NSScrollView {
     override var acceptsFirstResponder: Bool { false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     @objc private func newTapped() { onNew?() }
+    @objc private func moreTapped() {
+        let menu = NSMenu()
+        for (i, item) in (last?.items ?? []).enumerated() {
+            let m = NSMenuItem(title: item.title, action: #selector(menuSelect(_:)), keyEquivalent: "")
+            m.target = self
+            m.tag = i
+            m.state = i == selectedIndex ? .on : .off
+            menu.addItem(m)
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: more.bounds.maxY + 4), in: more)
+    }
+    @objc private func menuSelect(_ m: NSMenuItem) { onSelect?(m.tag) }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        DispatchQueue.main.async { [weak self] in self?.onWindowChange?() }   // after the toolbar has placed the slot
+    }
 
     #if DEBUG
     func beginRename(_ i: Int) { buttons[i].beginRename() }
+    var geometry: String { "glass=\(glass.frame.width) more=\(more.isHidden ? -1 : more.frame.minX) plus=\(plus.frame.minX) bar=\(frame.width) want=\(barWidth.constant)" }
 
     func tabCenter(_ i: Int) -> NSPoint? {
         buttons.indices.contains(i) ? buttons[i].convert(NSPoint(x: buttons[i].bounds.midX, y: buttons[i].bounds.midY), to: nil) : nil
@@ -349,7 +375,10 @@ private final class TabScrollView: NSScrollView {
     private func fit() {
         let tabs = buttons.reduce(CGFloat(8)) { $0 + $1.preferredWidth + 2 } - (buttons.isEmpty ? 0 : 2)
         let w = (buttons.isEmpty ? 0 : tabs + 8) + plus.fittingSize.width
-        barWidth.constant = max(min(w, maxWidth), plus.fittingSize.width)
+        more.isHidden = buttons.isEmpty || w <= maxWidth
+        glassEnd.constant = buttons.isEmpty ? 0 : more.isHidden ? 8 : 8 + more.fittingSize.width + 8
+        let floor = plus.fittingSize.width + (more.isHidden ? 0 : more.fittingSize.width + 8 + 60)   // overflowing: keep a sliver of the tabs beside the buttons
+        barWidth.constant = max(min(w, maxWidth), floor)
         barWidth.isActive = true
         invalidateIntrinsicContentSize()
     }
@@ -439,8 +468,6 @@ private final class TabScrollView: NSScrollView {
         while buttons.count < newItems.count { let b = makeButton(); buttons.append(b); stack.addArrangedSubview(b) }
         while buttons.count > newItems.count { buttons.removeLast().removeFromSuperview() }
         glass.isHidden = buttons.isEmpty
-        plusAfterTabs.isActive = !buttons.isEmpty
-        plusAlone.isActive = buttons.isEmpty
         let moved = sameTabs && selected != selectedIndex
         selectedIndex = selected
         indicator.layer?.backgroundColor = theme.color("foreground").withAlphaComponent(0.15).cgColor
