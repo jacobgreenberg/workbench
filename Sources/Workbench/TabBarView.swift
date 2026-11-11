@@ -277,10 +277,13 @@ private final class TabScrollView: NSScrollView {
     private var buttons: [TabButton] = []
     private var selectedIndex = -1
     private let reorder = Reorder()
+    /// The parked bar (right side of the toolbar): tabs set aside; no +.
+    let parked: Bool
 
-    override init(frame: NSRect) {
+    init(frame: NSRect = .zero, parked: Bool = false) {
+        self.parked = parked
         super.init(frame: frame)
-        glassEnd = plus.leadingAnchor.constraint(equalTo: glass.trailingAnchor, constant: 8)
+        glassEnd = plus.leadingAnchor.constraint(equalTo: glass.trailingAnchor, constant: parked ? 0 : 8)
         glassEnd.priority = .init(999)
         wantsLayer = true
         stack.orientation = .horizontal
@@ -299,6 +302,7 @@ private final class TabScrollView: NSScrollView {
         more.target = self
         more.action = #selector(moreTapped)
         more.isHidden = true
+        plus.isHidden = parked
         for v in [glass, stack, more, plus] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
         }
@@ -335,6 +339,7 @@ private final class TabScrollView: NSScrollView {
             more.centerYAnchor.constraint(equalTo: centerYAnchor),
             more.trailingAnchor.constraint(equalTo: plus.leadingAnchor, constant: -8),
         ])
+        if parked { plus.widthAnchor.constraint(equalToConstant: 0).isActive = true }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -372,12 +377,21 @@ private final class TabScrollView: NSScrollView {
     /// toolbar sizes a view item to its minimum) and the intrinsic size (whose invalidation makes the toolbar re-measure).
     override var intrinsicContentSize: NSSize { NSSize(width: barWidth.constant, height: Self.height) }
 
+    /// The width these tabs want, unscrolled.
+    func naturalWidth(titles: [String]) -> CGFloat { naturalWidth(titles.map(TabButton.width(for:))) }
+
+    private func naturalWidth(_ widths: [CGFloat]) -> CGFloat {
+        let tabs = widths.reduce(CGFloat(8)) { $0 + $1 + 2 } - (widths.isEmpty ? 0 : 2)
+        return (widths.isEmpty ? 0 : tabs + 8) + (parked ? 0 : plus.fittingSize.width)
+    }
+
     private func fit() {
-        let tabs = buttons.reduce(CGFloat(8)) { $0 + $1.preferredWidth + 2 } - (buttons.isEmpty ? 0 : 2)
-        let w = (buttons.isEmpty ? 0 : tabs + 8) + plus.fittingSize.width
+        let plusWidth = parked ? 0 : plus.fittingSize.width
+        let w = naturalWidth(buttons.map(\.preferredWidth))
         more.isHidden = buttons.isEmpty || w <= maxWidth
-        glassEnd.constant = buttons.isEmpty ? 0 : more.isHidden ? 8 : 8 + more.fittingSize.width + 8
-        let floor = plus.fittingSize.width + (more.isHidden ? 0 : more.fittingSize.width + 8 + 60)   // overflowing: keep a sliver of the tabs beside the buttons
+        let gap: CGFloat = parked ? 0 : 8
+        glassEnd.constant = buttons.isEmpty ? 0 : more.isHidden ? gap : gap + more.fittingSize.width + 8
+        let floor = plusWidth + (more.isHidden ? 0 : more.fittingSize.width + 8 + 60)   // overflowing: keep a sliver of the tabs beside the buttons
         barWidth.constant = max(min(w, maxWidth), floor)
         barWidth.isActive = true
         invalidateIntrinsicContentSize()
@@ -448,6 +462,12 @@ private final class TabScrollView: NSScrollView {
             if done { DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.endLift() } }
         }
         return b
+    }
+
+    /// The tab under a window point, and its view (to pop a menu from).
+    func tab(at windowPoint: NSPoint) -> (Int, NSView)? {
+        guard window != nil, !isHiddenOrHasHiddenAncestor else { return nil }
+        return buttons.enumerated().first { $1.bounds.contains($1.convert(windowPoint, from: nil)) }.map { ($0, $1) }
     }
 
     private var last: (items: [TabItem], selected: Int, theme: String)?

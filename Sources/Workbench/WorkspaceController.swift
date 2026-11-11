@@ -84,7 +84,9 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
 
     private let sidebar = SidebarView(frame: .zero)
     private let tabBar = TabBarView(frame: .zero)
-    private let projectName = WorkspaceController.titleLabel(bold: true), projectPath = WorkspaceController.titleLabel(bold: false)
+    private let parkedBar = TabBarView(parked: true)   // tabs set aside, right side of the toolbar
+    private weak var parkedItem: NSToolbarItem?
+    private var tabsMerged = false   // the window is too narrow for the side group: its tabs show in the main bar (fitTabBar)
     private let content = NSView()
     private let findBar = FindBar(frame: .zero)
     private let emptyLabel = NSTextField(labelWithString: "")
@@ -128,9 +130,11 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         wireCallbacks()
         paintTheme()
         restore()
-        mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.otherMouseDown, .otherMouseUp]) { [weak self] event in
+        mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.otherMouseDown, .otherMouseUp, .rightMouseDown]) { [weak self] event in
             nonisolated(unsafe) let event = event
             let swallow = MainActor.assumeIsolated {
+                // A tab's menu: the toolbar takes a right-click before its views do (and shows its own Icon/Text menu).
+                if event.type == .rightMouseDown { return self?.tabMenu(event) ?? false }
                 guard event.buttonNumber == 3 || event.buttonNumber == 4, event.window === self?.window else { return false }
                 if event.type == .otherMouseDown { if event.buttonNumber == 3 { self?.goBack(nil) } else { self?.goForward(nil) } }
                 return true
@@ -206,8 +210,15 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         sidebar.onShowHidden = { [unowned self] on in setShowHidden(on) }
         sidebar.onToggleHidden = { [unowned self] i in toggleHidden(row: i) }
         sidebar.onDashboard = { [unowned self] i in project(atRow: i).map(askDashboard) }
-        tabBar.onSelect = { [unowned self] i in selectTab(i) }
-        tabBar.onClose = { [unowned self] i in closeTab(at: i) }
+        for bar in [tabBar, parkedBar] {
+            // A bar's position → the tab's index in the project (each bar shows only its own group).
+            let at = { [unowned self, unowned bar] (i: Int) -> Int in let g = tabGroup(parked: bar.parked); return g.indices.contains(i) ? g[i] : -1 }
+            bar.onSelect = { [unowned self] in selectTab(at($0)) }
+            bar.onClose = { [unowned self] in closeTab(at: at($0)) }
+            bar.onRename = { [unowned self] in renameTab(at($0), $1) }
+            bar.onMove = { [unowned self] in moveTab(at($0), at($1)) }
+            bar.onWindowChange = { [weak self] in self?.fitTabBar() }
+        }
         tabBar.onNew = { [unowned self] in newTab(nil) }
         sidebar.onRename = { [unowned self] i, name in renameProject(project(atRow: i) ?? -1, name) }
         sidebar.onMove = { [unowned self] from, to in moveProject(from, to) }
@@ -225,9 +236,6 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         }
         sidebar.rail.onClearIcon = { [unowned self] i in setWorkspaceIcon(i, image: nil, emoji: nil) }
         sidebar.rail.onDelete = { [unowned self] i in deleteWorkspace(i) }
-        tabBar.onRename = { [unowned self] i, name in renameTab(i, name) }
-        tabBar.onMove = { [unowned self] from, to in moveTab(from, to) }
-        tabBar.onWindowChange = { [weak self] in self?.fitTabBar() }
         tree.onRatiosChanged = { [unowned self] newRoot in
             mutateActiveTab { $0.root = $0.root.withRatios(from: newRoot) }
         }
@@ -535,31 +543,37 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         render()
     }
 
-    /// With the sidebar collapsed the `.projectTitle` toolbar item (right side) names the active project and its path; expanded, the sidebar does. The window title itself stays hidden.
     private func updateWindowTitle() {
         guard let window else { return }
         let project = activeProjectIndex.map { store.layout.projects[$0] }
         window.title = project?.name ?? ""
-        projectName.stringValue = project?.name ?? ""
-        projectPath.stringValue = (project?.path as NSString?)?.abbreviatingWithTildeInPath ?? ""
-        window.toolbar?.items.first { $0.itemIdentifier == .projectTitle }?.isHidden = project == nil || !sidebarItem.isCollapsed
         window.toolbar?.items.first { $0.itemIdentifier == .dashboard }?.isHidden = project?.dashboard == nil
         fitTabBar()
     }
 
-    /// The tab bar may run from where the toolbar put it to the end of the terminals' column, less the project title
-    /// when that shows; past that its tabs scroll.
+    /// The tab bar may run from where the toolbar put it to the end of the terminals' column; past that its tabs scroll.
     private func fitTabBar() {
         guard tabBar.window === window else { tabBar.maxWidth = TabBarView.startWidth; return }   // overflowed: come back, then measure (onWindowChange)
         // The toolbar slot's leading edge, not the bar's: a bar wider than its stale slot is centered on it, left of it.
         guard let slot = tabBar.superview else { return }
         let start = slot.convert(NSPoint.zero, to: nil).x
         let end = mainPane.convert(NSPoint(x: mainPane.bounds.maxX, y: 0), to: nil).x
-        let item = tabBar.window?.toolbar?.items.first { $0.itemIdentifier == .projectTitle }
-        let title = item.flatMap { $0.isHidden ? nil : $0.view.map { $0.fittingSize.width + 16 } } ?? 0
         // shortcut: the dashboard button has no view to measure; 56 = its glass circle plus toolbar spacing. Measure it if that changes.
         let dashboard = tabBar.window?.toolbar?.items.first { $0.itemIdentifier == .dashboard }?.isHidden == false ? 56.0 : 0
-        tabBar.maxWidth = max(0, end - start - title - dashboard - 24)
+        // Too narrow for both groups side by side: the side tabs join the main bar (and its overflow menu) until there is room.
+        let room = max(0, end - start - dashboard - 24)
+        if let p = activeProjectIndex {
+            let tabs = store.layout.projects[p].tabs
+            let side = tabs.filter { $0.parked == true }.map(title(of:)), main = tabs.filter { $0.parked != true }.map(title(of:))
+            let merged = !side.isEmpty && tabBar.naturalWidth(titles: main) + parkedBar.naturalWidth(titles: side) + 16 > room
+            if merged != tabsMerged { tabsMerged = merged; setNeedsChrome() }
+        }
+        var parked: CGFloat = 0
+        if parkedItem?.isHidden == false, !tabsMerged {
+            parkedBar.maxWidth = max(0, (end - start - dashboard) * 0.4)
+            parked = parkedBar.intrinsicContentSize.width + 16
+        }
+        tabBar.maxWidth = max(0, room - parked)
     }
 
     private var chromePending = false
@@ -597,7 +611,12 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
         scratchItem?.badge = scratchTabs > 0 ? .count(scratchTabs) : nil
         if let p = activeProjectIndex {
             let project = projects[p]
-            tabBar.update(items: tabItems(project), selected: project.activeTab, theme: theme)
+            let items = tabItems(project)
+            let main = tabGroup(parked: false), side = tabGroup(parked: true)
+            tabBar.update(items: main.map { items[$0] }, selected: main.firstIndex(of: project.activeTab) ?? -1, theme: theme)
+            parkedBar.update(items: side.map { items[$0] }, selected: side.firstIndex(of: project.activeTab) ?? -1, theme: theme)
+            parkedItem?.isHidden = side.isEmpty
+            fitTabBar()
             let speechState = Speaker.shared.state, speaking = speakingPane
             tree.updateHeaders(focused: focusedPane, theme: theme, status: { [status] in status[$0] ?? .idle }, speech: { id in
                 guard case .terminal? = spec(id)?.kind else { return nil }
@@ -614,6 +633,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             }
         } else {
             tabBar.update(items: [], selected: 0, theme: theme)
+            parkedItem?.isHidden = true
         }
         let badge = status.values.filter { $0 == .done || $0 == .attention }.count
         let label = badge > 0 ? "\(badge)" : nil
@@ -632,6 +652,44 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     /// A project's tabs as the tab bar and the sidebar show them: title, and the busiest status among their panes.
     private func tabItems(_ p: Project) -> [TabItem] {
         p.tabs.map { TabItem(title: title(of: $0), status: $0.root.leaves.map { status[$0.id] ?? .idle }.max() ?? .idle, id: $0.id) }
+    }
+
+    /// The active project's tab indices in the main bar or the parked one, in order.
+    private func tabGroup(parked: Bool) -> [Int] {
+        guard let p = activeProjectIndex else { return [] }
+        let tabs = store.layout.projects[p].tabs
+        return tabs.indices.filter { tabsMerged ? !parked : (tabs[$0].parked == true) == parked }
+    }
+
+    private func tabMenu(_ event: NSEvent) -> Bool {
+        guard event.window === window else { return false }
+        for bar in [tabBar, parkedBar] {
+            guard let (i, view) = bar.tab(at: event.locationInWindow) else { continue }
+            let g = tabGroup(parked: bar.parked)
+            guard g.indices.contains(i), let menu = tabMenu(g[i]) else { return false }
+            NSMenu.popUpContextMenu(menu, with: event, for: view)
+            return true
+        }
+        return false
+    }
+
+    private func tabMenu(_ t: Int) -> NSMenu? {
+        guard let p = activeProjectIndex, store.layout.projects[p].tabs.indices.contains(t) else { return nil }
+        let tab = store.layout.projects[p].tabs[t]
+        let menu = NSMenu()
+        let item = NSMenuItem(title: tab.parked == true ? "Move to Main Tabs" : "Move to Side Tabs", action: #selector(toggleParked(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = tab.id
+        menu.addItem(item)
+        return menu
+    }
+
+    @objc private func toggleParked(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID, let p = activeProjectIndex,
+              let t = store.layout.projects[p].tabs.firstIndex(where: { $0.id == id }) else { return }
+        store.layout.projects[p].tabs[t].parked = store.layout.projects[p].tabs[t].parked == true ? nil : true
+        store.changed()
+        render()
     }
 
     private func title(of tab: Tab) -> String {
@@ -2043,28 +2101,16 @@ extension WorkspaceController: NSMenuItemValidation {
 
 extension NSToolbarItem.Identifier {
     static let tabs = NSToolbarItem.Identifier("tabs")
+    static let parkedTabs = NSToolbarItem.Identifier("parkedTabs")
     static let addProject = NSToolbarItem.Identifier("addProject")
     static let newScratch = NSToolbarItem.Identifier("newScratch")
-    static let projectTitle = NSToolbarItem.Identifier("projectTitle")
     static let dashboard = NSToolbarItem.Identifier("dashboard")
 }
 
-/// Unified toolbar: sidebar toggle over the sidebar, the tab capsule over the terminals, project name/path on its right (sidebar collapsed only).
+/// Unified toolbar: sidebar toggle over the sidebar, the tab capsule over the terminals.
 extension WorkspaceController: NSToolbarDelegate {
-    /// Right-aligned single-line label styled like the native window title (bold 13) / subtitle (11, secondary).
-    static func titleLabel(bold: Bool) -> NSTextField {
-        let l = NSTextField(labelWithString: "")
-        l.font = bold ? .boldSystemFont(ofSize: 13) : .systemFont(ofSize: 11)
-        l.textColor = bold ? .labelColor : .secondaryLabelColor
-        l.alignment = .right
-        l.isBordered = false
-        l.lineBreakMode = bold ? .byTruncatingTail : .byTruncatingMiddle
-        l.maximumNumberOfLines = 1
-        l.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        return l
-    }
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .addProject, .newScratch, .sidebarTrackingSeparator, .tabs, .flexibleSpace, .projectTitle, .dashboard]
+        [.toggleSidebar, .addProject, .newScratch, .sidebarTrackingSeparator, .tabs, .flexibleSpace, .parkedTabs, .dashboard]
     }
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(toolbar) }
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier, willBeInsertedIntoToolbar: Bool) -> NSToolbarItem? {
@@ -2095,23 +2141,11 @@ extension WorkspaceController: NSToolbarDelegate {
             item.isHidden = true   // shown by updateWindowTitle for a project that has one
             return item
         }
-        if id == .projectTitle {
-            let stack = NSStackView(views: [projectName, projectPath])
-            stack.orientation = .vertical
-            stack.alignment = .trailing
-            stack.spacing = 0
-            stack.translatesAutoresizingMaskIntoConstraints = false
-            // The toolbar ignores a stack's edgeInsets; a container's constraints keep the title off the window edge / chart button.
-            let box = NSView()
-            box.addSubview(stack)
-            NSLayoutConstraint.activate([
-                stack.leadingAnchor.constraint(equalTo: box.leadingAnchor),
-                stack.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -14),
-                stack.topAnchor.constraint(equalTo: box.topAnchor),
-                stack.bottomAnchor.constraint(equalTo: box.bottomAnchor),
-            ])
-            item.view = box
+        if id == .parkedTabs {
+            item.view = parkedBar
             item.isBordered = false
+            item.isHidden = true   // shown by updateChrome while a tab is parked
+            parkedItem = item
             return item
         }
         guard id == .tabs else { return nil }

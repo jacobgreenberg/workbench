@@ -113,6 +113,7 @@ struct Tab: Codable, Identifiable, Equatable, Sendable {
     var root: SplitNode
     var focused: PaneID?
     var customTitle: String? = nil   // set by renaming the tab; wins over the terminal's title
+    var parked: Bool? = nil   // set aside in the right-hand group (right side of the toolbar, left of the dashboard button); nil = the main tab bar
 }
 
 struct Project: Codable, Identifiable, Equatable, Sendable {
